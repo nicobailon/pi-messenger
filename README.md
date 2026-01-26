@@ -9,33 +9,41 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue?style=for-the-badge)]()
 
-> ⚠️ **Beta** — This extension is still in active development and not fully tested. More updates coming soon.
+> ⚠️ **Beta** - Core messaging and file reservations are stable. **Crew task orchestration** (plan/work/review) is newer and not fully tested yet. Please [open an issue](https://github.com/nicobailon/pi-messenger/issues) if you encounter problems.
 
-```typescript
-pi_messenger({ join: true })
-pi_messenger({ action: "plan" })           // Auto-discover PRD
-pi_messenger({ action: "work", autonomous: true })  // Run until done
-```
+Pi-messenger adds a `pi_messenger` tool that **agents use** for coordination. You don't type these commands - you ask your agent to do things, and it calls `pi_messenger` behind the scenes.
 
 ## Quick Start
 
+### Multi-Agent Coordination
+
+Once joined (manually or via auto-join config), agents can coordinate:
+
 ```typescript
-// Join the agent chat
-pi_messenger({ join: true })
-// → "Joined as SwiftRaven in backend on main. 2 peers active."
+pi_messenger({ action: "reserve", paths: ["src/auth/"], reason: "Refactoring" })
+// → Reserved src/auth/ - other agents will be blocked
 
-// See who's online
-pi_messenger({ list: true })
+// ... does the work ...
 
-// Send a message (wakes recipient immediately)
-pi_messenger({ to: "GoldFalcon", message: "Taking the auth routes" })
-
-// Reserve files (blocks other agents)
-pi_messenger({ reserve: ["src/auth/"], reason: "Refactoring" })
-
-// Release when done
-pi_messenger({ release: true })
+pi_messenger({ action: "release" })
+// → Released all reservations
 ```
+
+> **Tip:** Set `autoRegister: true` in your config to auto-join on startup. Otherwise, agents join with `pi_messenger({ action: "join" })`.
+
+### Crew Task Orchestration
+
+Ask your agent to plan and execute from a PRD:
+
+```typescript
+pi_messenger({ action: "plan" })
+// → Scouts analyze codebase, gap-analyst creates tasks
+
+pi_messenger({ action: "work", autonomous: true })
+// → Workers execute tasks in waves until done
+```
+
+> **Note:** Crew agents (scouts, workers, reviewers) automatically join the mesh as their first action.
 
 ## Install
 
@@ -53,36 +61,38 @@ msg: SwiftRaven (2 peers) ●3
 
 ## Features
 
-**Discovery** — Agents register with memorable names (SwiftRaven, IronKnight). See who's active, what model they're using, which git branch they're on.
+**Discovery** - Agents register with memorable names (SwiftRaven, IronKnight). See who's active, what model they're using, which git branch they're on.
 
-**Messaging** — Send messages between agents. Recipients wake up immediately and see the message as a steering prompt. Great for handoffs and coordination.
+**Messaging** - Send messages between agents. Recipients wake up immediately and see the message as a steering prompt. Great for handoffs and coordination.
 
-**File Reservations** — Claim files or directories. Other agents get blocked with a clear message telling them who to coordinate with. Auto-releases on exit.
+**File Reservations** - Claim files or directories. Other agents get blocked with a clear message telling them who to coordinate with. Auto-releases on exit.
 
-**Swarm Coordination** — Multiple agents work on the same spec file. Claim tasks atomically, mark them complete, see who's doing what.
+**Swarm Coordination** - Multiple agents work on the same spec file. Claim tasks atomically, mark them complete, see who's doing what.
 
 ## Crew: Task Orchestration
 
-Crew provides multi-agent task orchestration with a simplified PRD-based workflow:
+Crew provides multi-agent task orchestration with a simplified PRD-based workflow.
+
+### Basic Workflow
+
+1. **Plan** - Scouts analyze your codebase and PRD, gap-analyst creates tasks
+2. **Work** - Workers implement tasks in parallel waves
+3. **Review** - Reviewer checks each implementation
 
 ```typescript
 // Plan from your PRD (auto-discovers PRD.md, SPEC.md, etc.)
 pi_messenger({ action: "plan" })
-// → Scouts analyze codebase
-// → Gap-analyst creates task breakdown
-// → Tasks: task-1, task-2, task-3...
 
 // Or specify PRD path explicitly
 pi_messenger({ action: "plan", prd: "docs/PRD.md" })
 
 // Execute tasks (spawns parallel workers)
 pi_messenger({ action: "work" })
-// → Wave 1: Running task-1, task-2...
 
 // Or run autonomously until done/blocked
 pi_messenger({ action: "work", autonomous: true })
 
-// Review implementation
+// Review a specific task
 pi_messenger({ action: "review", target: "task-1" })
 // → SHIP ✅ or NEEDS_WORK 🔄
 ```
@@ -243,7 +253,7 @@ Add to `~/.pi/agent/pi-messenger.json`:
 
 ### Crew Install
 
-The `crew.install` action installs crew agents and skills to your pi config:
+Crew agents are **auto-installed** on first use of `plan`, `work`, or `review`. To manually install or update:
 
 ```typescript
 pi_messenger({ action: "crew.install" })
@@ -252,8 +262,6 @@ pi_messenger({ action: "crew.install" })
 **What gets installed:**
 - **10 agents** in `~/.pi/agent/agents/` (scouts, analysts, worker, reviewer)
 - **1 skill** in `~/.pi/agent/skills/` (pi-messenger-crew quick reference)
-
-Agents and skills are auto-installed on first use of `plan`, `work`, or `review`.
 
 To remove:
 ```typescript
@@ -378,7 +386,7 @@ File-based coordination. No daemon. Dead agents detected via PID and cleaned up 
 
 ## Credits
 
-- **[mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail)** by [@doodlestein](https://x.com/doodlestein) — Inspiration for agent-to-agent messaging
+- **[mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail)** by [@doodlestein](https://x.com/doodlestein) - Inspiration for agent-to-agent messaging
 - **[Pi coding agent](https://github.com/badlogic/pi-mono/)** by [@badlogicgames](https://x.com/badlogicgames)
 
 ## License
