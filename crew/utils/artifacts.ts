@@ -14,6 +14,22 @@ export interface ArtifactPaths {
   metadataPath: string;
 }
 
+function ensureParentDir(filePath: string): void {
+  const dir = path.dirname(filePath);
+  // dirname("foo") -> "."; don't attempt to mkdirSync(".")
+  if (!dir || dir === ".") return;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    // Best-effort: artifacts must never crash crew execution.
+  }
+}
+
+function isRetryableFsError(err: unknown): boolean {
+  const code = (err as any)?.code;
+  return code === "ENOENT" || code === "EPERM" || code === "ENOTDIR";
+}
+
 export function getArtifactPaths(
   artifactsDir: string,
   runId: string,
@@ -33,18 +49,50 @@ export function getArtifactPaths(
 }
 
 export function ensureArtifactsDir(dir: string): void {
-  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    // Best-effort
+  }
 }
 
 export function writeArtifact(filePath: string, content: string): void {
-  fs.writeFileSync(filePath, content, "utf-8");
+  // Artifacts are debugging aids; never fail the run because they couldn't be written.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      ensureParentDir(filePath);
+      fs.writeFileSync(filePath, content, "utf-8");
+      return;
+    } catch (err) {
+      if (attempt === 0 && isRetryableFsError(err)) continue;
+      return;
+    }
+  }
 }
 
 export function writeMetadata(filePath: string, metadata: object): void {
-  fs.writeFileSync(filePath, JSON.stringify(metadata, null, 2), "utf-8");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      ensureParentDir(filePath);
+      fs.writeFileSync(filePath, JSON.stringify(metadata, null, 2), "utf-8");
+      return;
+    } catch (err) {
+      if (attempt === 0 && isRetryableFsError(err)) continue;
+      return;
+    }
+  }
 }
 
 export function appendJsonl(filePath: string, line: string): void {
-  fs.appendFileSync(filePath, `${line}\n`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      ensureParentDir(filePath);
+      fs.appendFileSync(filePath, `${line}\n`, "utf-8");
+      return;
+    } catch (err) {
+      if (attempt === 0 && isRetryableFsError(err)) continue;
+      return;
+    }
+  }
 }
 

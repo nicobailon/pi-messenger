@@ -148,6 +148,8 @@ Include this fenced block after the markdown tasks. Titles must match exactly.
 
 ## Important
 
+- You are running inside pi_messenger Crew. Do **not** call pi_messenger planning/work actions (only `join` is allowed if required).
+- Do **not** run destructive commands (no rm/mv on project state, no deleting/renaming `.pi/`, no git commit/push). Use bash only for exploration (ls/find/rg/grep) and reading.
 - Be thorough in exploration -- you are the only agent analyzing this codebase
 - Each finding informs the next step. Use what you learn to guide deeper investigation.
 - The task breakdown is the critical output. Invest time in getting it right.

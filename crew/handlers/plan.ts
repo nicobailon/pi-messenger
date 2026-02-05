@@ -336,6 +336,11 @@ function buildFirstPassPrompt(prdPath: string, prdContent: string, existingProgr
 
 ${prdContent}
 ${progressSection}
+Rules (strict):
+- You are running *inside* pi_messenger crew planning. Do NOT call pi_messenger actions (except the required join).
+- Do NOT run commands that modify files (no rm/mv/git commit). Exploration only: ls/find/rg/grep/cat/read.
+- Do NOT delete/rename anything under .pi/ (especially .pi/messenger/crew and its artifacts).
+
 Explore the codebase, identify patterns and conventions, then create a task breakdown following the output format in your instructions.`;
 }
 
@@ -351,6 +356,11 @@ ${prdContent}
 
 ## Planning Progress
 ${progressFileContent}
+
+Rules (strict):
+- You are running *inside* pi_messenger crew planning. Do NOT call pi_messenger actions (except the required join).
+- Do NOT run commands that modify files (no rm/mv/git commit). Re-examination only.
+- Do NOT delete/rename anything under .pi/ (especially .pi/messenger/crew and its artifacts).
 
 The planning progress above contains your previous findings and the reviewer's
 feedback. Address the issues raised. You can use tools to re-examine specific
