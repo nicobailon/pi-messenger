@@ -123,85 +123,164 @@ async function runAgent(
     // Pass extension so workers can use pi_messenger
     args.push("--extension", EXTENSION_DIR);
 
-    const proc = spawn("pi", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let settled = false;
+    const finish = (result: AgentResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    let activeProc: ReturnType<typeof spawn> | null = null;
+    let didFallback = false;
 
     let jsonlBuffer = "";
     const events: unknown[] = [];
+    let stderr = "";
 
-    proc.stdout?.on("data", (data) => {
-      jsonlBuffer += data.toString();
-      const lines = jsonlBuffer.split("\n");
-      jsonlBuffer = lines.pop() ?? "";
+    const spawnProcess = (command: string, commandArgs: string[]) => {
+      const proc = spawn(command, commandArgs, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      activeProc = proc;
+      attach(proc);
+      return proc;
+    };
 
-      for (const line of lines) {
-        const event = parseJsonlLine(line);
-        if (event) {
-          events.push(event);
-          updateProgress(progress, event, startTime);
-          if (artifactPaths) {
-            try {
-              appendJsonl(artifactPaths.jsonlPath, line);
-            } catch {
-              // Never fail the run due to debug artifact errors.
+    const attach = (proc: ReturnType<typeof spawn>) => {
+      proc.stdout?.on("data", (data) => {
+        if (proc !== activeProc) return;
+        jsonlBuffer += data.toString();
+        const lines = jsonlBuffer.split("\n");
+        jsonlBuffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const event = parseJsonlLine(line);
+          if (event) {
+            events.push(event);
+            updateProgress(progress, event, startTime);
+            if (artifactPaths) {
+              try {
+                appendJsonl(artifactPaths.jsonlPath, line);
+              } catch {
+                // Never fail the run due to debug artifact errors.
+              }
             }
           }
         }
-      }
-    });
-
-    let stderr = "";
-    proc.stderr?.on("data", (data) => { stderr += data.toString(); });
-
-    proc.on("close", (code) => {
-      progress.status = code === 0 ? "completed" : "failed";
-      progress.durationMs = Date.now() - startTime;
-      if (stderr && code !== 0) progress.error = stderr;
-
-      // Get final output from events
-      const fullOutput = getFinalOutput(events as any[]);
-      const truncation = truncateOutput(fullOutput, maxOutput, artifactPaths?.outputPath);
-
-      // Write output artifacts (best-effort)
-      if (artifactPaths) {
-        try {
-          writeArtifact(artifactPaths.outputPath, fullOutput);
-          writeMetadata(artifactPaths.metadataPath, {
-            runId,
-            agent: task.agent,
-            index,
-            exitCode: code ?? 1,
-            durationMs: progress.durationMs,
-            tokens: progress.tokens,
-            truncated: truncation.truncated,
-            error: progress.error,
-          });
-        } catch {
-          // Never fail the run due to debug artifact errors.
-        }
-      }
-
-      resolve({
-        agent: task.agent,
-        exitCode: code ?? 1,
-        output: truncation.text,
-        truncated: truncation.truncated,
-        progress,
-        config: agentConfig,
-        error: progress.error,
-        artifactPaths: artifactPaths ? {
-          input: artifactPaths.inputPath,
-          output: artifactPaths.outputPath,
-          jsonl: artifactPaths.jsonlPath,
-          metadata: artifactPaths.metadataPath,
-        } : undefined,
       });
-    });
+
+      proc.stderr?.on("data", (data) => {
+        if (proc !== activeProc) return;
+        stderr += data.toString();
+      });
+
+      proc.on("close", (code) => {
+        if (proc !== activeProc) return;
+
+        progress.status = code === 0 ? "completed" : "failed";
+        progress.durationMs = Date.now() - startTime;
+        if (stderr && code !== 0) progress.error = stderr;
+
+        // Get final output from events
+        const fullOutput = getFinalOutput(events as any[]);
+        const truncation = truncateOutput(fullOutput, maxOutput, artifactPaths?.outputPath);
+
+        // Write output artifacts (best-effort)
+        if (artifactPaths) {
+          try {
+            writeArtifact(artifactPaths.outputPath, fullOutput);
+            writeMetadata(artifactPaths.metadataPath, {
+              runId,
+              agent: task.agent,
+              index,
+              exitCode: code ?? 1,
+              durationMs: progress.durationMs,
+              tokens: progress.tokens,
+              truncated: truncation.truncated,
+              error: progress.error,
+            });
+          } catch {
+            // Never fail the run due to debug artifact errors.
+          }
+        }
+
+        finish({
+          agent: task.agent,
+          exitCode: code ?? 1,
+          output: truncation.text,
+          truncated: truncation.truncated,
+          progress,
+          config: agentConfig,
+          error: progress.error,
+          artifactPaths: artifactPaths ? {
+            input: artifactPaths.inputPath,
+            output: artifactPaths.outputPath,
+            jsonl: artifactPaths.jsonlPath,
+            metadata: artifactPaths.metadataPath,
+          } : undefined,
+        });
+      });
+
+      proc.on("error", (err: any) => {
+        if (proc !== activeProc) return;
+
+        const errCode = err?.code;
+        if (!didFallback && errCode === "ENOENT") {
+          const cli = process.env.PI_MESSENGER_PI_CLI;
+          if (cli) {
+            didFallback = true;
+
+            // Reset buffers for the fallback run.
+            jsonlBuffer = "";
+            events.length = 0;
+            stderr = "";
+
+            spawnProcess(process.execPath, [cli, ...args]);
+            return;
+          }
+        }
+
+        progress.status = "failed";
+        progress.durationMs = Date.now() - startTime;
+        progress.error = err?.message ?? String(err);
+
+        finish({
+          agent: task.agent,
+          exitCode: 1,
+          output: "",
+          truncated: false,
+          progress,
+          config: agentConfig,
+          error: progress.error,
+          artifactPaths: artifactPaths ? {
+            input: artifactPaths.inputPath,
+            output: artifactPaths.outputPath,
+            jsonl: artifactPaths.jsonlPath,
+            metadata: artifactPaths.metadataPath,
+          } : undefined,
+        });
+      });
+    };
+
+    // Primary: try `pi` from PATH.
+    spawnProcess("pi", args);
 
     // Handle abort signal
     if (options.signal) {
       const kill = () => {
-        proc.kill("SIGTERM");
-        setTimeout(() => !proc.killed && proc.kill("SIGKILL"), 3000);
+        const proc = activeProc;
+        if (!proc) return;
+        try {
+          proc.kill("SIGTERM");
+        } catch {
+          // ignore
+        }
+        const p = proc;
+        setTimeout(() => {
+          try {
+            !p.killed && p.kill("SIGKILL");
+          } catch {
+            // ignore
+          }
+        }, 3000);
       };
       if (options.signal.aborted) kill();
       else options.signal.addEventListener("abort", kill, { once: true });
