@@ -27,7 +27,7 @@ function ensureParentDir(filePath: string): void {
 
 function isRetryableFsError(err: unknown): boolean {
   const code = (err as any)?.code;
-  return code === "ENOENT" || code === "EPERM" || code === "ENOTDIR";
+  return code === "ENOENT" || code === "EPERM" || code === "EACCES" || code === "EBUSY" || code === "ENOTDIR";
 }
 
 export function getArtifactPaths(

@@ -106,9 +106,13 @@ async function runAgent(
     ? getArtifactPaths(artifactsDir, runId, task.agent, index)
     : undefined;
 
-  // Write input artifact
+  // Write input artifact (best-effort)
   if (artifactPaths) {
-    writeArtifact(artifactPaths.inputPath, `# Task for ${task.agent}\n\n${task.task}`);
+    try {
+      writeArtifact(artifactPaths.inputPath, `# Task for ${task.agent}\n\n${task.task}`);
+    } catch {
+      // Never fail the run due to debug artifact errors.
+    }
   }
 
   return new Promise((resolve) => {
@@ -134,7 +138,13 @@ async function runAgent(
         if (event) {
           events.push(event);
           updateProgress(progress, event, startTime);
-          if (artifactPaths) appendJsonl(artifactPaths.jsonlPath, line);
+          if (artifactPaths) {
+            try {
+              appendJsonl(artifactPaths.jsonlPath, line);
+            } catch {
+              // Never fail the run due to debug artifact errors.
+            }
+          }
         }
       }
     });
@@ -151,19 +161,23 @@ async function runAgent(
       const fullOutput = getFinalOutput(events as any[]);
       const truncation = truncateOutput(fullOutput, maxOutput, artifactPaths?.outputPath);
 
-      // Write output artifact (untruncated)
+      // Write output artifacts (best-effort)
       if (artifactPaths) {
-        writeArtifact(artifactPaths.outputPath, fullOutput);
-        writeMetadata(artifactPaths.metadataPath, {
-          runId,
-          agent: task.agent,
-          index,
-          exitCode: code ?? 1,
-          durationMs: progress.durationMs,
-          tokens: progress.tokens,
-          truncated: truncation.truncated,
-          error: progress.error,
-        });
+        try {
+          writeArtifact(artifactPaths.outputPath, fullOutput);
+          writeMetadata(artifactPaths.metadataPath, {
+            runId,
+            agent: task.agent,
+            index,
+            exitCode: code ?? 1,
+            durationMs: progress.durationMs,
+            tokens: progress.tokens,
+            truncated: truncation.truncated,
+            error: progress.error,
+          });
+        } catch {
+          // Never fail the run due to debug artifact errors.
+        }
       }
 
       resolve({
