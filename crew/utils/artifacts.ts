@@ -37,14 +37,16 @@ export function ensureArtifactsDir(dir: string): void {
 }
 
 export function writeArtifact(filePath: string, content: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content, "utf-8");
 }
 
 export function writeMetadata(filePath: string, metadata: object): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(metadata, null, 2), "utf-8");
 }
 
 export function appendJsonl(filePath: string, line: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.appendFileSync(filePath, `${line}\n`);
 }
-
