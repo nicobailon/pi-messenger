@@ -5,28 +5,18 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { MessengerState, Dirs } from "../../lib.js";
-import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
 import { discoverCrewAgents } from "../utils/discover.js";
-import { 
-  ensureAgentsInstalled, 
-  uninstallAgents,
-  ensureSkillsInstalled,
-  uninstallSkills 
-} from "../utils/install.js";
+import { uninstallAgents } from "../utils/install.js";
+import { loadCrewConfig } from "../utils/config.js";
+import { formatDuration } from "../../lib.js";
 import * as store from "../store.js";
-import { autonomousState } from "../state.js";
+import { autonomousState, getPlanningUpdateAgeMs, isAutonomousForCwd, isPlanningForCwd, isPlanningStalled, planningState, PLANNING_STALE_TIMEOUT_MS } from "../state.js";
 
 /**
  * Execute status action - shows plan progress.
  */
-export async function execute(
-  _params: CrewParams,
-  _state: MessengerState,
-  _dirs: Dirs,
-  ctx: ExtensionContext
-) {
+export async function execute(ctx: ExtensionContext) {
   const cwd = ctx.cwd ?? process.cwd();
   const plan = store.getPlan(cwd);
 
@@ -35,32 +25,53 @@ export async function execute(
 
 **No active plan.**
 
-Create a plan from your PRD:
-  pi_messenger({ action: "plan" })                    # Auto-discovers PRD.md
-  pi_messenger({ action: "plan", prd: "docs/PRD.md" }) # Explicit path`, {
+Create a plan:
+  pi_messenger({ action: "plan" })                                        # Auto-discovers PRD.md
+  pi_messenger({ action: "plan", prd: "docs/PRD.md" })                    # Explicit PRD path
+  pi_messenger({ action: "plan", prompt: "Scan the codebase for bugs" })   # Inline prompt`, {
       mode: "status",
       hasPlan: false
     });
   }
 
   const tasks = store.getTasks(cwd);
+  const config = loadCrewConfig(store.getCrewDir(cwd));
   const done = tasks.filter(t => t.status === "done");
   const inProgress = tasks.filter(t => t.status === "in_progress");
   const blocked = tasks.filter(t => t.status === "blocked");
-  const ready = store.getReadyTasks(cwd);
+  const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
   const waiting = tasks.filter(t => 
     t.status === "todo" && !ready.some(r => r.id === t.id)
   );
 
   const pct = tasks.length > 0 ? Math.round((done.length / tasks.length) * 100) : 0;
+  const autonomousActive = isAutonomousForCwd(cwd);
 
   let text = `# Crew Status
 
-**Plan:** ${plan.prd}
+**Plan:** ${store.getPlanLabel(plan)}
 **Progress:** ${done.length}/${tasks.length} tasks (${pct}%)
-
-## Tasks
 `;
+
+  if (tasks.length === 0 && isPlanningForCwd(cwd)) {
+    const stalled = isPlanningStalled(cwd);
+    const ageMs = getPlanningUpdateAgeMs(cwd);
+    text += `
+**Planning:** pass ${planningState.pass}/${planningState.maxPasses} — ${planningState.phase}`;
+    if (planningState.updatedAt) {
+      text += `\n**Last update:** ${planningState.updatedAt}`;
+    }
+    if (stalled) {
+      const ageLabel = ageMs === null ? "unknown" : formatDuration(ageMs);
+      text += `\n**Planning health:** stalled (no updates for ${ageLabel}; timeout ${formatDuration(PLANNING_STALE_TIMEOUT_MS)})`;
+    } else {
+      text += `\n**Planning health:** active`;
+    }
+    text += `\n**Progress log:** .pi/messenger/crew/planning-progress.md`;
+    text += `\n**Outline:** .pi/messenger/crew/planning-outline.md`;
+  }
+
+  text += `\n\n## Tasks\n`;
 
   if (done.length > 0) {
     text += `\n✅ **Done**\n`;
@@ -80,18 +91,38 @@ Create a plan from your PRD:
     }
   }
 
-  if (ready.length > 0) {
-    text += `\n⬜ **Ready**\n`;
-    for (const t of ready) {
-      text += `  - ${t.id}: ${t.title}\n`;
+  if (config.dependencies === "advisory") {
+    if (ready.length > 0) {
+      text += `\n⬜ **Available**\n`;
+      for (const t of ready) {
+        let depSuffix = "";
+        if (t.depends_on.length > 0) {
+          const depStatus = t.depends_on.map(depId => {
+            const dep = store.getTask(cwd, depId);
+            if (!dep) return `${depId} ○`;
+            if (dep.status === "done") return `${depId} ✓`;
+            if (dep.status === "in_progress") return `${depId} ⟳`;
+            return `${depId} ○`;
+          }).join(", ");
+          depSuffix = ` (needs: ${depStatus})`;
+        }
+        text += `  - ${t.id}: ${t.title}${depSuffix}\n`;
+      }
     }
-  }
+  } else {
+    if (ready.length > 0) {
+      text += `\n⬜ **Ready**\n`;
+      for (const t of ready) {
+        text += `  - ${t.id}: ${t.title}\n`;
+      }
+    }
 
-  if (waiting.length > 0) {
-    text += `\n⏸️ **Waiting** (dependencies not met)\n`;
-    for (const t of waiting) {
-      const deps = t.depends_on.join(", ");
-      text += `  - ${t.id}: ${t.title} → needs: ${deps}\n`;
+    if (waiting.length > 0) {
+      text += `\n⏸️ **Waiting** (dependencies not met)\n`;
+      for (const t of waiting) {
+        const deps = t.depends_on.join(", ");
+        text += `  - ${t.id}: ${t.title} → needs: ${deps}\n`;
+      }
     }
   }
 
@@ -105,8 +136,8 @@ Create a plan from your PRD:
     }
   }
 
-  // Add autonomous status if active
-  if (autonomousState.active) {
+  // Add autonomous status if active for this project
+  if (autonomousActive) {
     text += `\n## Autonomous Mode\n`;
     text += `Wave ${autonomousState.waveNumber} running...\n`;
     if (autonomousState.startedAt) {
@@ -118,9 +149,12 @@ Create a plan from your PRD:
     }
   }
 
-  // Add next steps
   text += `\n## Next`;
-  if (done.length === tasks.length) {
+  if (tasks.length === 0 && isPlanningForCwd(cwd)) {
+    text += `\nPlanning is in progress. Check .pi/messenger/crew/planning-progress.md for updates.`;
+  } else if (tasks.length === 0) {
+    text += `\nNo tasks yet. Run \`pi_messenger({ action: "plan" })\` to generate tasks from your PRD.`;
+  } else if (done.length === tasks.length) {
     text += `\n🎉 All tasks complete!`;
   } else if (ready.length > 0) {
     text += `\nRun \`pi_messenger({ action: "work" })\` to execute ${ready.map(t => t.id).join(", ")}`;
@@ -142,7 +176,17 @@ Create a plan from your PRD:
       waiting: waiting.map(t => t.id),
       blocked: blocked.map(t => t.id)
     },
-    autonomous: autonomousState.active
+    planning: {
+      active: isPlanningForCwd(cwd),
+      pass: planningState.pass,
+      maxPasses: planningState.maxPasses,
+      phase: planningState.phase,
+      updatedAt: planningState.updatedAt,
+      stale: isPlanningStalled(cwd),
+      ageMs: getPlanningUpdateAgeMs(cwd),
+      staleAfterMs: PLANNING_STALE_TIMEOUT_MS,
+    },
+    autonomous: autonomousActive
   });
 }
 
@@ -151,23 +195,19 @@ Create a plan from your PRD:
  */
 export async function executeCrew(
   op: string,
-  _params: CrewParams,
-  _state: MessengerState,
-  _dirs: Dirs,
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
 
   switch (op) {
     case "status": {
-      // Same as main status
-      return execute(_params, _state, _dirs, ctx);
+      return execute(ctx);
     }
 
     case "agents": {
       const agents = discoverCrewAgents(cwd);
       if (agents.length === 0) {
-        return result("No crew agents found. Run crew.install to set up agents.", {
+        return result("No crew agents found. Check extension installation.", {
           mode: "crew.agents",
           agents: []
         });
@@ -192,32 +232,26 @@ export async function executeCrew(
     }
 
     case "install": {
-      ensureAgentsInstalled();
-      ensureSkillsInstalled();
       const agents = discoverCrewAgents(cwd);
-      return result(`✅ Crew installed:\n- Agents: ${agents.map(a => a.name).join(", ")}\n- Skills: pi-messenger-crew`, {
+      return result(`Crew agents (${agents.length}): ${agents.map(a => `${a.name} (${a.source})`).join(", ")}`, {
         mode: "crew.install",
-        agents: agents.map(a => a.name),
-        skills: ["pi-messenger-crew"]
+        agents: agents.map(a => ({ name: a.name, source: a.source })),
       });
     }
 
     case "uninstall": {
       const agentResult = uninstallAgents();
-      const skillResult = uninstallSkills();
-      const errors = [...agentResult.errors, ...skillResult.errors];
-      const removed = { agents: agentResult.removed, skills: skillResult.removed };
       
-      if (errors.length > 0) {
-        return result(`⚠️ Removed with ${errors.length} error(s):\n${errors.join("\n")}`, {
+      if (agentResult.errors.length > 0) {
+        return result(`⚠️ Removed with ${agentResult.errors.length} error(s):\n${agentResult.errors.join("\n")}`, {
           mode: "crew.uninstall",
-          removed,
-          errors
+          removed: agentResult.removed,
+          errors: agentResult.errors
         });
       }
-      return result(`✅ Removed:\n- ${agentResult.removed.length} agent(s)\n- ${skillResult.removed.length} skill(s)`, {
+      return result(`✅ Removed ${agentResult.removed.length} agent(s)`, {
         mode: "crew.uninstall",
-        removed
+        removed: agentResult.removed,
       });
     }
 

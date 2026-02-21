@@ -4,7 +4,7 @@
 
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import {
@@ -26,7 +26,6 @@ import {
   isValidAgentName,
   pathMatchesReservation,
 } from "./lib.js";
-import { logFeedEvent } from "./feed.js";
 
 // =============================================================================
 // Agents Cache (Fix 1: Reduce disk I/O)
@@ -64,6 +63,14 @@ let pendingProcessArgs: {
 function ensureDirSync(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+function normalizeCwd(cwd: string): string {
+  try {
+    return fs.realpathSync.native(cwd);
+  } catch {
+    return resolve(cwd);
   }
 }
 
@@ -160,7 +167,7 @@ export function getRegistrationPath(state: MessengerState, dirs: Dirs): string {
 export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistration[] {
   const now = Date.now();
   const excludeName = state.agentName;
-  const myCwd = process.cwd();
+  const myCwd = normalizeCwd(process.cwd());
   const scopeToFolder = state.scopeToFolder;
 
   // Cache key includes scopeToFolder and cwd for proper cache invalidation
@@ -209,7 +216,6 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
 
       if (!isProcessAlive(reg.pid)) {
         try {
-          logFeedEvent(dirs, reg.name, "leave");
           fs.unlinkSync(join(dirs.registry, file));
         } catch {
           // Ignore cleanup errors
@@ -226,6 +232,7 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
       if (reg.isHuman === undefined) {
         reg.isHuman = false;
       }
+      reg.cwd = normalizeCwd(reg.cwd);
       allAgents.push(reg);
     } catch {
       // Ignore malformed registrations
@@ -332,13 +339,14 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
 
     ensureDirSync(getMyInbox(state, dirs));
 
-    const gitBranch = getGitBranch(process.cwd());
+    const cwd = normalizeCwd(process.cwd());
+    const gitBranch = getGitBranch(cwd);
     const now = new Date().toISOString();
     const registration: AgentRegistration = {
       name: state.agentName,
       pid: process.pid,
       sessionId: ctx.sessionManager.getSessionId(),
-      cwd: process.cwd(),
+      cwd,
       model: ctx.model?.id ?? "unknown",
       startedAt: now,
       gitBranch,
@@ -507,13 +515,14 @@ export function renameAgent(
 
   processAllPendingMessages(state, dirs, deliverFn);
 
-  const gitBranch = getGitBranch(process.cwd());
+  const cwd = normalizeCwd(process.cwd());
+  const gitBranch = getGitBranch(cwd);
   const now = new Date().toISOString();
   const registration: AgentRegistration = {
     name: newName,
     pid: process.pid,
     sessionId: ctx.sessionManager.getSessionId(),
-    cwd: process.cwd(),
+    cwd,
     model: ctx.model?.id ?? "unknown",
     startedAt: now,
     reservations: state.reservations.length > 0 ? state.reservations : undefined,

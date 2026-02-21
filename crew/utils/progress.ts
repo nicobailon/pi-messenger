@@ -4,12 +4,20 @@
  * Real-time visibility into agent execution via --mode json event parsing.
  */
 
+export interface ToolEntry {
+  tool: string;
+  args: string;
+  startMs: number;
+  endMs: number;
+}
+
 export interface AgentProgress {
   agent: string;
   status: "pending" | "running" | "completed" | "failed";
   currentTool?: string;
   currentToolArgs?: string;
-  recentTools: Array<{ tool: string; args: string; endMs: number }>;
+  currentToolStartMs?: number;
+  recentTools: ToolEntry[];
   toolCallCount: number;
   tokens: number;
   durationMs: number;
@@ -58,20 +66,22 @@ export function updateProgress(progress: AgentProgress, event: PiEvent, startTim
       progress.status = "running";
       progress.currentTool = event.toolName;
       progress.currentToolArgs = extractArgsPreview(event.args);
+      progress.currentToolStartMs = Date.now();
       break;
 
     case "tool_execution_end":
       progress.toolCallCount++;
       if (progress.currentTool) {
-        progress.recentTools.unshift({
+        progress.recentTools.push({
           tool: progress.currentTool,
           args: progress.currentToolArgs ?? "",
+          startMs: progress.currentToolStartMs ?? Date.now(),
           endMs: Date.now(),
         });
-        if (progress.recentTools.length > 5) progress.recentTools.pop();
       }
       progress.currentTool = undefined;
       progress.currentToolArgs = undefined;
+      progress.currentToolStartMs = undefined;
       break;
 
     case "message_end":
@@ -90,7 +100,7 @@ function extractArgsPreview(args?: Record<string, unknown>): string {
   const previewKeys = ["command", "path", "file_path", "pattern", "query"];
   for (const key of previewKeys) {
     if (args[key] && typeof args[key] === "string") {
-      const value = args[key] as string;
+      const value = (args[key] as string).replaceAll("\n", " ").replaceAll("\r", "");
       return value.length > 60 ? `${value.slice(0, 57)}...` : value;
     }
   }

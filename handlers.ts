@@ -26,6 +26,9 @@ import * as store from "./store.js";
 import * as crewStore from "./crew/store.js";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.js";
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
+import { loadCrewConfig } from "./crew/utils/config.js";
+
+let messagesSentThisSession = 0;
 
 // =============================================================================
 // Tool Result Helper
@@ -44,7 +47,7 @@ function result(text: string, details: Record<string, unknown>) {
 
 export function notRegisteredError() {
   return result(
-    "Not registered. Use pi_messenger({ join: true }) to join the agent mesh first.",
+    "Not registered. Use pi_messenger({ action: \"join\" }) to join the agent mesh first.",
     { mode: "error", error: "not_registered" }
   );
 }
@@ -72,6 +75,7 @@ export function executeJoin(
   }
 
   state.isHuman = ctx.hasUI;
+  const cwd = ctx.cwd ?? process.cwd();
 
   if (!store.register(state, dirs, ctx, nameTheme)) {
     return result(
@@ -82,31 +86,31 @@ export function executeJoin(
 
   store.startWatcher(state, dirs, deliverFn);
   updateStatusFn(ctx);
-  pruneFeed(dirs, feedRetention ?? 50);
-  logFeedEvent(dirs, state.agentName, "join");
+  pruneFeed(cwd, feedRetention ?? 50);
+  logFeedEvent(cwd, state.agentName, "join");
 
   let specWarning = "";
   if (specPath) {
-    state.spec = resolveSpecPath(specPath, process.cwd());
+    state.spec = resolveSpecPath(specPath, cwd);
     store.updateRegistration(state, dirs, ctx);
     if (!existsSync(state.spec)) {
-      specWarning = `\n\nWarning: Spec file not found at ${displaySpecPath(state.spec, process.cwd())}.`;
+      specWarning = `\n\nWarning: Spec file not found at ${displaySpecPath(state.spec, cwd)}.`;
     }
   }
 
   const agents = store.getActiveAgents(state, dirs);
-  const folder = extractFolder(process.cwd());
+  const folder = extractFolder(cwd);
   const locationPart = state.gitBranch ? `${folder} on ${state.gitBranch}` : folder;
 
   let text = `Joined as ${state.agentName} in ${locationPart}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.`;
 
   if (state.spec) {
-    text += `\nSpec: ${displaySpecPath(state.spec, process.cwd())}`;
+    text += `\nSpec: ${displaySpecPath(state.spec, cwd)}`;
   }
 
   if (agents.length > 0) {
     text += `\n\nActive peers: ${agents.map(a => a.name).join(", ")}`;
-    text += `\n\nUse pi_messenger({ list: true }) for details, or pi_messenger({ to: "Name", message: "..." }) to send.`;
+    text += `\n\nUse pi_messenger({ action: "list" }) for details, or pi_messenger({ action: "send", to: "Name", message: "..." }) to send.`;
   }
 
   if (specWarning) {
@@ -119,17 +123,17 @@ export function executeJoin(
     location: locationPart,
     peerCount: agents.length,
     peers: agents.map(a => a.name),
-    spec: state.spec ? displaySpecPath(state.spec, process.cwd()) : undefined
+    spec: state.spec ? displaySpecPath(state.spec, cwd) : undefined
   });
 }
 
-export function executeStatus(state: MessengerState, dirs: Dirs) {
+export function executeStatus(state: MessengerState, dirs: Dirs, cwd: string = process.cwd()) {
   if (!state.registered) {
     return notRegisteredError();
   }
 
   const agents = store.getActiveAgents(state, dirs);
-  const folder = extractFolder(process.cwd());
+  const folder = extractFolder(cwd);
   const location = state.gitBranch ? `${folder} (${state.gitBranch})` : folder;
   const myClaim = store.getAgentCurrentClaim(dirs, state.agentName);
 
@@ -137,7 +141,7 @@ export function executeStatus(state: MessengerState, dirs: Dirs) {
   text += `Location: ${location}\n`;
 
   if (state.spec) {
-    const specDisplay = displaySpecPath(state.spec, process.cwd());
+    const specDisplay = displaySpecPath(state.spec, cwd);
     text += `Spec: ${specDisplay}\n`;
     if (myClaim) {
       text += `Claim: ${myClaim.taskId}${myClaim.reason ? ` - ${myClaim.reason}` : ""}\n`;
@@ -149,7 +153,7 @@ export function executeStatus(state: MessengerState, dirs: Dirs) {
     const myRes = state.reservations.map(r => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
     text += `Reservations: ${myRes.join(", ")}\n`;
   }
-  text += `\nUse { list: true } for details, { swarm: true } for task status.`;
+  text += `\nUse pi_messenger({ action: "list" }) for details, pi_messenger({ action: "task.list" }) for tasks.`;
 
   return result(text, {
     mode: "status",
@@ -158,25 +162,25 @@ export function executeStatus(state: MessengerState, dirs: Dirs) {
     folder,
     gitBranch: state.gitBranch,
     peerCount: agents.length,
-    spec: state.spec ? displaySpecPath(state.spec, process.cwd()) : undefined,
+    spec: state.spec ? displaySpecPath(state.spec, cwd) : undefined,
     claim: myClaim
       ? {
         ...myClaim,
-        spec: displaySpecPath(myClaim.spec, process.cwd())
+        spec: displaySpecPath(myClaim.spec, cwd)
       }
       : undefined,
     reservations: state.reservations
   });
 }
 
-export function executeList(state: MessengerState, dirs: Dirs, config?: { stuckThreshold?: number }) {
+export function executeList(state: MessengerState, dirs: Dirs, cwd: string = process.cwd(), config?: { stuckThreshold?: number }) {
   if (!state.registered) {
     return notRegisteredError();
   }
 
   const thresholdMs = (config?.stuckThreshold ?? 900) * 1000;
   const peers = store.getActiveAgents(state, dirs);
-  const folder = extractFolder(process.cwd());
+  const folder = extractFolder(cwd);
   const totalCount = peers.length + 1;
 
   const lines: string[] = [];
@@ -231,13 +235,13 @@ export function executeList(state: MessengerState, dirs: Dirs, config?: { stuckT
 
   const allClaims = store.getClaims(dirs);
 
-  lines.push(formatAgentLine(buildSelfRegistration(state), true, agentHasTask(state.agentName, allClaims, crewStore.getTasks(process.cwd()))));
+  lines.push(formatAgentLine(buildSelfRegistration(state), true, agentHasTask(state.agentName, allClaims, crewStore.getTasks(cwd))));
 
   for (const a of peers) {
     lines.push(formatAgentLine(a, false, agentHasTask(a.name, allClaims, crewStore.getTasks(a.cwd))));
   }
 
-  const recentEvents = readFeedEvents(dirs, 5);
+  const recentEvents = readFeedEvents(cwd, 5);
   if (recentEvents.length > 0) {
     lines.push("", "# Recent Activity", "");
     for (const event of recentEvents) {
@@ -254,6 +258,7 @@ export function executeList(state: MessengerState, dirs: Dirs, config?: { stuckT
 export function executeSend(
   state: MessengerState,
   dirs: Dirs,
+  cwd: string,
   to: string | string[] | undefined,
   broadcast: boolean | undefined,
   message?: string,
@@ -270,8 +275,28 @@ export function executeSend(
     );
   }
 
+  const crewDir = crewStore.getCrewDir(cwd);
+  const crewConfig = loadCrewConfig(crewDir);
+  const budget = crewConfig.messageBudgets?.[crewConfig.coordination] ?? 10;
+  if (messagesSentThisSession >= budget) {
+    return result(
+      `Message budget reached (${messagesSentThisSession}/${budget} for ${crewConfig.coordination} level). Focus on your task.`,
+      { mode: "send", error: "budget_exceeded" }
+    );
+  }
+
   let recipients: string[];
   if (broadcast) {
+    if (process.env.PI_CREW_WORKER) {
+      messagesSentThisSession++;
+      const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
+      logFeedEvent(cwd, state.agentName, "message", undefined, preview);
+      const remaining = budget - messagesSentThisSession;
+      return result(
+        `Broadcast logged. (${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+        { mode: "send", sent: ["feed"], failed: [] }
+      );
+    }
     const agents = store.getActiveAgents(state, dirs);
     recipients = agents.map(a => a.name);
     if (recipients.length === 0) {
@@ -334,16 +359,19 @@ export function executeSend(
     );
   }
 
-  const preview = message.length > 60 ? message.slice(0, 57) + "..." : message;
+  messagesSentThisSession++;
+
+  const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
   if (broadcast) {
-    logFeedEvent(dirs, state.agentName, "message", undefined, `broadcast: "${preview}"`);
+    logFeedEvent(cwd, state.agentName, "message", undefined, preview);
   } else {
     for (const name of sent) {
-      logFeedEvent(dirs, state.agentName, "message", name, `\u2192 ${name}: "${preview}"`);
+      logFeedEvent(cwd, state.agentName, "message", name, preview);
     }
   }
 
-  let text = `Message sent to ${sent.join(", ")}.`;
+  const remaining = budget - messagesSentThisSession;
+  let text = `Message sent to ${sent.join(", ")}. (${remaining} message${remaining === 1 ? "" : "s"} remaining)`;
   if (failed.length > 0) {
     const failedStr = failed.map(f => `${f.name} (${f.error})`).join(", ");
     text += ` Failed: ${failedStr}`;
@@ -380,7 +408,7 @@ export function executeReserve(
   store.updateRegistration(state, dirs, ctx);
 
   for (const pattern of patterns) {
-    logFeedEvent(dirs, state.agentName, "reserve", pattern, reason);
+    logFeedEvent(ctx.cwd ?? process.cwd(), state.agentName, "reserve", pattern, reason);
   }
 
   return result(`Reserved: ${patterns.join(", ")}`, { mode: "reserve", patterns, reason });
@@ -401,7 +429,7 @@ export function executeRelease(
     state.reservations = [];
     store.updateRegistration(state, dirs, ctx);
     for (const pattern of released) {
-      logFeedEvent(dirs, state.agentName, "release", pattern);
+      logFeedEvent(ctx.cwd ?? process.cwd(), state.agentName, "release", pattern);
     }
     return result(
       released.length > 0 ? `Released all: ${released.join(", ")}` : "No reservations to release.",
@@ -415,7 +443,7 @@ export function executeRelease(
 
   store.updateRegistration(state, dirs, ctx);
   for (const pattern of releasedPatterns) {
-    logFeedEvent(dirs, state.agentName, "release", pattern);
+    logFeedEvent(ctx.cwd ?? process.cwd(), state.agentName, "release", pattern);
   }
 
   return result(`Released ${releasedPatterns.length} reservation(s).`, { mode: "release", released: releasedPatterns });
@@ -754,18 +782,18 @@ export function executeSetStatus(
 }
 
 export function executeFeed(
-  dirs: Dirs,
+  cwd: string,
   limit?: number,
   crewEventsInFeed: boolean = true
 ) {
   const effectiveLimit = limit ?? 20;
   let events: FeedEvent[];
   if (!crewEventsInFeed) {
-    events = readFeedEvents(dirs, effectiveLimit * 2);
+    events = readFeedEvents(cwd, effectiveLimit * 2);
     events = events.filter(e => !isCrewEvent(e.type));
     events = events.slice(-effectiveLimit);
   } else {
-    events = readFeedEvents(dirs, effectiveLimit);
+    events = readFeedEvents(cwd, effectiveLimit);
   }
 
   if (events.length === 0) {
@@ -786,6 +814,7 @@ export function executeFeed(
 export function executeWhois(
   state: MessengerState,
   dirs: Dirs,
+  cwd: string,
   name: string,
   config?: { stuckThreshold?: number }
 ) {
@@ -799,7 +828,7 @@ export function executeWhois(
   const agent = agents.find(a => a.name === name);
   if (!agent) {
     if (name === state.agentName) {
-      return executeWhoisSelf(state, dirs, thresholdMs);
+      return executeWhoisSelf(state, dirs, cwd, thresholdMs);
     }
     return result(
       `Agent "${name}" not found or not active.`,
@@ -807,21 +836,23 @@ export function executeWhois(
     );
   }
 
-  return formatWhoisOutput(agent, false, dirs, thresholdMs);
+  return formatWhoisOutput(agent, false, dirs, cwd, thresholdMs);
 }
 
 function executeWhoisSelf(
   state: MessengerState,
   dirs: Dirs,
+  cwd: string,
   thresholdMs: number
 ) {
-  return formatWhoisOutput(buildSelfRegistration(state), true, dirs, thresholdMs);
+  return formatWhoisOutput(buildSelfRegistration(state), true, dirs, cwd, thresholdMs);
 }
 
 function formatWhoisOutput(
   agent: AgentRegistration,
   isSelf: boolean,
   dirs: Dirs,
+  cwd: string,
   thresholdMs: number
 ) {
   const allClaims = store.getClaims(dirs);
@@ -867,7 +898,8 @@ function formatWhoisOutput(
     }
   }
 
-  const allFeedEvents = readFeedEvents(dirs, 100);
+  const feedCwd = isSelf ? cwd : agent.cwd;
+  const allFeedEvents = readFeedEvents(feedCwd, 100);
   const agentEvents = allFeedEvents.filter(e => e.agent === agent.name).slice(-10);
   if (agentEvents.length > 0) {
     lines.push("", "## Recent Activity");
@@ -888,7 +920,7 @@ export function executeAutoRegisterPath(
   if (action === "list") {
     if (paths.length === 0) {
       return result(
-        "No auto-register paths configured.\n\nUse pi_messenger({ autoRegisterPath: \"add\" }) to add the current folder.",
+        "No auto-register paths configured.\n\nUse pi_messenger({ action: \"autoRegisterPath\", autoRegisterPath: \"add\" }) to add the current folder.",
         { mode: "autoRegisterPath", action: "list", paths: [], currentFolder: cwd, isCurrentInList: false }
       );
     }

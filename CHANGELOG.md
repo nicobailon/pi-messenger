@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.12.0] - 2026-02-21
+
+### Added
+- **Thinking level support** - Agents support `thinking: <level>` in frontmatter (off, minimal, low, medium, high, xhigh). Config `thinking.<role>` overrides per-agent frontmatter. Applied via `--thinking` flag to spawned processes.
+- **Advisory dependencies** - Dependencies are now informational context, not scheduling blockers. All `todo` tasks are eligible for assignment regardless of dependency status. Workers see dependency completion state (done/in-progress/not started) in their prompt and coordinate via reservations and DMs. Configurable via `dependencies` config (`"advisory"` default, `"strict"` for blocking mode). Transitive dependencies pruned from plans automatically.
+- **Auto-work on plan completion** - Planning automatically starts autonomous work when tasks are created (default behavior). Pass `autoWork: false` to review the plan first. A steer message triggers the LLM to call `work { autonomous: true }` on its next turn.
+- **Continuous worker refill** - Overlay automatically spawns replacement workers when tasks complete, maintaining concurrency up to the configured limit throughout execution.
+- **Prompt-based planning** - `plan` action accepts an inline `prompt` parameter as the spec when no PRD file is available. The planner breaks down arbitrary requests into parallel tasks the same way it handles PRD files.
+- **Live feed with flash notifications** - Feed tracks last-seen timestamp and highlights new events. Significant events (task completions, messages, plan changes) trigger flash notifications in the status bar.
+- **Task revision** - `[p]` revises a single task's spec via the planner. `[P]` revises an entire subtree (target + transitive dependents), preserving done tasks and resetting revisable ones to `todo`. Re-plan with steering prompt injects user guidance into the planning-progress.md Notes section.
+- **Chat UX redesign** - Global `[m]` key activates chat input from any overlay state (vim-style command mode). Plain text broadcasts to all peers; `@name message` sends DMs. Tab autocompletes agent names after `@` (Shift+Tab cycles backwards). Feed gets 60/40 space allocation when workers active. `[f]` toggles feed-focus mode (tasks compress to 2-line summary). Visual improvements: system events dimmed, colored agent names, separator dots between groups.
+- **Auto-dismiss on completion** - Overlay auto-closes with snapshot handover 3 seconds after all tasks complete. Only triggers when the overlay witnessed tasks in progress. Any keypress cancels.
+- **Worker coordination & chatter** - Workers receive environmental context (concurrent tasks, dependency summaries, recent feed, ready tasks) and coordination instructions. Four configurable levels (`none`|`minimal`|`moderate`|`chatty`, default: `chatty`) control verbosity. At `chatty`, workers DM peers and broadcast announcements, creating a chat-room effect in the overlay. New `coordination` config field.
+- **Lobby workers** - `+` spawns workers: assigns ready tasks directly when available, otherwise pre-spawns idle lobby workers that join the mesh and chat. Lobby workers receive task assignments via steer message when tasks become available. Token budgets per coordination level cap spending while idle.
+- **Auto-spawn on plan completion** - Workers auto-spawn when planning finishes and ready tasks exist. Lobby workers assigned first, then fresh workers up to concurrency limit.
+- **TUI coordination level control** - `[v]` cycles coordination level at runtime (`chatty` → `none` → `minimal` → `moderate`).
+- **Configurable `concurrency.max`** - Crew config field (default: 10) lets the user lower the worker ceiling. `+`/`-` keys respect the configured max.
+- **Stuck task UX** - `[q]` Stop works on any `in_progress` task, not just those with live workers. `[s]` Start rejects when the agent is already busy. Detail view shows "Worker not running" warning for orphaned tasks.
+- **Chatter mitigation** - Per-worker outgoing message rate limiting via `messageBudgets` config. Coordination level and per-worker token count displayed in overlay header.
+- **Broadcast filtering** - Worker broadcasts now go to the feed only (no inbox delivery, no LLM turn interrupts). Eliminates O(N^2) token cascades between workers. DMs, user broadcasts, and planner broadcasts still deliver to inboxes in real-time. Detection via `PI_CREW_WORKER` env var set at spawn time. Worker name consistency also fixed in `agents.ts` via `PI_AGENT_NAME`.
+- **Worker exit feed notifications** - Lobby workers that exit without a task assignment now appear as `leave` events in the feed.
+- **2026-02-12 Overlay redesign** - Replaced tabbed `/messenger` UI with a unified crew dashboard layout (status, workers, tasks, feed, agents row, legend), added `Ctrl+T` snapshot transfer, `Ctrl+B` background/reattach support, empty-state system diagnostics, and inline `@all` / `@name` messaging in the overlay input flow.
+- **Task progress system** - Added per-task append-only progress logs (`tasks/task-N.progress.md`) with `task.progress`, system auto-entries (assignment, review verdicts, shutdown resets, crash/failure outcomes), and retry-context injection in worker prompts.
+- **Interactive Crew task manager** - Crew overlay now supports list/detail modes, task actions (reset/cascade-reset/unblock/start/block/delete), in-overlay confirmations, block-reason input, live worker messaging, context-aware key hints, and transient success/failure notifications.
+- **Live worker concurrency adjustment** - In the Crew overlay, `+`/`-` now adjusts worker concurrency live during execution (clamped to 1-10).
+- **Auto-open overlay on autonomous work** - The Crew overlay now opens automatically when autonomous mode starts, showing live worker progress without requiring `/messenger`. Configurable via `autoOverlay` (default: `true`). Escape dismisses; won't reopen until a new autonomous session.
+- **Auto-open overlay on planning work** - The Crew overlay now opens automatically when planning starts and when an in-progress planning run is restored on session start/switch/fork/tree. Configurable via `autoOverlayPlanning` (default: `true`). Uses per-run planning IDs to avoid reopen loops within the same run after dismissal.
+- **Task splitting** - New `task.split` action supports an inspect phase (returns spec/progress/deps/dependents) and an execute phase that creates subtasks, rewires downstream dependencies, converts the parent to a milestone, and auto-completes milestones when all subtasks are done. Milestones can't be started manually and are never dispatched to workers.
+- **Planning observability state** - Added first-class planning run state with pass/phase tracking and persistence at `.pi/messenger/crew/planning-state.json`. Status, Crew UI, and feed now expose planning progress (`plan.start`, `plan.pass.*`, `plan.review.*`, `plan.done`, `plan.failed`) so long planning runs are visible by default. Planning runs with no updates for 5 minutes are flagged as stalled in status and Crew UI, with periodic refresh so stalls surface without requiring user interaction.
+- **Planning cwd normalization** - Planning state now canonicalizes project paths (realpath) and compares by canonical path, fixing false negatives when sessions use `/tmp/...` while persisted state resolves to `/private/tmp/...`.
+- **Structured planning outline** - Planner prompts now require ordered sections (PRD understanding, reviewed resources, sequential steps, parallel task graph). Latest structured output is persisted to `.pi/messenger/crew/planning-outline.md` for audit/review.
+
+- **Lobby worker keep-alive** - Lobby workers now survive the full planning phase via a file-based keep-alive signal. The orchestrator creates a `.alive` file per lobby worker; the worker's `turn_end` hook checks the file and injects a minimal steer message to prevent the session from exiting. File is deleted on task assignment, planning completion, or shutdown. ~25 tokens per keep-alive cycle.
+- **`prompt` tool parameter** - The `prompt` parameter (used by `plan` and `task.revise`/`task.revise-tree`) is now declared in the tool schema so LLMs can discover it without the skill loaded.
+- **Dynamic overlay width** - Overlay adapts to terminal width (clamped 40-100) instead of a fixed size. Fits half-width and quarter-width windows on smaller screens.
+- **Live coordination level display** - Status bar hints now show the actual coordination level (`v:chatty`, `v:none`, etc.) instead of the opaque `v:Coord` label.
+
+### Changed
+- **Default `planning.maxPasses` reduced to 1** - Single-pass planning is now the default. Multi-pass planning with reviewer feedback is still available by setting `planning.maxPasses` in user or project config.
+- **Structural cleanup** - Extracted `crew/prompt.ts` (worker prompt builder), `crew/spawn.ts` (shared spawn logic), `crew/registry.ts` (unified worker registry replacing separate maps in agents.ts and lobby.ts). Split `crew/state.ts` into `state-autonomous.ts` and `state-planning.ts` with a barrel re-export.
+- **Crew agent locality** - Crew agents are now discovered from extension-local `crew/agents/` plus project overrides in `.pi/messenger/crew/agents/`. Removed auto-install/update copy machinery and converted `crew.install` / `--crew-install` to informational commands.
+
+### Removed
+- **Legacy key-based routing** - Removed the `join`, `claim`, `unclaim`, `complete`, `swarm`, `list`, `rename`, `reserve`, `release`, and `broadcast` tool parameters and the legacy routing block in `index.ts` that duplicated `crew/index.ts` action-based routing. All callers should use `action`-based syntax (e.g., `{ action: "join" }` instead of `{ join: true }`).
+- **Interview handler** - Removed `crew/handlers/interview.ts`, `crew-interview-generator.md` agent, and the `interview` action. The feature spawned an LLM to generate questions for the user but never worked (got stuck). Agent moved to deprecated list for cleanup on existing installs.
+
+### Fixed
+- **Overlay rendering corruption from multi-line bash args** - `extractArgsPreview` returned raw bash `command` strings containing newlines (comments, `&&` chains, heredocs). These embedded newlines broke overlay rows, cascading layout corruption through the workers section, task list, and feed. Newlines are now collapsed to spaces at the extraction point.
+- **Fire-and-forget dynamic import in `task-actions.ts`** - `killWorkerByTask` was imported via `import("./registry.js").then(...)` which swallowed errors silently. Replaced with a static import since no circular dependency exists.
+- **Stale legacy syntax in user-facing strings** - Five handler/index strings still referenced removed `{ join: true }` / `{ list: true }` / `{ to: "..." }` syntax. Updated to action-based equivalents.
+- **SIGKILL escalation never fired** - After `proc.kill("SIGTERM")`, Node.js immediately sets `proc.killed = true`. Both `killWorkerByTask` and `runAgent` graceful shutdown checked `!proc.killed` before escalating to SIGKILL, which was always false. Workers ignoring SIGTERM could hang indefinitely. Now checks only `exitCode === null`.
+- **Lobby worker assignment zombie state** - State was mutated before the disk write, so a failed write left the worker permanently marked as assigned but invisible to future assignment. Reordered to write first, mutate on success.
+- **Lobby assignment race in work handler** - If a lobby worker exited between availability check and assignment, the task got stuck as `in_progress` with no worker. Added return value check with rollback.
+- **Autonomous state checks not cwd-scoped** - Auto-dismiss, snapshot generation, and revision guards used a global flag instead of per-project checks, blocking operations for unrelated projects.
+- **Task flicker from lobby worker spawn** - Orchestrator and worker generated independent random names so `assigned_to` never matched. Task was also pre-set to `in_progress` but the worker expected `todo`. Fixed name propagation via env var, made `task.start` idempotent for the assigned agent, and added ownership guards in close handlers.
+- **`[q]` Stop couldn't kill lobby-spawned workers** - Stop only checked one worker registry. Lobby workers are tracked separately and now have their own kill path.
+- **Double-formatted message previews** - Overlay stored pre-formatted previews that the display layer formatted again. Now stores raw text; preview limit raised from 60 to 200 chars.
+- **Stale workersHeight in trim loop** - Worker-line overflow trimming used a pre-computed height, causing over-trim to 0 workers on small terminals.
+- **Artifact I/O crash** - Uncaught exceptions in child process event handlers crashed pi. Wrapped all artifact writes with try/catch.
+- **Input field scrolling** - Text was clipped at the field edge instead of scrolling to keep the cursor visible.
+- **Session shutdown orphans** - Workers now killed at the top of session shutdown, preventing orphan processes.
+- **Task list blank line padding** - Task list no longer pads with empty lines. Surplus space goes to the feed.
+- **`getLobbyWorkerCount` counted dead workers** - Registry function didn't filter exited processes, inflating the "N in lobby" status bar count.
+- **`models.analyst` config was dead** - Config type and docs existed but `interview.ts` and `sync.ts` never read it. Now wired to both analyst handler call sites.
+
 ## [0.11.0] - 2026-02-08
 
 ### Added

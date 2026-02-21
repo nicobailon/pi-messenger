@@ -2,126 +2,182 @@
  * Pi Messenger - Chat Overlay Component
  */
 
-import { randomUUID } from "node:crypto";
 import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
-import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import {
-  MAX_CHAT_HISTORY,
-  formatRelativeTime,
-  coloredAgentName,
-  stripAnsiCodes,
   extractFolder,
-  truncatePathLeft,
-  getDisplayMode,
-  displaySpecPath,
-  computeStatus,
-  STATUS_INDICATORS,
-  buildSelfRegistration,
-  agentHasTask,
+  formatDuration,
   type MessengerState,
   type Dirs,
-  type AgentMailMessage,
-  type AgentRegistration,
 } from "./lib.js";
-import * as store from "./store.js";
 import * as crewStore from "./crew/store.js";
-import { readFeedEvents, formatFeedLine as sharedFormatFeedLine, logFeedEvent, type FeedEvent } from "./feed.js";
+import { adjustConcurrency, autonomousState, isAutonomousForCwd, isPlanningForCwd, planningState } from "./crew/state.js";
+import { loadCrewConfig, cycleCoordinationLevel, setCoordinationOverride } from "./crew/utils/config.js";
+import { readFeedEvents, type FeedEvent, type FeedEventType } from "./feed.js";
+import type { Task } from "./crew/types.js";
 import {
-  renderCrewContent,
-  renderCrewStatusBar,
-  createCrewViewState,
+  renderStatusBar,
+  renderWorkersSection,
+  renderTaskList,
+  renderTaskSummary,
+  renderFeedSection,
+  renderAgentsRow,
+  renderLegend,
+  renderEmptyState,
+  renderPlanningState,
+  renderDetailView,
   navigateTask,
+} from "./overlay-render.js";
+import {
+  createCrewViewState,
+  handleConfirmInput,
+  handleBlockReasonInput,
+  handleMessageInput,
+  handleRevisePromptInput,
+  handleCrewKeyBinding,
+  setNotification,
   type CrewViewState,
-} from "./crew-overlay.js";
-import { hasLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
+} from "./overlay-actions.js";
+import { getLiveWorkers, hasLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
 import { loadConfig } from "./config.js";
+import { discoverCrewAgents } from "./crew/utils/discover.js";
+import { spawnSingleWorker, spawnWorkersForReadyTasks } from "./crew/spawn.js";
+import { spawnLobbyWorker, removeLobbyWorkerByIndex, cleanupUnassignedAliveFiles } from "./crew/lobby.js";
 
-const AGENTS_TAB = "[agents]";
-const CREW_TAB = "[crew]";
+export interface OverlayCallbacks {
+  onBackground?: (snapshot: string) => void;
+}
 
 export class MessengerOverlay implements Component, Focusable {
-  readonly width = 80;
+  get width(): number {
+    return Math.min(100, Math.max(40, process.stdout.columns ?? 90));
+  }
   focused = false;
 
-  private selectedAgent: string | null = null;
-  private inputText = "";
-  private scrollPosition = 0;
-  private cachedAgents: AgentRegistration[] | null = null;
   private crewViewState: CrewViewState = createCrewViewState();
   private cwd: string;
   private stuckThresholdMs: number;
   private progressTimer: ReturnType<typeof setInterval> | null = null;
+  private planningTimer: ReturnType<typeof setInterval> | null = null;
   private progressUnsubscribe: (() => void) | null = null;
+  private sawIncompleteWork = false;
+  private completionTimer: ReturnType<typeof setTimeout> | null = null;
+  private completionDismissed = false;
+  private wasPlanning: boolean;
+  private prevInProgressCount = 0;
 
   constructor(
     private tui: TUI,
     private theme: Theme,
     private state: MessengerState,
     private dirs: Dirs,
-    private done: () => void
+    private done: (snapshot?: string) => void,
+    private callbacks: OverlayCallbacks,
   ) {
     this.cwd = process.cwd();
     const cfg = loadConfig(this.cwd);
     this.stuckThresholdMs = cfg.stuckThreshold * 1000;
-    const agents = this.getAgentsSorted();
-    const withUnread = agents.find(a => (state.unreadCounts.get(a.name) ?? 0) > 0);
-    this.selectedAgent = withUnread?.name ?? AGENTS_TAB;
 
-    if (this.selectedAgent && this.selectedAgent !== AGENTS_TAB && this.selectedAgent !== CREW_TAB) {
-      state.unreadCounts.set(this.selectedAgent, 0);
+    for (const key of this.state.unreadCounts.keys()) {
+      this.state.unreadCounts.set(key, 0);
     }
 
+    this.wasPlanning = isPlanningForCwd(this.cwd);
+
     this.progressUnsubscribe = onLiveWorkersChanged(() => {
-      if (this.selectedAgent === CREW_TAB) {
-        if (hasLiveWorkers(this.cwd)) this.startProgressRefresh();
-        else this.stopProgressRefresh();
-      }
+      this.syncCrewRefreshTimers();
       this.tui.requestRender();
     });
 
-    if (this.selectedAgent === CREW_TAB && hasLiveWorkers(this.cwd)) {
-      this.startProgressRefresh();
-    }
-  }
-
-  private getAgentsSorted(): AgentRegistration[] {
-    if (this.cachedAgents) return this.cachedAgents;
-    this.cachedAgents = store.getActiveAgents(this.state, this.dirs).sort((a, b) => a.name.localeCompare(b.name));
-    return this.cachedAgents;
-  }
-
-  private hasAnySpec(agents: AgentRegistration[]): boolean {
-    if (this.state.spec) return true;
-    return agents.some(agent => agent.spec);
+    this.syncCrewRefreshTimers();
   }
 
   private hasPlan(): boolean {
     return crewStore.hasPlan(this.cwd);
   }
 
-  private getMessages(): AgentMailMessage[] {
-    if (this.selectedAgent === null) {
-      return this.state.broadcastHistory;
+  private handleTaskStart(task: Task): void {
+    const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
+    if (config.dependencies !== "advisory") {
+      const unmet = task.depends_on.filter(depId => crewStore.getTask(this.cwd, depId)?.status !== "done");
+      if (unmet.length > 0) {
+        setNotification(this.crewViewState, this.tui, false, `Unmet deps: ${unmet.join(", ")}`);
+        this.tui.requestRender();
+        return;
+      }
     }
-    if (this.selectedAgent === AGENTS_TAB || this.selectedAgent === CREW_TAB) {
-      return [];
+    const worker = spawnSingleWorker(this.cwd, task.id);
+    if (worker) {
+      setNotification(this.crewViewState, this.tui, true, `${worker.name} → ${task.id}`);
+    } else {
+      setNotification(this.crewViewState, this.tui, false, `Failed to spawn worker for ${task.id}`);
     }
-    return this.state.chatHistory.get(this.selectedAgent) ?? [];
+    this.tui.requestRender();
   }
 
-  private selectTab(agentName: string | null): void {
-    this.selectedAgent = agentName;
-    if (agentName && agentName !== AGENTS_TAB && agentName !== CREW_TAB) {
-      this.state.unreadCounts.set(agentName, 0);
-    }
-    this.scrollPosition = 0;
+  private spawnWorkerForReadyTask(task: Task, newConcurrency: number): void {
+    const worker = spawnSingleWorker(this.cwd, task.id);
+    const label = worker
+      ? `${worker.name} → ${task.id} (${newConcurrency}w)`
+      : `Workers → ${newConcurrency}`;
+    setNotification(this.crewViewState, this.tui, true, label);
+    this.tui.requestRender();
+  }
 
-    if (agentName === CREW_TAB && hasLiveWorkers(this.cwd)) {
-      this.startProgressRefresh();
-    } else {
-      this.stopProgressRefresh();
+  private isPlanningActiveForCurrentProject(): boolean {
+    return isPlanningForCwd(this.cwd);
+  }
+
+  private checkAutoSpawnOnPlanComplete(planning: boolean): void {
+    const wasPlanningBefore = this.wasPlanning;
+    this.wasPlanning = planning;
+
+    if (!wasPlanningBefore || planning) return;
+
+    const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
+    const readyTasks = crewStore.getReadyTasks(this.cwd, { advisory: config.dependencies === "advisory" });
+    if (readyTasks.length > 0) {
+      const target = Math.min(readyTasks.length, autonomousState.concurrency);
+      const { assigned } = spawnWorkersForReadyTasks(this.cwd, target);
+      if (assigned > 0) {
+        setNotification(this.crewViewState, this.tui, true, `Plan ready — ${assigned} worker${assigned > 1 ? "s" : ""} started`);
+        this.tui.requestRender();
+      }
     }
+
+    cleanupUnassignedAliveFiles(this.cwd);
+  }
+
+  private checkAutoRefillWorkers(): void {
+    const inProgressCount = crewStore.getTasks(this.cwd).filter(t => t.status === "in_progress").length;
+    const prev = this.prevInProgressCount;
+    this.prevInProgressCount = inProgressCount;
+
+    if (inProgressCount >= prev || inProgressCount >= autonomousState.concurrency) return;
+    if (!crewStore.hasPlan(this.cwd)) return;
+
+    const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
+    const readyTasks = crewStore.getReadyTasks(this.cwd, { advisory: config.dependencies === "advisory" });
+    if (readyTasks.length === 0) return;
+
+    const slots = autonomousState.concurrency - inProgressCount;
+    const target = Math.min(readyTasks.length, slots);
+    if (target <= 0) return;
+
+    const { assigned } = spawnWorkersForReadyTasks(this.cwd, target);
+    if (assigned > 0) {
+      setNotification(this.crewViewState, this.tui, true, `${assigned} worker${assigned > 1 ? "s" : ""} → ready tasks`);
+      this.tui.requestRender();
+    }
+  }
+
+  private syncCrewRefreshTimers(): void {
+    if (hasLiveWorkers(this.cwd)) this.startProgressRefresh();
+    else this.stopProgressRefresh();
+
+    if (this.isPlanningActiveForCurrentProject()) this.startPlanningRefresh();
+    else this.stopPlanningRefresh();
   }
 
   private startProgressRefresh(): void {
@@ -142,616 +198,592 @@ export class MessengerOverlay implements Component, Focusable {
     }
   }
 
-  private scroll(delta: number): void {
-    const messages = this.getMessages();
-    const maxScroll = Math.max(0, messages.length - 1);
-    this.scrollPosition = Math.max(0, Math.min(maxScroll, this.scrollPosition + delta));
+  private startPlanningRefresh(): void {
+    if (this.planningTimer) return;
+    this.planningTimer = setInterval(() => {
+      if (this.isPlanningActiveForCurrentProject()) {
+        this.tui.requestRender();
+      } else {
+        this.stopPlanningRefresh();
+      }
+    }, 15_000);
+  }
+
+  private stopPlanningRefresh(): void {
+    if (this.planningTimer) {
+      clearInterval(this.planningTimer);
+      this.planningTimer = null;
+    }
   }
 
   handleInput(data: string): void {
-    const agents = this.getAgentsSorted();
+    this.cancelCompletionTimer();
 
-    // Allow escape always
+    if (data === "\x14") {
+      this.done(this.generateSnapshot());
+      return;
+    }
+
+    if (data === "\x02") {
+      this.callbacks.onBackground?.(this.generateSnapshot());
+      return;
+    }
+
+    if (this.crewViewState.confirmAction) {
+      handleConfirmInput(data, this.crewViewState, this.cwd, this.state.agentName, this.tui);
+      return;
+    }
+
+    if (this.crewViewState.inputMode === "block-reason") {
+      const tasks = crewStore.getTasks(this.cwd);
+      const task = tasks[this.crewViewState.selectedTaskIndex];
+      handleBlockReasonInput(data, this.crewViewState, this.cwd, task, this.state.agentName, this.tui);
+      return;
+    }
+
+    if (this.crewViewState.inputMode === "message") {
+      handleMessageInput(data, this.crewViewState, this.state, this.dirs, this.cwd, this.tui);
+      return;
+    }
+
+    if (this.crewViewState.inputMode === "revise-prompt") {
+      const tasks = crewStore.getTasks(this.cwd);
+      const task = tasks[this.crewViewState.selectedTaskIndex];
+      handleRevisePromptInput(data, this.crewViewState, this.cwd, task, this.state.agentName, this.tui);
+      return;
+    }
+
     if (matchesKey(data, "escape")) {
-      this.done();
+      if (this.crewViewState.mode === "detail") {
+        this.crewViewState.mode = "list";
+        this.tui.requestRender();
+      } else {
+        this.done();
+      }
       return;
     }
 
-    // If no agents AND no plan, only allow escape
-    if (agents.length === 0 && !this.hasPlan()) {
-      return;
-    }
+    if (data === "+" || matchesKey(data, "=") || matchesKey(data, "shift+=") || matchesKey(data, "-")) {
+      const delta = matchesKey(data, "-") ? -1 : 1;
+      const crewDir = crewStore.getCrewDir(this.cwd);
+      const config = loadCrewConfig(crewDir);
+      const prev = autonomousState.concurrency;
+      const next = adjustConcurrency(delta, config.concurrency.max);
+      if (prev === next) {
+        this.tui.requestRender();
+        return;
+      }
 
-    if (matchesKey(data, "tab") || matchesKey(data, "right")) {
-      this.cycleTab(1, agents);
+      if (next > prev) {
+        const readyTasks = crewStore.getReadyTasks(this.cwd, { advisory: config.dependencies === "advisory" });
+        if (readyTasks.length === 0) {
+          const worker = spawnLobbyWorker(this.cwd);
+          const label = worker ? `Lobby worker ${worker.name} spawned (${next}w)` : `Workers → ${next}`;
+          setNotification(this.crewViewState, this.tui, true, label);
+        } else {
+          this.spawnWorkerForReadyTask(readyTasks[0], next);
+        }
+      } else {
+        const killed = removeLobbyWorkerByIndex(this.cwd);
+        const label = killed ? `Lobby worker removed (${next}w)` : `Workers: ${prev} → ${next}`;
+        setNotification(this.crewViewState, this.tui, true, label);
+      }
       this.tui.requestRender();
       return;
     }
 
-    if (matchesKey(data, "shift+tab") || matchesKey(data, "left")) {
-      this.cycleTab(-1, agents);
+    if (data === "@" || matchesKey(data, "m")) {
+      if (isPlanningForCwd(this.cwd)) {
+        setNotification(this.crewViewState, this.tui, false, "Chat unavailable during planning");
+        this.tui.requestRender();
+        return;
+      }
+      this.crewViewState.inputMode = "message";
+      this.crewViewState.messageInput = data === "@" ? "@" : "";
       this.tui.requestRender();
+      return;
+    }
+
+    if (matchesKey(data, "f")) {
+      this.crewViewState.feedFocus = !this.crewViewState.feedFocus;
+      this.tui.requestRender();
+      return;
+    }
+
+    if (matchesKey(data, "v")) {
+      const crewDir = crewStore.getCrewDir(this.cwd);
+      const config = loadCrewConfig(crewDir);
+      const next = cycleCoordinationLevel(config.coordination);
+      setCoordinationOverride(next);
+      setNotification(this.crewViewState, this.tui, true, `Coordination: ${next}`);
+      this.tui.requestRender();
+      return;
+    }
+
+    if (matchesKey(data, "c") && this.isPlanningActiveForCurrentProject()) {
+      this.crewViewState.confirmAction = {
+        type: "cancel-planning",
+        taskId: "",
+        label: "planning",
+      };
+      this.tui.requestRender();
+      return;
+    }
+
+    const tasks = crewStore.getTasks(this.cwd);
+    const task = tasks[this.crewViewState.selectedTaskIndex];
+
+    if (matchesKey(data, "right")) {
+      if (this.crewViewState.mode === "detail") {
+        navigateTask(this.crewViewState, 1, tasks.length);
+        this.crewViewState.detailScroll = 0;
+        this.crewViewState.detailAutoScroll = true;
+        this.tui.requestRender();
+      }
+      return;
+    }
+
+    if (matchesKey(data, "left")) {
+      if (this.crewViewState.mode === "detail") {
+        navigateTask(this.crewViewState, -1, tasks.length);
+        this.crewViewState.detailScroll = 0;
+        this.crewViewState.detailAutoScroll = true;
+        this.tui.requestRender();
+      }
       return;
     }
 
     if (matchesKey(data, "up")) {
-      if (this.selectedAgent === CREW_TAB) {
-        // Navigate tasks in crew view
-        const tasks = crewStore.getTasks(this.cwd);
-        navigateTask(this.crewViewState, -1, tasks.length);
+      if (this.crewViewState.mode === "detail") {
+        this.crewViewState.detailScroll = Math.max(0, this.crewViewState.detailScroll - 1);
+        this.crewViewState.detailAutoScroll = false;
       } else {
-        this.scroll(1);
+        navigateTask(this.crewViewState, -1, tasks.length);
       }
       this.tui.requestRender();
       return;
     }
 
     if (matchesKey(data, "down")) {
-      if (this.selectedAgent === CREW_TAB) {
-        // Navigate tasks in crew view
-        const tasks = crewStore.getTasks(this.cwd);
-        navigateTask(this.crewViewState, 1, tasks.length);
+      if (this.crewViewState.mode === "detail") {
+        this.crewViewState.detailScroll++;
+        this.crewViewState.detailAutoScroll = false;
       } else {
-        this.scroll(-1);
+        navigateTask(this.crewViewState, 1, tasks.length);
       }
       this.tui.requestRender();
       return;
     }
 
     if (matchesKey(data, "home")) {
-      if (this.selectedAgent === CREW_TAB) {
-        this.crewViewState.selectedTaskIndex = 0;
-        this.crewViewState.scrollOffset = 0;
-      } else {
-        const messages = this.getMessages();
-        this.scrollPosition = Math.max(0, messages.length - 1);
+      this.crewViewState.selectedTaskIndex = 0;
+      this.crewViewState.scrollOffset = 0;
+      if (this.crewViewState.mode === "detail") {
+        this.crewViewState.detailScroll = 0;
+        this.crewViewState.detailAutoScroll = false;
       }
       this.tui.requestRender();
       return;
     }
 
     if (matchesKey(data, "end")) {
-      if (this.selectedAgent === CREW_TAB) {
-        const tasks = crewStore.getTasks(this.cwd);
-        this.crewViewState.selectedTaskIndex = Math.max(0, tasks.length - 1);
-      } else {
-        this.scrollPosition = 0;
+      this.crewViewState.selectedTaskIndex = Math.max(0, tasks.length - 1);
+      if (this.crewViewState.mode === "detail") {
+        this.crewViewState.detailScroll = 0;
+        this.crewViewState.detailAutoScroll = true;
       }
       this.tui.requestRender();
       return;
     }
 
     if (matchesKey(data, "enter")) {
-      if (this.selectedAgent === CREW_TAB) {
+      if (task && this.crewViewState.mode !== "detail") {
+        this.crewViewState.mode = "detail";
+        this.crewViewState.detailScroll = 0;
+        this.crewViewState.detailAutoScroll = true;
+        this.tui.requestRender();
+      }
+      return;
+    }
+
+    if (this.crewViewState.mode === "detail") {
+      if (matchesKey(data, "[")) {
+        navigateTask(this.crewViewState, -1, tasks.length);
+        this.crewViewState.detailScroll = 0;
+        this.crewViewState.detailAutoScroll = true;
+        this.tui.requestRender();
         return;
       }
-      if (this.inputText.trim()) {
-        this.sendMessage(agents);
-      }
-      return;
-    }
-
-    if (matchesKey(data, "backspace")) {
-      if (this.inputText.length > 0) {
-        this.inputText = this.inputText.slice(0, -1);
+      if (matchesKey(data, "]")) {
+        navigateTask(this.crewViewState, 1, tasks.length);
+        this.crewViewState.detailScroll = 0;
+        this.crewViewState.detailAutoScroll = true;
         this.tui.requestRender();
+        return;
       }
-      return;
     }
 
-    if (data.length > 0 && data.charCodeAt(0) >= 32) {
-      this.inputText += data;
-      this.tui.requestRender();
+    if (task) {
+      if (matchesKey(data, "s") && task.status === "todo" && !task.milestone) {
+        this.handleTaskStart(task);
+        return;
+      }
+      handleCrewKeyBinding(data, task, this.crewViewState, this.cwd, this.state.agentName, this.tui);
     }
   }
 
-  private cycleTab(direction: number, agents: AgentRegistration[]): void {
-    // Build tab list: Agents, Crew (if plan exists), individual agents, All
-    const tabNames: (string | null)[] = [AGENTS_TAB];
-    if (this.hasPlan()) {
-      tabNames.push(CREW_TAB);
-    }
-    tabNames.push(...agents.map(a => a.name));
-    tabNames.push(null); // "All" broadcast tab
-
-    const currentIdx = this.selectedAgent === null
-      ? tabNames.length - 1
-      : tabNames.indexOf(this.selectedAgent);
-
-    const newIdx = (currentIdx + direction + tabNames.length) % tabNames.length;
-    this.selectTab(tabNames[newIdx]);
+  private snapshotIdleLabel(): string {
+    const last = this.state.activity.lastActivityAt || this.state.sessionStartedAt;
+    const ageMs = Math.max(0, Date.now() - new Date(last).getTime());
+    return `idle ${formatDuration(ageMs)}`;
   }
 
-  private sendMessage(agents: AgentRegistration[]): void {
-    let text = this.inputText.trim();
-    if (!text) return;
+  private formatTaskSnapshotLine(task: Task, liveTaskIds: Set<string>): string {
+    if (task.status === "done") {
+      return `${task.id} (${task.title})`;
+    }
+    if (task.status === "in_progress") {
+      const parts = [task.title];
+      if (task.assigned_to) parts.push(task.assigned_to);
+      if (liveTaskIds.has(task.id)) parts.push("live");
+      return `${task.id} (${parts.join(", ")})`;
+    }
+    if (task.status === "blocked") {
+      const reason = task.blocked_reason ? ` — ${task.blocked_reason}` : "";
+      return `${task.id} (${task.title}${reason})`;
+    }
+    if (task.depends_on.length > 0) {
+      return `${task.id} (${task.title}, deps: ${task.depends_on.join(" ")})`;
+    }
+    return `${task.id} (${task.title})`;
+  }
 
-    let targetAgent: string | null = null;
-    let isBroadcast = false;
+  private formatRecentFeedEvent(event: FeedEvent): string {
+    const time = new Date(event.ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+    if (event.type === "task.done") return `${event.agent} completed ${event.target ?? "task"} (${time})`;
+    if (event.type === "task.start") return `${event.agent} started ${event.target ?? "task"} (${time})`;
+    if (event.type === "message") {
+      const dir = event.target ? `→ ${event.target}: ` : "✦ ";
+      return event.preview
+        ? `${event.agent} ${dir}${event.preview} (${time})`
+        : `${event.agent} ${dir.trim()} (${time})`;
+    }
+    if (event.target) return `${event.agent} ${event.type} ${event.target} (${time})`;
+    return `${event.agent} ${event.type} (${time})`;
+  }
 
-    if (text.startsWith("@all ")) {
-      text = text.slice(5).trim();
-      isBroadcast = true;
-    } else if (text.startsWith("@")) {
-      const spaceIdx = text.indexOf(" ");
-      if (spaceIdx > 1) {
-        const name = text.slice(1, spaceIdx);
-        const agent = agents.find(a => a.name === name);
-        if (agent) {
-          targetAgent = name;
-          text = text.slice(spaceIdx + 1).trim();
-        }
-      }
+  private generateSnapshot(): string {
+    const plan = crewStore.getPlan(this.cwd);
+    const tasks = crewStore.getTasks(this.cwd);
+    const liveWorkers = getLiveWorkers(this.cwd);
+
+    if (this.isPlanningActiveForCurrentProject() && tasks.length === 0) {
+      const updated = planningState.updatedAt ? formatDuration(Math.max(0, Date.now() - new Date(planningState.updatedAt).getTime())) : "unknown";
+      return [
+        `Crew snapshot: planning in progress (pass ${planningState.pass}/${planningState.maxPasses}, ${planningState.phase}), ${autonomousState.concurrency}w concurrency`,
+        "",
+        `Planning: pass ${planningState.pass}/${planningState.maxPasses}, phase: ${planningState.phase}, updated ${updated} ago`,
+        "",
+        `Agents: You (${this.snapshotIdleLabel()})`,
+      ].join("\n");
     }
 
-    if (!text) return;
+    if (!plan) {
+      const discovered = discoverCrewAgents(this.cwd);
+      const configLine = discovered.length === 0
+        ? "Config: no crew agents discovered"
+        : `Config: ${discovered.map(agent => `${agent.name}${agent.model ? ` (${agent.model})` : ""}`).join(", ")}`;
 
-    if (isBroadcast || (this.selectedAgent === null && !targetAgent) || this.selectedAgent === AGENTS_TAB) {
-      for (const agent of agents) {
-        try {
-          store.sendMessageToAgent(this.state, this.dirs, agent.name, text);
-        } catch {
-          // Ignore
-        }
-      }
-      const broadcastMsg: AgentMailMessage = {
-        id: randomUUID(),
-        from: this.state.agentName,
-        to: "broadcast",
-        text,
-        timestamp: new Date().toISOString(),
-        replyTo: null
-      };
-      this.state.broadcastHistory.push(broadcastMsg);
-      if (this.state.broadcastHistory.length > MAX_CHAT_HISTORY) {
-        this.state.broadcastHistory.shift();
-      }
-      const preview = text.length > 60 ? text.slice(0, 57) + "..." : text;
-      logFeedEvent(this.dirs, this.state.agentName, "message", undefined, `broadcast: "${preview}"`);
-      this.inputText = "";
-      this.scrollPosition = 0;
-      this.tui.requestRender();
-    } else {
-      const recipient = targetAgent ?? this.selectedAgent;
-      if (!recipient || recipient === AGENTS_TAB || recipient === CREW_TAB) return;
-
-      try {
-        const msg = store.sendMessageToAgent(this.state, this.dirs, recipient, text);
-        let history = this.state.chatHistory.get(recipient);
-        if (!history) {
-          history = [];
-          this.state.chatHistory.set(recipient, history);
-        }
-        history.push(msg);
-        if (history.length > MAX_CHAT_HISTORY) history.shift();
-        const preview = text.length > 60 ? text.slice(0, 57) + "..." : text;
-        logFeedEvent(this.dirs, this.state.agentName, "message", recipient, `\u2192 ${recipient}: "${preview}"`);
-        this.inputText = "";
-        this.scrollPosition = 0;
-        this.tui.requestRender();
-      } catch {
-        // Keep input on failure
-      }
+      return [
+        `Crew snapshot: no active plan, ${autonomousState.concurrency}w concurrency`,
+        "",
+        `Agents: You (${this.snapshotIdleLabel()})`,
+        "",
+        configLine,
+      ].join("\n");
     }
+
+    const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
+    const readyTasks = crewStore.getReadyTasks(this.cwd, { advisory: config.dependencies === "advisory" });
+    const readyIds = new Set(readyTasks.map(task => task.id));
+    const liveTaskIds = new Set(Array.from(liveWorkers.keys()));
+    const activeLines = Array.from(liveWorkers.values()).map(worker => {
+      const activity = worker.progress.currentTool
+        ? `${worker.progress.currentTool}${worker.progress.currentToolArgs ? ` ${worker.progress.currentToolArgs}` : ""}`
+        : "thinking";
+      return `${worker.taskId} (${worker.agent}, ${activity}, ${formatDuration(Date.now() - worker.startedAt)})`;
+    });
+
+    const doneTasks = tasks.filter(task => task.status === "done");
+    const inProgressTasks = tasks.filter(task => task.status === "in_progress");
+    const blockedTasks = tasks.filter(task => task.status === "blocked");
+    const waitingTasks = tasks.filter(task => task.status === "todo" && !readyIds.has(task.id));
+    const recentEvents = readFeedEvents(this.cwd, 2);
+    const headerParts = [
+      `Crew snapshot: ${plan.completed_count}/${plan.task_count} tasks done`,
+      `${readyTasks.length} ready`,
+      `${autonomousState.concurrency}w`,
+    ];
+    if (isAutonomousForCwd(this.cwd)) {
+      headerParts.push(`autonomous wave ${autonomousState.waveNumber}`);
+    }
+
+    const lines = [
+      headerParts.join(", "),
+      "",
+      `Active: ${activeLines.length > 0 ? activeLines.join(", ") : "none"}`,
+      `Done: ${doneTasks.length > 0 ? doneTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+      `In progress: ${inProgressTasks.length > 0 ? inProgressTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+      `Ready: ${readyTasks.length > 0 ? readyTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+      `Blocked: ${blockedTasks.length > 0 ? blockedTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+      `Waiting: ${waitingTasks.length > 0 ? waitingTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+    ];
+
+    if (recentEvents.length > 0) {
+      lines.push("");
+      lines.push(`Recent: ${recentEvents.map(event => this.formatRecentFeedEvent(event)).join(", ")}`);
+    }
+
+    return lines.join("\n");
   }
 
   render(_width: number): string[] {
-    this.cachedAgents = null;  // Clear cache at start of render cycle
     const w = this.width;
     const innerW = w - 2;
-    const agents = this.getAgentsSorted();
-
-    // Handle agent death - don't reset if we're on a meta tab (AGENTS_TAB, CREW_TAB)
-    if (this.selectedAgent && 
-        this.selectedAgent !== AGENTS_TAB && 
-        this.selectedAgent !== CREW_TAB && 
-        !agents.find(a => a.name === this.selectedAgent)) {
-      this.selectedAgent = agents[0]?.name ?? (this.hasPlan() ? CREW_TAB : AGENTS_TAB);
-      this.scrollPosition = 0;
-    }
-
+    const sectionW = innerW - 2;
     const border = (s: string) => this.theme.fg("dim", s);
     const pad = (s: string, len: number) => s + " ".repeat(Math.max(0, len - visibleWidth(s)));
     const row = (content: string) => border("│") + pad(" " + content, innerW) + border("│");
     const emptyRow = () => border("│") + " ".repeat(innerW) + border("│");
+    const sectionSeparator = this.theme.fg("dim", "─".repeat(sectionW));
+
+    const tasks = crewStore.getTasks(this.cwd);
+    if (tasks.length === 0) {
+      this.crewViewState.selectedTaskIndex = 0;
+      if (this.crewViewState.mode === "detail") this.crewViewState.mode = "list";
+    } else {
+      this.crewViewState.selectedTaskIndex = Math.max(0, Math.min(this.crewViewState.selectedTaskIndex, tasks.length - 1));
+    }
+
+    const selectedTask = tasks[this.crewViewState.selectedTaskIndex] ?? null;
+    const hasPlan = this.hasPlan();
+    const planning = this.isPlanningActiveForCurrentProject();
+    this.checkAutoSpawnOnPlanComplete(planning);
+    this.checkAutoRefillWorkers();
 
     const lines: string[] = [];
-
-    // Top border with title
-    const titleContent = this.renderTitleContent(agents.length);
+    const titleContent = this.renderTitleContent();
     const titleText = ` ${titleContent} `;
     const titleLen = visibleWidth(titleContent) + 2;
     const borderLen = Math.max(0, innerW - titleLen);
     const leftBorder = Math.floor(borderLen / 2);
     const rightBorder = borderLen - leftBorder;
+
     lines.push(border("╭" + "─".repeat(leftBorder)) + titleText + border("─".repeat(rightBorder) + "╮"));
+    lines.push(row(renderStatusBar(this.theme, this.cwd, sectionW)));
+    lines.push(emptyRow());
 
-    if (agents.length === 0 && !this.hasPlan()) {
-      // Simple empty state - no height filling
-      lines.push(emptyRow());
-      lines.push(emptyRow());
-      lines.push(row(this.centerText("No other agents active", innerW - 2)));
-      lines.push(emptyRow());
-      lines.push(row(this.theme.fg("dim", this.centerText("Start another pi instance to chat", innerW - 2))));
-      lines.push(emptyRow());
-      lines.push(emptyRow());
+    const chromeLines = 6;
+    const termRows = process.stdout.rows ?? 24;
+    const contentHeight = Math.max(8, termRows - chromeLines);
+
+    const prevTs = this.crewViewState.lastSeenEventTs;
+    const allEvents = readFeedEvents(this.cwd, 20);
+    this.detectAndFlashEvents(allEvents, prevTs);
+    this.checkCompletion(tasks, planning);
+
+    let contentLines: string[];
+    if (this.crewViewState.mode === "detail" && selectedTask) {
+      contentLines = renderDetailView(this.cwd, selectedTask, sectionW, contentHeight, this.crewViewState);
     } else {
-      lines.push(emptyRow());
-      lines.push(row(this.renderTabBar(innerW - 2, agents)));
-      lines.push(border("├" + "─".repeat(innerW) + "┤"));
+      const workersLimit = termRows <= 26 ? 2 : 5;
+      const hasWorkers = hasLiveWorkers(this.cwd);
 
-      const chromeLines = 7; // top border, empty row, tab bar, separator, separator, input bar, bottom border
-      const termRows = process.stdout.rows ?? 24;
-      const messageAreaHeight = Math.min(25, Math.max(8, termRows - chromeLines - 2));
-      const messageLines = this.renderMessages(innerW - 2, messageAreaHeight, agents);
-      for (const line of messageLines) {
-        lines.push(row(line));
+      let workerLines = renderWorkersSection(this.theme, this.cwd, sectionW, workersLimit);
+      const agentsLine = renderAgentsRow(this.cwd, sectionW, this.state, this.dirs, this.stuckThresholdMs);
+      const agentsHeight = 2;
+      const workersHeight = () => workerLines.length > 0 ? workerLines.length + 1 : 0;
+      const available = contentHeight - workersHeight() - agentsHeight;
+
+      const isFeedFocus = this.crewViewState.feedFocus;
+      let feedHeight: number;
+      let mainHeight: number;
+
+      if (!hasPlan && !planning) {
+        feedHeight = Math.min(allEvents.length, Math.max(2, Math.floor(available * 0.4)));
+        mainHeight = available - feedHeight - (feedHeight > 0 ? 1 : 0);
+      } else if (isFeedFocus) {
+        const summaryLines = 2;
+        mainHeight = summaryLines;
+        feedHeight = available - summaryLines - 1;
+      } else if (hasWorkers) {
+        feedHeight = Math.max(6, Math.floor(available * 0.7));
+        mainHeight = available - feedHeight - 1;
+      } else {
+        feedHeight = Math.max(4, Math.floor(available * 0.6));
+        mainHeight = available - feedHeight - 1;
       }
 
-      lines.push(border("├" + "─".repeat(innerW) + "┤"));
-      lines.push(row(this.renderInputBar(innerW - 2)));
+      feedHeight = Math.max(0, feedHeight);
+      mainHeight = Math.max(2, mainHeight);
+
+      // Cap task list to actual content height — surplus goes to feed
+      const isTaskList = hasPlan && !isFeedFocus && tasks.length > 0;
+      if (isTaskList) {
+        const taskContentHeight = Math.max(2, tasks.length);
+        if (taskContentHeight < mainHeight) {
+          const surplus = mainHeight - taskContentHeight;
+          feedHeight += surplus;
+          mainHeight = taskContentHeight;
+        }
+      }
+
+      const displayEvents = allEvents.slice(-feedHeight);
+      let feedLines = renderFeedSection(this.theme, displayEvents, sectionW, prevTs);
+      if (feedLines.length > feedHeight) feedLines = feedLines.slice(-feedHeight);
+
+      while (workerLines.length > 0 && workersHeight() + mainHeight + (feedLines.length > 0 ? feedLines.length + 1 : 0) + agentsHeight > contentHeight) {
+        workerLines = workerLines.slice(0, workerLines.length - 1);
+      }
+
+      let mainLines: string[];
+      if (!hasPlan && !planning) {
+        mainLines = renderEmptyState(this.theme, this.cwd, sectionW, mainHeight);
+      } else if (planning && tasks.length === 0) {
+        mainLines = renderPlanningState(this.theme, this.cwd, sectionW, mainHeight);
+      } else if (isFeedFocus && tasks.length > 0) {
+        mainLines = renderTaskSummary(this.theme, this.cwd, sectionW, mainHeight);
+      } else {
+        mainLines = renderTaskList(this.theme, this.cwd, sectionW, mainHeight, this.crewViewState);
+      }
+
+      contentLines = [];
+
+      contentLines.push(agentsLine);
+      contentLines.push(sectionSeparator);
+
+      if (workerLines.length > 0) {
+        contentLines.push(...workerLines);
+        contentLines.push(sectionSeparator);
+      }
+
+      contentLines.push(...mainLines);
+
+      if (feedLines.length > 0) {
+        contentLines.push(sectionSeparator);
+        contentLines.push(...feedLines);
+      }
+
+      if (contentLines.length > contentHeight) {
+        contentLines = contentLines.slice(0, contentHeight);
+      }
+      while (contentLines.length < contentHeight) {
+        contentLines.push("");
+      }
     }
 
-    // Bottom border
+    for (const line of contentLines) {
+      lines.push(row(line));
+    }
+
+    lines.push(border("├" + "─".repeat(innerW) + "┤"));
+    lines.push(row(renderLegend(this.theme, this.cwd, sectionW, this.crewViewState, selectedTask)));
     lines.push(border("╰" + "─".repeat(innerW) + "╯"));
 
+    if (allEvents.length > 0) {
+      this.crewViewState.lastSeenEventTs = allEvents[allEvents.length - 1].ts;
+    }
+
     return lines;
   }
 
-  private centerText(text: string, width: number): string {
-    const padding = Math.max(0, width - visibleWidth(text));
-    const left = Math.floor(padding / 2);
-    return " ".repeat(left) + text;
+  private static readonly SIGNIFICANT_EVENTS = new Set<FeedEventType>([
+    "task.done", "task.block", "task.start", "message",
+    "plan.done", "plan.failed", "task.revise", "task.revise-tree",
+  ]);
+
+  private detectAndFlashEvents(events: FeedEvent[], prevTs: string | null): void {
+    if (prevTs === null) return;
+    const newEvents = events.filter(e => e.ts > prevTs);
+    if (newEvents.length === 0) return;
+
+    const significant = newEvents.filter(e => MessengerOverlay.SIGNIFICANT_EVENTS.has(e.type));
+    if (significant.length === 0) return;
+
+    const last = significant[significant.length - 1];
+    const sameType = significant.filter(e => e.type === last.type);
+
+    let message: string;
+    if (sameType.length > 1) {
+      const label =
+        last.type === "task.done" ? `${sameType.length} tasks completed` :
+        last.type === "task.start" ? `${sameType.length} tasks started` :
+        last.type === "task.block" ? `${sameType.length} tasks blocked` :
+        last.type === "message" ? `${sameType.length} new messages` :
+        `${sameType.length} ${last.type} events`;
+      message = label;
+    } else {
+      const target = last.target ? ` ${last.target}` : "";
+      const preview = last.preview ? ` — ${last.preview.slice(0, 40)}` : "";
+      message =
+        last.type === "task.done" ? `${last.agent} completed${target}` :
+        last.type === "task.start" ? `${last.agent} started${target}` :
+        last.type === "task.block" ? `${last.agent} blocked${target}${preview}` :
+        last.type === "message" ? `${last.agent}${preview || " sent a message"}` :
+        last.type === "plan.done" ? "Planning completed" :
+        last.type === "plan.failed" ? "Planning failed" :
+        `${last.agent} ${last.type}${target}`;
+    }
+
+    setNotification(this.crewViewState, this.tui, true, message);
   }
 
-  private renderTitleContent(peerCount: number): string {
+  private checkCompletion(tasks: Task[], planning: boolean): void {
+    const allDone = tasks.length > 0 && tasks.every(t => t.status === "done");
+    const isIdle = !hasLiveWorkers(this.cwd) && !isAutonomousForCwd(this.cwd) && !planning;
+
+    if (!allDone) {
+      this.sawIncompleteWork = true;
+      this.cancelCompletionTimer();
+      this.completionDismissed = false;
+      return;
+    }
+
+    if (isIdle && this.sawIncompleteWork && !this.completionTimer && !this.completionDismissed) {
+      setNotification(this.crewViewState, this.tui, true, "All tasks complete! Closing in 3s...");
+      this.completionTimer = setTimeout(() => {
+        this.completionTimer = null;
+        this.done(this.generateSnapshot());
+      }, 3000);
+    }
+  }
+
+  private cancelCompletionTimer(): void {
+    if (this.completionTimer) {
+      clearTimeout(this.completionTimer);
+      this.completionTimer = null;
+      this.completionDismissed = true;
+    }
+  }
+
+  private renderTitleContent(): string {
     const label = this.theme.fg("accent", "Messenger");
-    const totalCount = peerCount + 1;
-    const count = this.theme.fg("dim", `${totalCount} agent${totalCount === 1 ? "" : "s"}`);
-    const folder = this.theme.fg("dim", extractFolder(process.cwd()));
-
-    return `${label} ─ ${count} ─ ${folder}`;
-  }
-
-  private renderTabBar(width: number, agents: AgentRegistration[]): string {
-    const parts: string[] = [];
-    const hasAnySpec = this.hasAnySpec(agents);
-    const mode = getDisplayMode(agents);
-
-    // Agents tab
-    const isAgentsSelected = this.selectedAgent === AGENTS_TAB;
-    let agentsTab = isAgentsSelected ? "▸ " : "";
-    agentsTab += this.theme.fg("accent", "Agents");
-    parts.push(agentsTab);
-
-    // Crew tab (only if plan exists)
-    if (this.hasPlan()) {
-      const isCrewSelected = this.selectedAgent === CREW_TAB;
-      let crewTab = isCrewSelected ? "▸ " : "";
-      crewTab += this.theme.fg("accent", "Crew");
-      
-      // Show task progress
-      const plan = crewStore.getPlan(this.cwd);
-      if (plan && plan.task_count > 0) {
-        crewTab += ` (${plan.completed_count}/${plan.task_count})`;
-      }
-      parts.push(crewTab);
-    }
-
-    for (const agent of agents) {
-      const isSelected = this.selectedAgent === agent.name;
-      const unread = this.state.unreadCounts.get(agent.name) ?? 0;
-
-      let tab = isSelected ? "▸ " : "";
-      tab += "● ";
-      tab += coloredAgentName(agent.name);
-
-      if (hasAnySpec) {
-        if (agent.spec) {
-          const specLabel = truncatePathLeft(displaySpecPath(agent.spec, process.cwd()), 14);
-          tab += `:${specLabel}`;
-        }
-      } else if (mode === "same-folder") {
-        if (agent.gitBranch) {
-          tab += `:${agent.gitBranch}`;
-        }
-      } else if (mode === "different") {
-        tab += `/${extractFolder(agent.cwd)}`;
-      }
-
-      if (unread > 0 && !isSelected) {
-        tab += ` (${unread})`;
-      }
-
-      parts.push(tab);
-    }
-
-    const isAllSelected = this.selectedAgent === null;
-    let allTab = isAllSelected ? "▸ " : "";
-    allTab += this.theme.fg("accent", "+ All");
-    parts.push(allTab);
-
-    const content = parts.join(" │ ");
-    return truncateToWidth(content, width);
-  }
-
-  private renderMessages(width: number, height: number, agents: AgentRegistration[]): string[] {
-    if (this.selectedAgent === AGENTS_TAB) {
-      return this.renderAgentsOverview(width, height, agents);
-    }
-
-    if (this.selectedAgent === CREW_TAB) {
-      return renderCrewContent(this.theme, this.cwd, width, height, this.crewViewState);
-    }
-
-    const messages = this.getMessages();
-
-    if (messages.length === 0) {
-      return this.renderNoMessages(width, height, agents);
-    }
-
-    const maxVisibleMessages = Math.max(1, Math.floor(height / 3));
-    const endIdx = messages.length - this.scrollPosition;
-    const startIdx = Math.max(0, endIdx - maxVisibleMessages);
-    const visibleMessages = messages.slice(startIdx, endIdx);
-
-    const allRenderedLines: string[] = [];
-    for (const msg of visibleMessages) {
-      const msgLines = this.renderMessageBox(msg, width - 2);
-      allRenderedLines.push(...msgLines);
-    }
-
-    if (allRenderedLines.length > height) {
-      return allRenderedLines.slice(allRenderedLines.length - height);
-    }
-
-    while (allRenderedLines.length < height) {
-      allRenderedLines.unshift("");
-    }
-    return allRenderedLines;
-  }
-
-  private renderAgentsOverview(width: number, height: number, agents: AgentRegistration[]): string[] {
-    const lines: string[] = [];
-    const allClaims = store.getClaims(this.dirs);
-
-    const renderCard = (a: AgentRegistration, isSelf: boolean): void => {
-      const computed = computeStatus(
-        a.activity?.lastActivityAt ?? a.startedAt,
-        agentHasTask(a.name, allClaims, crewStore.getTasks(a.cwd)),
-        (a.reservations?.length ?? 0) > 0,
-        this.stuckThresholdMs
-      );
-      const indicator = STATUS_INDICATORS[computed.status];
-      const nameLabel = isSelf ? `${a.name} (you)` : a.name;
-      const nameColored = isSelf
-        ? this.theme.fg("accent", nameLabel)
-        : coloredAgentName(a.name);
-
-      let rightSide = "";
-      let rightPlainText = "";
-      if (computed.status === "idle" && computed.idleFor) {
-        rightPlainText = `idle ${computed.idleFor}`;
-        rightSide = this.theme.fg("dim", rightPlainText);
-      } else if (computed.status === "away" && computed.idleFor) {
-        rightPlainText = `away ${computed.idleFor}`;
-        rightSide = this.theme.fg("dim", rightPlainText);
-      } else if (computed.status === "stuck") {
-        rightPlainText = "stuck";
-        rightSide = this.theme.fg("error", rightPlainText);
-      }
-
-      const headerLeft = `${indicator} ${nameColored}`;
-      if (rightSide) {
-        const headerLeftLen = visibleWidth(`${indicator} ${nameLabel}`);
-        const rightLen = visibleWidth(rightPlainText);
-        const gap = Math.max(1, width - headerLeftLen - rightLen);
-        lines.push(truncateToWidth(headerLeft + " ".repeat(gap) + rightSide, width));
-      } else {
-        lines.push(truncateToWidth(headerLeft, width));
-      }
-
-      const detailParts: string[] = [];
-      if (a.activity?.currentActivity) {
-        detailParts.push(a.activity.currentActivity);
-      }
-      const tools = a.session?.toolCalls ?? 0;
-      detailParts.push(`${tools} tools`);
-      const tokens = a.session?.tokens ?? 0;
-      detailParts.push(tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`);
-      if (a.reservations && a.reservations.length > 0) {
-        detailParts.push(`\u{1F4C1} ${a.reservations.map(r => r.pattern).join(", ")}`);
-      }
-      if (a.statusMessage) {
-        detailParts.push(a.statusMessage);
-      }
-      lines.push(truncateToWidth(`   ${detailParts.join(" - ")}`, width));
-      lines.push("");
-    };
-
-    renderCard(buildSelfRegistration(this.state), true);
-    for (const agent of agents) {
-      renderCard(agent, false);
-    }
-
-    const feedHeight = Math.max(0, height - lines.length - 1);
-    if (feedHeight > 1) {
-      const events = readFeedEvents(this.dirs, feedHeight);
-      if (events.length > 0) {
-        lines.push(this.theme.fg("dim", "Activity"));
-        for (const event of events.slice(-(feedHeight - 1))) {
-          lines.push(truncateToWidth(this.formatFeedLine(event), width));
-        }
-      }
-    }
-
-    if (lines.length > height) {
-      return lines.slice(0, height);
-    }
-    while (lines.length < height) lines.push("");
-    return lines;
-  }
-
-  private formatFeedLine(event: FeedEvent): string {
-    return this.theme.fg("dim", sharedFormatFeedLine(event));
-  }
-
-  private renderNoMessages(width: number, height: number, agents: AgentRegistration[]): string[] {
-    const lines: string[] = [];
-
-    if (this.selectedAgent === null) {
-      const msg = "No broadcasts sent yet";
-      const padTop = Math.floor((height - 1) / 2);
-      for (let i = 0; i < padTop; i++) lines.push("");
-      const pad = " ".repeat(Math.max(0, Math.floor((width - visibleWidth(msg)) / 2)));
-      lines.push(pad + this.theme.fg("dim", msg));
-    } else {
-      const agent = agents.find(a => a.name === this.selectedAgent);
-      const msg1 = `No messages with ${this.selectedAgent}`;
-
-      const details: string[] = [];
-      if (agent) {
-        const folder = extractFolder(agent.cwd);
-        const infoParts = [folder];
-        if (agent.gitBranch) infoParts.push(agent.gitBranch);
-        infoParts.push(agent.model);
-        infoParts.push(formatRelativeTime(agent.startedAt));
-        details.push(infoParts.join(" • "));
-
-        if (agent.reservations && agent.reservations.length > 0) {
-          for (const r of agent.reservations) {
-            details.push(`🔒 ${truncatePathLeft(r.pattern, 40)}`);
-          }
-        }
-      }
-
-      const totalLines = 1 + details.length + 1;
-      const padTop = Math.floor((height - totalLines) / 2);
-      for (let i = 0; i < padTop; i++) lines.push("");
-
-      const pad1 = " ".repeat(Math.max(0, Math.floor((width - visibleWidth(msg1)) / 2)));
-      lines.push(pad1 + msg1);
-      lines.push("");
-
-      for (const detail of details) {
-        const pad = " ".repeat(Math.max(0, Math.floor((width - visibleWidth(detail)) / 2)));
-        lines.push(pad + this.theme.fg("dim", detail));
-      }
-    }
-
-    while (lines.length < height) lines.push("");
-    return lines;
-  }
-
-  private renderMessageBox(msg: AgentMailMessage, maxWidth: number): string[] {
-    const isOutgoing = msg.from === this.state.agentName;
-    const senderLabel = isOutgoing
-      ? (msg.to === "broadcast" ? "You → All" : "You")
-      : stripAnsiCodes(msg.from);
-    const senderColored = isOutgoing
-      ? this.theme.fg("accent", senderLabel)
-      : coloredAgentName(msg.from);
-
-    const timeStr = formatRelativeTime(msg.timestamp);
-    const time = this.theme.fg("dim", timeStr);
-    const safeText = stripAnsiCodes(msg.text);
-
-    const boxWidth = Math.max(6, Math.min(maxWidth, 60));
-    const contentWidth = Math.max(1, boxWidth - 4);
-
-    const wrappedLines = this.wrapText(safeText, contentWidth);
-
-    const headerLeft = `┌─ ${senderColored} `;
-    const headerRight = ` ${time} ─┐`;
-    const headerLeftLen = 4 + visibleWidth(senderLabel);
-    const headerRightLen = visibleWidth(timeStr) + 4;
-    const dashCount = Math.max(0, boxWidth - headerLeftLen - headerRightLen);
-
-    const lines: string[] = [];
-    lines.push(headerLeft + "─".repeat(dashCount) + headerRight);
-
-    for (const line of wrappedLines) {
-      const padRight = contentWidth - visibleWidth(line);
-      lines.push(`│ ${line}${" ".repeat(Math.max(0, padRight))} │`);
-    }
-
-    lines.push(`└${"─".repeat(Math.max(0, boxWidth - 2))}┘`);
-    lines.push("");
-
-    return lines;
-  }
-
-  private wrapText(text: string, maxWidth: number): string[] {
-    const result: string[] = [];
-    const paragraphs = text.split("\n");
-
-    for (const para of paragraphs) {
-      if (para === "") {
-        result.push("");
-        continue;
-      }
-
-      const words = para.split(" ");
-      let currentLine = "";
-
-      for (const word of words) {
-        const testLine = currentLine ? `${currentLine} ${word}` : word;
-        if (visibleWidth(testLine) <= maxWidth) {
-          currentLine = testLine;
-        } else {
-          if (currentLine) result.push(currentLine);
-          if (visibleWidth(word) > maxWidth) {
-            currentLine = truncateToWidth(word, maxWidth - 1) + "…";
-          } else {
-            currentLine = word;
-          }
-        }
-      }
-
-      if (currentLine) result.push(currentLine);
-    }
-
-    return result.length > 0 ? result : [""];
-  }
-
-  private renderInputBar(width: number): string {
-    // Crew tab has a status bar instead of input
-    if (this.selectedAgent === CREW_TAB) {
-      return renderCrewStatusBar(this.theme, this.cwd, width);
-    }
-
-    const prompt = this.theme.fg("accent", "> ");
-
-    let placeholder: string;
-    if (this.selectedAgent === AGENTS_TAB) {
-      placeholder = "@name msg or broadcast...";
-    } else if (this.selectedAgent === null) {
-      placeholder = "Broadcast to all agents...";
-    } else {
-      placeholder = `Message ${this.selectedAgent}...`;
-    }
-
-    const hint = this.theme.fg("dim", "[Tab] [Enter]");
-    const hintLen = visibleWidth("[Tab] [Enter]");
-
-    if (this.inputText) {
-      const maxInputLen = Math.max(1, width - 2 - hintLen - 2);
-      const displayText = truncateToWidth(this.inputText, maxInputLen);
-      const padLen = width - 2 - visibleWidth(displayText) - hintLen;
-      return prompt + displayText + " ".repeat(Math.max(0, padLen)) + hint;
-    } else {
-      const displayPlaceholder = truncateToWidth(placeholder, Math.max(1, width - 2 - hintLen - 2));
-      const padLen = width - 2 - visibleWidth(displayPlaceholder) - hintLen;
-      return prompt + this.theme.fg("dim", displayPlaceholder) + " ".repeat(Math.max(0, padLen)) + hint;
-    }
+    const folder = this.theme.fg("dim", extractFolder(this.cwd));
+    return `${label} ─ ${folder}`;
   }
 
   invalidate(): void {
-    // No cached state to invalidate
+    // No cached state
   }
 
   dispose(): void {
     this.stopProgressRefresh();
+    this.stopPlanningRefresh();
+    this.cancelCompletionTimer();
+    if (this.crewViewState.notificationTimer) {
+      clearTimeout(this.crewViewState.notificationTimer);
+      this.crewViewState.notificationTimer = null;
+    }
     this.progressUnsubscribe?.();
     this.progressUnsubscribe = null;
   }

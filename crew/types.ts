@@ -14,6 +14,7 @@ import type { CrewAgentConfig } from "./utils/discover.js";
 
 export interface Plan {
   prd: string;                   // Path to PRD file (relative to cwd)
+  prompt?: string;               // Inline prompt text (when no PRD file)
   created_at: string;            // ISO timestamp
   updated_at: string;            // ISO timestamp
   task_count: number;            // Total tasks
@@ -36,6 +37,7 @@ export interface Task {
   id: string;                    // task-N format
   title: string;
   status: TaskStatus;
+  milestone?: boolean;
   model?: string;
   depends_on: string[];          // Task IDs this depends on
   created_at: string;            // ISO timestamp
@@ -84,10 +86,15 @@ export interface CrewParams {
 
   // Content
   content?: string;                // Task description/spec content
+  count?: number;
+  subtasks?: { title: string; content?: string }[];
 
   // Review
   target?: string;               // Task ID to review
   type?: "plan" | "impl";
+
+  // Plan options
+  autoWork?: boolean;
 
   // Work options
   autonomous?: boolean;
@@ -97,10 +104,13 @@ export interface CrewParams {
   // Task reset
   cascade?: boolean;
 
+  // Revision
+  prompt?: string;
+
   // Feed
   limit?: number;
 
-  // Coordination (existing)
+  // Coordination
   spec?: string;
   to?: string | string[];
   message?: string;
@@ -109,7 +119,6 @@ export interface CrewParams {
   reason?: string;
   name?: string;
   notes?: string;
-  release?: string[] | boolean;
   autoRegisterPath?: "add" | "remove" | "list";
 }
 

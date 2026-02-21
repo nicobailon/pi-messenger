@@ -7,14 +7,17 @@
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { Dirs } from "../../lib.js";
-import type { CrewParams, AppendEntryFn, Task } from "../types.js";
+import type { CrewParams, AppendEntryFn } from "../types.js";
 import { result } from "../utils/result.js";
 import { resolveModel, spawnAgents } from "../agents.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { discoverCrewAgents } from "../utils/discover.js";
+import { buildWorkerPrompt } from "../prompt.js";
 import * as store from "../store.js";
 import { getCrewDir } from "../store.js";
-import { autonomousState, startAutonomous, stopAutonomous, addWaveResult } from "../state.js";
+import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, addWaveResult, clampConcurrency } from "../state.js";
+import { getAvailableLobbyWorkers, assignTaskToLobbyWorker, cleanupUnassignedAliveFiles } from "../lobby.js";
+import { logFeedEvent } from "../../feed.js";
 
 export async function execute(
   params: CrewParams,
@@ -46,8 +49,25 @@ export async function execute(
     });
   }
 
-  // Get ready tasks
-  const readyTasks = store.getReadyTasks(cwd);
+  store.autoCompleteMilestones(cwd);
+  syncCompletedCount(cwd);
+
+  // Get ready tasks — auto-block any that exceeded max attempts
+  const allReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
+  const readyTasks: typeof allReady = [];
+  for (const task of allReady) {
+    if (task.attempt_count >= config.work.maxAttemptsPerTask) {
+      store.updateTask(cwd, task.id, {
+        status: "blocked",
+        blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
+      });
+      store.appendTaskProgress(cwd, task.id, "system",
+        `Auto-blocked after ${task.attempt_count} attempts (max: ${config.work.maxAttemptsPerTask})`);
+      logFeedEvent(cwd, "crew", "task.block", task.id, `Max attempts (${config.work.maxAttemptsPerTask}) reached`);
+    } else {
+      readyTasks.push(task);
+    }
+  }
 
   if (readyTasks.length === 0) {
     const tasks = store.getTasks(cwd);
@@ -77,27 +97,60 @@ export async function execute(
   }
 
   // Determine concurrency
-  const concurrency = concurrencyOverride ?? config.concurrency.workers;
-  const tasksToRun = readyTasks.slice(0, concurrency);
+  const requestedConcurrency = concurrencyOverride
+    ?? (autonomous && isAutonomousForCwd(cwd)
+      ? autonomousState.concurrency
+      : config.concurrency.workers);
+  autonomousState.concurrency = clampConcurrency(requestedConcurrency, config.concurrency.max);
 
   // If autonomous mode, set up state and persist (only on first wave or cwd change)
-  if (autonomous && (!autonomousState.active || autonomousState.cwd !== cwd)) {
-    startAutonomous(cwd);
+  if (autonomous && !isAutonomousForCwd(cwd)) {
+    startAutonomous(cwd, autonomousState.concurrency);
     appendEntry("crew-state", autonomousState);
   }
 
-  // Spawn workers
-  const workerTasks = tasksToRun.map(task => {
+  // Assign tasks to lobby workers first (they're already running and warmed up)
+  const prdLabel = store.getPlanLabel(plan);
+  const lobbyAssigned = new Set<string>();
+  const lobbyWorkers = getAvailableLobbyWorkers(cwd);
+  for (const lobbyWorker of lobbyWorkers) {
+    const task = readyTasks.find(t => !lobbyAssigned.has(t.id));
+    if (!task) break;
+
+    const others = readyTasks.filter(t => t.id !== task.id);
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
+    store.updateTask(cwd, task.id, {
+      status: "in_progress",
+      started_at: new Date().toISOString(),
+      base_commit: store.getBaseCommit(cwd),
+      assigned_to: lobbyWorker.name,
+      attempt_count: task.attempt_count + 1,
+    });
+    if (!assignTaskToLobbyWorker(lobbyWorker, task.id, prompt, dirs.inbox)) {
+      store.updateTask(cwd, task.id, { status: "todo", assigned_to: undefined });
+      continue;
+    }
+    store.appendTaskProgress(cwd, task.id, "system", `Assigned to lobby worker ${lobbyWorker.name} (attempt ${task.attempt_count + 1})`);
+    logFeedEvent(cwd, lobbyWorker.name, "task.start", task.id, task.title);
+    lobbyAssigned.add(task.id);
+  }
+  cleanupUnassignedAliveFiles(cwd);
+
+  // Build prompts for remaining tasks — spawnAgents throttles via autonomousState.concurrency
+  const remainingTasks = readyTasks.filter(t => !lobbyAssigned.has(t.id));
+  const workerTasks = remainingTasks.map(task => {
     const taskModel = resolveModel(
       task.model,
       params.model,
       config.models?.worker,
-      undefined,
     );
+    const others = readyTasks.filter(t => t.id !== task.id);
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
+    store.appendTaskProgress(cwd, task.id, "system", `Assigned to crew-worker (attempt ${task.attempt_count + 1})`);
 
     return {
       agent: "crew-worker",
-      task: buildWorkerPrompt(task, plan.prd, cwd),
+      task: prompt,
       taskId: task.id,
       modelOverride: taskModel,
     };
@@ -105,7 +158,6 @@ export async function execute(
 
   const workerResults = await spawnAgents(
     workerTasks,
-    concurrency,
     cwd,
     {
       signal,
@@ -132,8 +184,11 @@ export async function execute(
         succeeded.push(taskId);
       } else if (task?.status === "blocked") {
         blocked.push(taskId);
-      } else if (r.wasGracefullyShutdown && task?.status === "in_progress") {
+      } else if (task?.status === "in_progress") {
+        store.appendTaskProgress(cwd, taskId, "system",
+          r.wasGracefullyShutdown ? "Task interrupted (shutdown), reset to todo" : "Worker exited without completing task, reset to todo");
         store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
+        failed.push(taskId);
       } else {
         failed.push(taskId);
       }
@@ -144,16 +199,26 @@ export async function execute(
         } else if (task?.status === "blocked") {
           blocked.push(taskId);
         } else if (task?.status === "in_progress") {
+          store.appendTaskProgress(cwd, taskId, "system", "Task interrupted (shutdown), reset to todo");
           store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
+          failed.push(taskId);
+        } else {
+          failed.push(taskId);
         }
       } else if (autonomous && task?.status === "in_progress") {
+        store.appendTaskProgress(cwd, taskId, "system", `Worker crashed: ${r.error ?? "Unknown error"}`);
         store.blockTask(cwd, taskId, `Worker failed: ${r.error ?? "Unknown error"}`);
         blocked.push(taskId);
       } else {
+        if (task?.status === "in_progress") {
+          store.appendTaskProgress(cwd, taskId, "system", `Worker failed: ${r.error ?? "Unknown error"}`);
+        }
         failed.push(taskId);
       }
     }
   }
+
+  syncCompletedCount(cwd);
 
   // Save current wave number BEFORE addWaveResult increments it
   const currentWave = autonomous ? autonomousState.waveNumber : 1;
@@ -161,7 +226,7 @@ export async function execute(
   if (autonomous) {
     addWaveResult({
       waveNumber: currentWave,
-      tasksAttempted: tasksToRun.map(t => t.id),
+      tasksAttempted: remainingTasks.map(t => t.id),
       succeeded,
       failed,
       blocked,
@@ -172,7 +237,7 @@ export async function execute(
       stopAutonomous("manual");
       appendEntry("crew-state", autonomousState);
     } else {
-      const nextReady = store.getReadyTasks(cwd);
+      const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
       const allTasks = store.getTasks(cwd);
       const allDone = allTasks.every(t => t.status === "done");
       const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");
@@ -216,7 +281,7 @@ export async function execute(
   if (failed.length > 0) statusText += `\n❌ Failed: ${failed.join(", ")}`;
   if (blocked.length > 0) statusText += `\n🚫 Blocked: ${blocked.join(", ")}`;
 
-  const nextReady = store.getReadyTasks(cwd);
+  const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
   const nextText = nextReady.length > 0
     ? `\n\n**Ready for next wave:** ${nextReady.map(t => t.id).join(", ")}`
     : "";
@@ -226,12 +291,16 @@ export async function execute(
       ? "Autonomous mode stopped (cancelled)."
       : "";
 
+  const lobbyText = lobbyAssigned.size > 0
+    ? `\n🏢 Lobby workers assigned: ${Array.from(lobbyAssigned).join(", ")}`
+    : "";
+
   const text = `# Work Wave ${currentWave}
 
-**PRD:** ${plan.prd}
-**Tasks attempted:** ${tasksToRun.length}
+**PRD:** ${store.getPlanLabel(plan)}
+**Tasks attempted:** ${remainingTasks.length}${lobbyAssigned.size > 0 ? ` (+${lobbyAssigned.size} lobby)` : ""}
 **Progress:** ${progress}
-${statusText}${nextText}
+${statusText}${lobbyText}${nextText}
 
 ${continueText}`;
 
@@ -239,7 +308,7 @@ ${continueText}`;
     mode: "work",
     prd: plan.prd,
     wave: currentWave,
-    attempted: tasksToRun.map(t => t.id),
+    attempted: remainingTasks.map(t => t.id),
     succeeded,
     failed,
     blocked,
@@ -248,76 +317,12 @@ ${continueText}`;
   });
 }
 
-// =============================================================================
-// Worker Prompt Builder
-// =============================================================================
-
-function buildWorkerPrompt(task: Task, prdPath: string, cwd: string): string {
-  const taskSpec = store.getTaskSpec(cwd, task.id);
-  const planSpec = store.getPlanSpec(cwd);
-
-  let prompt = `# Task Assignment
-
-**Task ID:** ${task.id}
-**Task Title:** ${task.title}
-**PRD:** ${prdPath}
-${task.attempt_count >= 1 ? `**Attempt:** ${task.attempt_count + 1} (retry after previous attempt)` : ""}
-
-## Your Mission
-
-Implement this task following the crew-worker protocol:
-1. Join the mesh
-2. Read task spec to understand requirements
-3. Start task and reserve files
-4. Implement the feature
-5. Commit your changes
-6. Release reservations and mark complete
-
-`;
-
-  // Include previous review feedback if this is a retry
-  if (task.last_review) {
-    prompt += `## ⚠️ Previous Review Feedback
-
-**Verdict:** ${task.last_review.verdict}
-
-${task.last_review.summary}
-
-${task.last_review.issues.length > 0 ? `**Issues to fix:**\n${task.last_review.issues.map(i => `- ${i}`).join("\n")}\n` : ""}
-${task.last_review.suggestions.length > 0 ? `**Suggestions:**\n${task.last_review.suggestions.map(s => `- ${s}`).join("\n")}\n` : ""}
-
-**You MUST address the issues above in this attempt.**
-
-`;
+function syncCompletedCount(cwd: string): void {
+  const plan = store.getPlan(cwd);
+  if (!plan) return;
+  const doneCount = store.getTasks(cwd).filter(t => t.status === "done").length;
+  if (plan.completed_count !== doneCount) {
+    store.updatePlan(cwd, { completed_count: doneCount });
   }
-
-  if (taskSpec && !taskSpec.includes("*Spec pending*")) {
-    prompt += `## Task Specification
-
-${taskSpec}
-
-`;
-  }
-
-  if (task.depends_on.length > 0) {
-    prompt += `## Dependencies
-
-This task depends on: ${task.depends_on.join(", ")}
-These tasks are already complete - you can reference their implementations.
-
-`;
-  }
-
-  if (planSpec && !planSpec.includes("*Spec pending*")) {
-    // Include truncated plan spec for context
-    const truncatedSpec = planSpec.length > 2000 
-      ? planSpec.slice(0, 2000) + `\n\n[Spec truncated - read full spec from .pi/messenger/crew/plan.md]`
-      : planSpec;
-    prompt += `## Plan Context
-
-${truncatedSpec}
-`;
-  }
-
-  return prompt;
 }
+

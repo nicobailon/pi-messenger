@@ -46,7 +46,7 @@ ${modelLine}---
 You are a test worker.
 `;
 
-  const filePath = path.join(cwd, ".pi", "agents", "crew-worker.md");
+  const filePath = path.join(cwd, ".pi", "messenger", "crew", "agents", "crew-worker.md");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
 }
@@ -79,7 +79,7 @@ describe("crew/model override", () => {
       task: "Implement task",
       taskId: "task-1",
       modelOverride: "wave-override-model",
-    }], 1, dirs.cwd);
+    }], dirs.cwd);
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
     const args = spawnMock.mock.calls[0][1] as string[];
@@ -96,7 +96,7 @@ describe("crew/model override", () => {
       agent: "crew-worker",
       task: "Implement task",
       taskId: "task-1",
-    }], 1, dirs.cwd);
+    }], dirs.cwd);
 
     const args = spawnMock.mock.calls[0][1] as string[];
     const modelFlagIndex = args.indexOf("--model");

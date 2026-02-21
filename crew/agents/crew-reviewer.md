@@ -2,7 +2,7 @@
 name: crew-reviewer
 description: Reviews task implementations for quality and correctness
 tools: read, bash, pi_messenger
-model: openai/gpt-5.2-high
+model: anthropic/claude-opus-4-6
 crewRole: reviewer
 maxOutput: { bytes: 102400, lines: 2000 }
 parallel: true

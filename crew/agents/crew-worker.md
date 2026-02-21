@@ -2,7 +2,7 @@
 name: crew-worker
 description: Implements a single crew task with mesh coordination
 tools: read, write, edit, bash, pi_messenger
-model: claude-opus-4-5
+model: anthropic/claude-haiku-4-5
 crewRole: worker
 maxOutput: { bytes: 204800, lines: 5000 }
 parallel: true
@@ -54,6 +54,14 @@ pi_messenger({ action: "reserve", paths: ["src/path/to/files/"], reason: "<TASK_
 3. Write tests if applicable
 4. Run tests to verify: `bash({ command: "npm test" })` or equivalent
 
+**Progress Logging:** After each significant step above, log what you did:
+
+```typescript
+pi_messenger({ action: "task.progress", id: "<TASK_ID>", message: "Added JWT validation to src/auth/middleware.ts" })
+```
+
+Keep entries concise — one line per step. This helps the next agent pick up where you left off if the task gets interrupted.
+
 ## Phase 5: Commit
 
 ```bash
@@ -102,3 +110,8 @@ If you receive a message saying "SHUTDOWN REQUESTED":
 - ALWAYS release before completing
 - If you encounter a blocker, use `task.block` with a clear reason
 - Follow existing code patterns and conventions
+
+## Coordination
+
+Follow the coordination instructions in your task prompt's "Coordination" section.
+If no coordination section is present, do not send messages — focus on your task.

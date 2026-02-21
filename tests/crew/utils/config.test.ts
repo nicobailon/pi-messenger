@@ -66,10 +66,31 @@ describe("crew/utils/config", () => {
     expect(cfg.concurrency.workers).toBe(2);
     expect(cfg.artifacts.enabled).toBe(true);
     expect(cfg.artifacts.cleanupDays).toBe(7);
-    expect(cfg.planning.maxPasses).toBe(3);
+    expect(cfg.planning.maxPasses).toBe(1);
     expect(cfg.work.maxAttemptsPerTask).toBe(5);
     expect(cfg.work.maxWaves).toBe(50);
     expect(cfg.work.stopOnBlock).toBe(false);
+  });
+
+  it("supports dependencies config field defaults and overrides", async () => {
+    const { loadCrewConfig } = await loadConfigModule();
+    const defaultCfg = loadCrewConfig(dirs.crewDir);
+    expect(defaultCfg.dependencies).toBe("advisory");
+
+    const userConfigPath = path.join(dirs.root, ".pi", "agent", "pi-messenger.json");
+    writeJson(userConfigPath, {
+      crew: {
+        dependencies: "strict",
+      },
+    });
+    const userCfg = loadCrewConfig(dirs.crewDir);
+    expect(userCfg.dependencies).toBe("strict");
+
+    writeJson(path.join(dirs.crewDir, "config.json"), {
+      dependencies: "advisory",
+    });
+    const projectCfg = loadCrewConfig(dirs.crewDir);
+    expect(projectCfg.dependencies).toBe("advisory");
   });
 
   it("getTruncationForRole returns role-specific truncation settings", async () => {
@@ -90,6 +111,42 @@ describe("crew/utils/config", () => {
     expect(getTruncationForRole(cfg, "reviewer")).toEqual({ bytes: 5, lines: 6 });
     expect(getTruncationForRole(cfg, "analyst")).toEqual({ bytes: 7, lines: 8 });
     expect(getTruncationForRole(cfg, "unknown")).toEqual({ bytes: 3, lines: 4 });
+  });
+
+  it("cycleCoordinationLevel cycles through all levels in order", async () => {
+    const { cycleCoordinationLevel } = await loadConfigModule();
+    expect(cycleCoordinationLevel("none")).toBe("minimal");
+    expect(cycleCoordinationLevel("minimal")).toBe("moderate");
+    expect(cycleCoordinationLevel("moderate")).toBe("chatty");
+    expect(cycleCoordinationLevel("chatty")).toBe("none");
+  });
+
+  it("setCoordinationOverride overrides loadCrewConfig result", async () => {
+    const { loadCrewConfig, setCoordinationOverride, getCoordinationOverride } = await loadConfigModule();
+
+    expect(getCoordinationOverride()).toBeNull();
+    const before = loadCrewConfig(dirs.crewDir);
+    expect(before.coordination).toBe("chatty");
+
+    setCoordinationOverride("minimal");
+    expect(getCoordinationOverride()).toBe("minimal");
+    const after = loadCrewConfig(dirs.crewDir);
+    expect(after.coordination).toBe("minimal");
+  });
+
+  it("coordination override takes priority over project config", async () => {
+    writeJson(path.join(dirs.crewDir, "config.json"), {
+      coordination: "moderate",
+    });
+
+    const { loadCrewConfig, setCoordinationOverride } = await loadConfigModule();
+
+    const before = loadCrewConfig(dirs.crewDir);
+    expect(before.coordination).toBe("moderate");
+
+    setCoordinationOverride("none");
+    const after = loadCrewConfig(dirs.crewDir);
+    expect(after.coordination).toBe("none");
   });
 
   it("deep merge handles nested object values with absent keys", async () => {

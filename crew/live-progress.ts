@@ -4,6 +4,7 @@ export interface LiveWorkerInfo {
   cwd: string;
   taskId: string;
   agent: string;
+  name: string;
   progress: AgentProgress;
   startedAt: number;
 }

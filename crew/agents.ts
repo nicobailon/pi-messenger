@@ -17,7 +17,6 @@ import {
   parseJsonlLine,
   updateProgress,
   getFinalOutput,
-  type AgentProgress,
   type PiEvent,
 } from "./utils/progress.js";
 import {
@@ -29,9 +28,11 @@ import {
 } from "./utils/artifacts.js";
 import { loadCrewConfig, getTruncationForRole, type CrewConfig } from "./utils/config.js";
 import { removeLiveWorker, updateLiveWorker } from "./live-progress.js";
+import { autonomousState, waitForConcurrencyChange } from "./state.js";
+import { registerWorker, unregisterWorker, killAll } from "./registry.js";
 import type { AgentTask, AgentResult } from "./types.js";
+import { generateMemorableName } from "../lib.js";
 
-// Extension directory (parent of crew/) - passed to subagents so they can use pi_messenger
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const EXTENSION_DIR = path.resolve(__dirname, "..");
@@ -44,6 +45,10 @@ export interface SpawnOptions {
   messengerDirs?: { registry: string; inbox: string };
 }
 
+export function shutdownAllWorkers(): void {
+  killAll();
+}
+
 export function resolveModel(
   taskModel?: string,
   paramModel?: string,
@@ -51,6 +56,24 @@ export function resolveModel(
   agentModel?: string,
 ): string | undefined {
   return taskModel ?? paramModel ?? configModel ?? agentModel;
+}
+
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
+export function resolveThinking(
+  configThinking?: string,
+  agentThinking?: string,
+): string | undefined {
+  const resolved = configThinking ?? agentThinking;
+  if (!resolved || resolved === "off") return undefined;
+  return resolved;
+}
+
+export function modelHasThinkingSuffix(model: string | undefined): boolean {
+  if (!model) return false;
+  const colonIdx = model.lastIndexOf(":");
+  if (colonIdx === -1) return false;
+  return THINKING_LEVELS.has(model.substring(colonIdx + 1));
 }
 
 export function raceTimeout(promise: Promise<void>, ms: number): Promise<boolean> {
@@ -95,7 +118,6 @@ const SHUTDOWN_MESSAGE = `⚠️ SHUTDOWN REQUESTED: Please wrap up your current
  */
 export async function spawnAgents(
   tasks: AgentTask[],
-  concurrency: number,
   cwd: string,
   options: SpawnOptions = {}
 ): Promise<AgentResult[]> {
@@ -117,7 +139,7 @@ export async function spawnAgents(
   while (queue.length > 0 || running.length > 0) {
     if (options.signal?.aborted && running.length === 0) break;
 
-    while (running.length < concurrency && queue.length > 0) {
+    while (running.length < autonomousState.concurrency && queue.length > 0) {
       if (options.signal?.aborted) break;
       const { task, index } = queue.shift()!;
       const promise = runAgent(task, index, cwd, agents, config, runId, artifactsDir, options)
@@ -129,7 +151,7 @@ export async function spawnAgents(
       running.push(promise);
     }
     if (running.length > 0) {
-      await Promise.race(running);
+      await Promise.race([...running, waitForConcurrencyChange()]);
       if (options.signal?.aborted) continue;
     }
   }
@@ -150,21 +172,23 @@ async function runAgent(
   const agentConfig = agents.find(a => a.name === task.agent);
   const progress = createProgress(task.agent);
   const startTime = Date.now();
+  const workerName = generateMemorableName();
 
-  // Determine truncation limits
   const role = agentConfig?.crewRole ?? "worker";
   const maxOutput = task.maxOutput
     ?? agentConfig?.maxOutput
     ?? getTruncationForRole(config, role);
 
-  // Setup artifact paths
-  const artifactPaths = config.artifacts.enabled
+  let artifactPaths = config.artifacts.enabled
     ? getArtifactPaths(artifactsDir, runId, task.agent, index)
     : undefined;
 
-  // Write input artifact
   if (artifactPaths) {
-    writeArtifact(artifactPaths.inputPath, `# Task for ${task.agent}\n\n${task.task}`);
+    try {
+      writeArtifact(artifactPaths.inputPath, `# Task for ${task.agent}\n\n${task.task}`);
+    } catch {
+      artifactPaths = undefined;
+    }
   }
 
   return new Promise((resolve) => {
@@ -172,6 +196,14 @@ async function runAgent(
     const args = ["--mode", "json", "--no-session", "-p"];
     const model = task.modelOverride ?? agentConfig?.model;
     if (model) args.push("--model", model);
+
+    const thinking = resolveThinking(
+      config.thinking?.[role],
+      agentConfig?.thinking,
+    );
+    if (thinking && !modelHasThinkingSuffix(model)) {
+      args.push("--thinking", thinking);
+    }
 
     if (agentConfig?.tools?.length) {
       const builtinTools: string[] = [];
@@ -206,8 +238,11 @@ async function runAgent(
     args.push(task.task);
 
     const envOverrides = config.work.env ?? {};
-    const env = Object.keys(envOverrides).length > 0
-      ? { ...process.env, ...envOverrides }
+    const workerFlag = role === "worker"
+      ? { PI_CREW_WORKER: "1", PI_AGENT_NAME: workerName }
+      : {};
+    const env = Object.keys(envOverrides).length > 0 || role === "worker"
+      ? { ...process.env, ...envOverrides, ...workerFlag }
       : undefined;
 
     const proc = spawn("pi", args, {
@@ -215,6 +250,9 @@ async function runAgent(
       stdio: ["ignore", "pipe", "pipe"],
       ...(env ? { env } : {}),
     });
+    if (task.taskId) {
+      registerWorker({ type: "worker", proc, name: workerName, cwd, taskId: task.taskId });
+    }
     let gracefulShutdownRequested = false;
     let discoveredWorkerName: string | null = null;
 
@@ -222,57 +260,66 @@ async function runAgent(
     const events: PiEvent[] = [];
 
     proc.stdout?.on("data", (data) => {
-      jsonlBuffer += data.toString();
-      const lines = jsonlBuffer.split("\n");
-      jsonlBuffer = lines.pop() ?? "";
+      try {
+        jsonlBuffer += data.toString();
+        const lines = jsonlBuffer.split("\n");
+        jsonlBuffer = lines.pop() ?? "";
 
-      for (const line of lines) {
-        const event = parseJsonlLine(line);
-        if (event) {
-          events.push(event);
-          updateProgress(progress, event, startTime);
-          if (artifactPaths) appendJsonl(artifactPaths.jsonlPath, line);
-          if (task.taskId) {
-            updateLiveWorker(cwd, task.taskId, {
-              taskId: task.taskId,
-              agent: task.agent,
-              progress: {
-                ...progress,
-                recentTools: progress.recentTools.map(tool => ({ ...tool })),
-              },
-              startedAt: startTime,
-            });
+        for (const line of lines) {
+          const event = parseJsonlLine(line);
+          if (event) {
+            events.push(event);
+            updateProgress(progress, event, startTime);
+            if (artifactPaths) {
+              try { appendJsonl(artifactPaths.jsonlPath, line); }
+              catch { artifactPaths = undefined; }
+            }
+            if (task.taskId) {
+              updateLiveWorker(cwd, task.taskId, {
+                taskId: task.taskId,
+                agent: task.agent,
+                name: workerName,
+                progress: {
+                  ...progress,
+                  recentTools: progress.recentTools.map(tool => ({ ...tool })),
+                },
+                startedAt: startTime,
+              });
+            }
           }
         }
-      }
+      } catch {}
     });
 
     let stderr = "";
     proc.stderr?.on("data", (data) => { stderr += data.toString(); });
 
     proc.on("close", (code) => {
-      if (task.taskId) removeLiveWorker(cwd, task.taskId);
+      if (task.taskId) {
+        removeLiveWorker(cwd, task.taskId);
+        unregisterWorker(cwd, task.taskId);
+      }
       progress.status = code === 0 ? "completed" : "failed";
       progress.durationMs = Date.now() - startTime;
       if (stderr && code !== 0) progress.error = stderr;
 
-      // Get final output from events
       const fullOutput = getFinalOutput(events);
       const truncation = truncateOutput(fullOutput, maxOutput, artifactPaths?.outputPath);
 
-      // Write output artifact (untruncated)
       if (artifactPaths) {
-        writeArtifact(artifactPaths.outputPath, fullOutput);
-        writeMetadata(artifactPaths.metadataPath, {
-          runId,
-          agent: task.agent,
-          index,
-          exitCode: code ?? 1,
-          durationMs: progress.durationMs,
-          tokens: progress.tokens,
-          truncated: truncation.truncated,
-          error: progress.error,
-        });
+        try {
+          writeArtifact(artifactPaths.outputPath, fullOutput);
+          writeMetadata(artifactPaths.metadataPath, {
+            runId,
+            agent: task.agent,
+            index,
+            exitCode: code ?? 1,
+            durationMs: progress.durationMs,
+            tokens: progress.tokens,
+            truncated: truncation.truncated,
+            error: progress.error,
+          });
+        } catch {}
       }
 
       if (promptTmpDir) {
@@ -345,7 +392,7 @@ async function runAgent(
           return;
         }
 
-        if (!proc.killed && proc.exitCode === null) {
+        if (proc.exitCode === null) {
           proc.kill("SIGKILL");
         }
       };

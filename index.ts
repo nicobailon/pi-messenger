@@ -6,12 +6,24 @@
  */
 
 import { homedir } from "node:os";
+import * as fs from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { TUI } from "@mariozechner/pi-tui";
+import type { OverlayHandle, TUI } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
+import { Type, type TUnsafe } from "@sinclair/typebox";
+
+function StringEnum<T extends readonly string[]>(
+  values: T,
+  options?: { description?: string; default?: T[number] },
+): TUnsafe<T[number]> {
+  return Type.Unsafe<T[number]>({
+    type: "string",
+    enum: [...values],
+    ...(options?.description && { description: options.description }),
+    ...(options?.default && { default: options.default }),
+  });
+}
 import {
   type MessengerState,
   type Dirs,
@@ -20,27 +32,49 @@ import {
   formatRelativeTime,
   stripAnsiCodes,
   extractFolder,
-  displaySpecPath,
   generateAutoStatus,
   computeStatus,
   agentHasTask,
 } from "./lib.js";
 import * as store from "./store.js";
 import * as handlers from "./handlers.js";
-import { MessengerOverlay } from "./overlay.js";
+import { MessengerOverlay, type OverlayCallbacks } from "./overlay.js";
 import { MessengerConfigOverlay } from "./config-overlay.js";
 import { loadConfig, matchesAutoRegisterPath, type MessengerConfig } from "./config.js";
 import { executeCrewAction } from "./crew/index.js";
 import { logFeedEvent, pruneFeed } from "./feed.js";
 import type { CrewParams } from "./crew/types.js";
-import { autonomousState, restoreAutonomousState, stopAutonomous } from "./crew/state.js";
+import {
+  autonomousState,
+  clearPlanningState,
+  consumePendingAutoWork,
+  consumePlanningOverlayPending,
+  dismissPlanningOverlayRun,
+  getPlanningOverlayPending,
+  isPlanningForCwd,
+  isPlanningStalled,
+  markPlanningOverlayPending,
+  planningState,
+  restoreAutonomousState,
+  restorePlanningState,
+  stopAutonomous,
+} from "./crew/state.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
 import * as crewStore from "./crew/store.js";
+import { runLegacyAgentCleanupMigration } from "./crew/utils/install.js";
 import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
+import { shutdownAllWorkers } from "./crew/agents.js";
+import { shutdownLobbyWorkers } from "./crew/lobby.js";
 
 let overlayTui: TUI | null = null;
+let overlayHandle: OverlayHandle | null = null;
+let overlayOpening = false;
 
 export default function piMessengerExtension(pi: ExtensionAPI) {
+  // One-time migration: remove stale crew agents from shared ~/.pi/agent/agents/
+  // (crew agents now discovered from extension-local directory)
+  runLegacyAgentCleanupMigration();
+
   // ===========================================================================
   // State & Configuration
   // ===========================================================================
@@ -127,7 +161,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     // Add reply hint
     const replyHint = config.replyHint
-      ? ` — reply: pi_messenger({ to: "${msg.from}", message: "..." })`
+      ? ` — reply: pi_messenger({ action: "send", to: "${msg.from}", message: "..." })`
       : "";
 
     content += `**Message from ${msg.from}**${replyHint}\n\n${msg.text}`;
@@ -171,7 +205,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
         if (!notifiedStuck.has(agent.name)) {
           notifiedStuck.add(agent.name);
-          logFeedEvent(dirs, agent.name, "stuck");
+          logFeedEvent(ctx.cwd ?? process.cwd(), agent.name, "stuck");
 
           const idleStr = computed.idleFor ?? "unknown";
           const taskInfo = hasTask ? " with task in progress" : " with reservation";
@@ -220,6 +254,19 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     const countStr = theme.fg("dim", ` (${count} peer${count === 1 ? "" : "s"})`);
     const unreadStr = totalUnread > 0 ? theme.fg("accent", ` ●${totalUnread}`) : "";
 
+    const planningCwd = ctx.cwd ?? process.cwd();
+    const planningStr =
+      isPlanningForCwd(planningCwd)
+        ? theme.fg(
+            "warning",
+            ` · plan ${planningState.pass}/${planningState.maxPasses} ${planningState.phase}${isPlanningStalled(planningCwd) ? " stalled" : ""}`,
+          )
+        : "";
+
+    const activityStr = !planningStr && state.activity.currentActivity
+      ? theme.fg("dim", ` · ${state.activity.currentActivity}`)
+      : "";
+
     // Add crew status if autonomous mode is active
     let crewStr = "";
     if (autonomousState.active) {
@@ -234,13 +281,53 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       }
     }
 
-    ctx.ui.setStatus("messenger", `msg: ${nameStr}${countStr}${unreadStr}${crewStr}`);
+    ctx.ui.setStatus("messenger", `msg: ${nameStr}${countStr}${unreadStr}${planningStr}${activityStr}${crewStr}`);
+
+    maybeAutoOpenCrewOverlay(ctx);
   }
 
+  function clearAllUnreadCounts(): void {
+    for (const key of state.unreadCounts.keys()) {
+      state.unreadCounts.set(key, 0);
+    }
+  }
+
+  const STATUS_HEARTBEAT_MS = 15_000;
   let latestCtx: ExtensionContext | null = null;
+  let statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  function startStatusHeartbeat(): void {
+    if (statusHeartbeatTimer) return;
+    statusHeartbeatTimer = setInterval(() => {
+      if (latestCtx) updateStatus(latestCtx);
+    }, STATUS_HEARTBEAT_MS);
+  }
+
+  function stopStatusHeartbeat(): void {
+    if (!statusHeartbeatTimer) return;
+    clearInterval(statusHeartbeatTimer);
+    statusHeartbeatTimer = null;
+  }
+
   onLiveWorkersChanged(() => {
     if (latestCtx) updateStatus(latestCtx);
   });
+
+  // ===========================================================================
+  // Registration Context
+  // ===========================================================================
+
+  function sendRegistrationContext(ctx: ExtensionContext): void {
+    const folder = extractFolder(process.cwd());
+    const locationPart = state.gitBranch
+      ? `${folder} on ${state.gitBranch}`
+      : folder;
+    pi.sendMessage({
+      customType: "messenger_context",
+      content: `You are agent "${state.agentName}" in ${locationPart}. Use pi_messenger({ action: "status" }) to see crew status, pi_messenger({ action: "work" }) to run tasks.`,
+      display: false
+    }, { triggerTurn: false });
+  }
 
   // ===========================================================================
   // Tool Registration
@@ -265,6 +352,8 @@ Usage (action-based API - preferred):
   // Crew: Plan from PRD
   pi_messenger({ action: "plan" })                              → Auto-discover PRD
   pi_messenger({ action: "plan", prd: "docs/PRD.md" })          → Explicit PRD path
+  pi_messenger({ action: "plan", prompt: "Scan for bugs" })     → Inline prompt (no PRD)
+  pi_messenger({ action: "plan.cancel" })                       → Cancel active planning
   
   // Crew: Work through tasks
   pi_messenger({ action: "work" })                              → Run ready tasks
@@ -273,23 +362,15 @@ Usage (action-based API - preferred):
   // Crew: Tasks
   pi_messenger({ action: "task.show", id: "task-1" })           → Show task
   pi_messenger({ action: "task.list" })                         → List all tasks
+  pi_messenger({ action: "task.split", id: "task-3" })          → Inspect task for splitting
+  pi_messenger({ action: "task.split", id: "task-3", subtasks: [...] }) → Execute split
   pi_messenger({ action: "task.start", id: "task-1" })          → Start task
   pi_messenger({ action: "task.done", id: "task-1", summary: "..." })
   pi_messenger({ action: "task.reset", id: "task-1" })          → Reset task
   
   // Crew: Review
-  pi_messenger({ action: "review", target: "task-1" })          → Review impl
-
-Legacy (backwards compatible):
-  pi_messenger({ join: true })                   → Join the agent mesh
-  pi_messenger({ claim: "TASK-01" })             → Claim a swarm task
-  pi_messenger({ to: "Name", message: "hi" })    → Send message
-
-Mode: action (if provided) > legacy key-based routing`,
+  pi_messenger({ action: "review", target: "task-1" })          → Review impl`,
     parameters: Type.Object({
-      // ═══════════════════════════════════════════════════════════════════════
-      // ACTION PARAMETER (preferred for new usage)
-      // ═══════════════════════════════════════════════════════════════════════
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
       })),
@@ -298,6 +379,7 @@ Mode: action (if provided) > legacy key-based routing`,
       // CREW PARAMETERS
       // ═══════════════════════════════════════════════════════════════════════
       prd: Type.Optional(Type.String({ description: "PRD file path for plan action" })),
+      prompt: Type.Optional(Type.String({ description: "Inline prompt for plan action, or revision instructions for task.revise/task.revise-tree" })),
       id: Type.Optional(Type.String({ description: "Task ID (task-N format)" })),
       taskId: Type.Optional(Type.String({ description: "Swarm task ID (e.g., TASK-01) - for action-based claim/unclaim/complete" })),
       title: Type.Optional(Type.String({ description: "Title for task.create" })),
@@ -310,7 +392,16 @@ Mode: action (if provided) > legacy key-based routing`,
         prs: Type.Optional(Type.Array(Type.String()))
       }, { description: "Evidence for task.done" })),
       content: Type.Optional(Type.String({ description: "Content for task spec" })),
+      count: Type.Optional(Type.Number({ description: "Suggested number of subtasks for task.split" })),
+      subtasks: Type.Optional(Type.Array(
+        Type.Object({
+          title: Type.String(),
+          content: Type.Optional(Type.String()),
+        }),
+        { description: "Subtask definitions for task.split (execute phase)" }
+      )),
       type: Type.Optional(StringEnum(["plan", "impl"], { description: "Review type (inferred from target if omitted)" })),
+      autoWork: Type.Optional(Type.Boolean({ description: "Auto-start autonomous work after plan completes (default: true, pass false to review plan first)" })),
       autonomous: Type.Optional(Type.Boolean({ description: "Run work continuously until done/blocked" })),
       concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
       model: Type.Optional(Type.String({ description: "Override worker model for this work wave" })),
@@ -320,133 +411,44 @@ Mode: action (if provided) > legacy key-based routing`,
       name: Type.Optional(Type.String({ description: "New name for rename action" })),
 
       // ═══════════════════════════════════════════════════════════════════════
-      // EXISTING COORDINATION PARAMETERS (backwards compatibility)
+      // MESSAGING & COORDINATION PARAMETERS
       // ═══════════════════════════════════════════════════════════════════════
-      join: Type.Optional(Type.Boolean({ description: "Join the agent mesh" })),
       spec: Type.Optional(Type.String({ description: "Path to spec/plan file" })),
-      claim: Type.Optional(Type.String({ description: "Task ID to claim (legacy - use action: 'claim' with taskId)" })),
-      unclaim: Type.Optional(Type.String({ description: "Task ID to release (legacy)" })),
-      complete: Type.Optional(Type.String({ description: "Task ID to mark complete (legacy)" })),
       notes: Type.Optional(Type.String({ description: "Completion notes" })),
-      swarm: Type.Optional(Type.Boolean({ description: "Get swarm status" })),
       to: Type.Optional(Type.Any({ description: "Target agent name (string) or multiple names (array)" })),
-      broadcast: Type.Optional(Type.Boolean({ description: "Send to all active agents" })),
       message: Type.Optional(Type.String({ description: "Message to send" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
-      reserve: Type.Optional(Type.Array(Type.String(), { description: "Paths to reserve (legacy - use action: 'reserve' with paths)" })),
       reason: Type.Optional(Type.String({ description: "Reason for reservation, claim, or task block" })),
-      release: Type.Optional(Type.Any({ description: "Patterns to release (array) or true to release all (legacy)" })),
-      rename: Type.Optional(Type.String({ description: "Rename yourself (legacy - use action: 'rename' with name)" })),
-      autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" })),
-      list: Type.Optional(Type.Boolean({ description: "List other agents" }))
+      autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
     }),
 
-    async execute(_toolCallId, params: CrewParams & {
-      join?: boolean;
-      spec?: string;
-      claim?: string;
-      unclaim?: string;
-      complete?: string;
-      notes?: string;
-      swarm?: boolean;
-      to?: string | string[];
-      broadcast?: boolean;
-      message?: string;
-      replyTo?: string;
-      reserve?: string[];
-      reason?: string;
-      release?: string[] | boolean;
-      rename?: string;
-      autoRegisterPath?: "add" | "remove" | "list";
-      list?: boolean;
-      limit?: number;
-    }, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
+      const params = rawParams as CrewParams;
       latestCtx = ctx;
-      const {
+
+      const action = params.action;
+      if (!action) {
+        return handlers.executeStatus(state, dirs, ctx.cwd ?? process.cwd());
+      }
+
+      const result = await executeCrewAction(
         action,
-        join,
-        spec,
-        claim,
-        unclaim,
-        complete,
-        notes,
-        swarm,
-        to,
-        broadcast,
-        message,
-        replyTo,
-        reserve,
-        reason,
-        release,
-        rename,
-        autoRegisterPath,
-        list
-      } = params;
+        params,
+        state,
+        dirs,
+        ctx,
+        deliverMessage,
+        updateStatus,
+        (type, data) => pi.appendEntry(type, data),
+        { stuckThreshold: config.stuckThreshold, crewEventsInFeed: config.crewEventsInFeed, nameTheme, feedRetention: config.feedRetention },
+        signal
+      );
 
-      // ═══════════════════════════════════════════════════════════════════════
-      // ACTION-BASED ROUTING (preferred)
-      // ═══════════════════════════════════════════════════════════════════════
-      if (action) {
-        return executeCrewAction(
-          action,
-          params,
-          state,
-          dirs,
-          ctx,
-          deliverMessage,
-          updateStatus,
-          (type, data) => pi.appendEntry(type, data),
-          { stuckThreshold: config.stuckThreshold, crewEventsInFeed: config.crewEventsInFeed, nameTheme, feedRetention: config.feedRetention },
-          signal
-        );
+      if (action === "join" && state.registered && config.registrationContext) {
+        sendRegistrationContext(ctx);
       }
 
-      // ═══════════════════════════════════════════════════════════════════════
-      // LEGACY KEY-BASED ROUTING (backwards compatibility)
-      // ═══════════════════════════════════════════════════════════════════════
-
-      // Join doesn't require registration
-      if (join) {
-        const joinResult = handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, spec, nameTheme, config.feedRetention);
-        
-        // Send registration context after successful join (if configured)
-        if (state.registered && config.registrationContext) {
-          const folder = extractFolder(process.cwd());
-          const locationPart = state.gitBranch
-            ? `${folder} on ${state.gitBranch}`
-            : folder;
-          const specPart = state.spec ? ` working on ${displaySpecPath(state.spec, process.cwd())}` : "";
-          pi.sendMessage({
-            customType: "messenger_context",
-            content: `You are agent "${state.agentName}" in ${locationPart}${specPart}. Use pi_messenger({ swarm: true }) to see task status, pi_messenger({ claim: "TASK-X" }) to claim tasks.`,
-            display: false
-          }, { triggerTurn: false });
-        }
-        
-        return joinResult;
-      }
-
-      // autoRegisterPath doesn't require registration - it's config management
-      if (autoRegisterPath) {
-        return handlers.executeAutoRegisterPath(autoRegisterPath);
-      }
-
-      // All other operations require registration
-      if (!state.registered) return handlers.notRegisteredError();
-
-      if (swarm) return handlers.executeSwarm(state, dirs, spec);
-      if (claim) return await handlers.executeClaim(state, dirs, ctx, claim, spec, reason);
-      if (unclaim) return await handlers.executeUnclaim(state, dirs, unclaim, spec);
-      if (complete) return await handlers.executeComplete(state, dirs, complete, notes, spec);
-      if (spec) return handlers.executeSetSpec(state, dirs, ctx, spec);
-      if (to || broadcast) return handlers.executeSend(state, dirs, to, broadcast, message, replyTo);
-      if (reserve && reserve.length > 0) return handlers.executeReserve(state, dirs, ctx, reserve, reason);
-      if (release === true || (Array.isArray(release) && release.length > 0)) {
-        return handlers.executeRelease(state, dirs, ctx, release);
-      }
-      if (rename) return handlers.executeRename(state, dirs, ctx, rename, deliverMessage, updateStatus);
-      if (list) return handlers.executeList(state, dirs, { stuckThreshold: config.stuckThreshold });
-      return handlers.executeStatus(state, dirs);
+      return result;
     }
   });
 
@@ -480,15 +482,48 @@ Mode: action (if provided) > legacy key-based routing`,
         updateStatus(ctx);
       }
 
-      await ctx.ui.custom<void>(
+      if (overlayHandle && overlayHandle.isHidden()) {
+        overlayHandle.setHidden(false);
+        clearAllUnreadCounts();
+        updateStatus(ctx);
+        return;
+      }
+
+      const callbacks: OverlayCallbacks = {
+        onBackground: (snapshotText) => {
+          overlayHandle?.setHidden(true);
+          pi.sendMessage({
+            customType: "crew_snapshot",
+            content: snapshotText,
+            display: true,
+          }, { triggerTurn: true });
+        },
+      };
+
+      const snapshot = await ctx.ui.custom<string | undefined>(
         (tui, theme, _keybindings, done) => {
           overlayTui = tui;
-          return new MessengerOverlay(tui, theme, state, dirs, done);
+          return new MessengerOverlay(tui, theme, state, dirs, done, callbacks);
         },
-        { overlay: true }
+        {
+          overlay: true,
+          onHandle: (handle) => {
+            overlayHandle = handle;
+          },
+        }
       );
 
+      if (snapshot) {
+        pi.sendMessage({
+          customType: "crew_snapshot",
+          content: snapshot,
+          display: true,
+        }, { triggerTurn: true });
+      }
+
       // Overlay closed
+      clearAllUnreadCounts();
+      overlayHandle = null;
       overlayTui = null;
       updateStatus(ctx);
     }
@@ -571,7 +606,7 @@ Mode: action (if provided) > legacy key-based routing`,
     const existing = pendingEdits.get(filePath);
     if (existing) clearTimeout(existing);
     pendingEdits.set(filePath, setTimeout(() => {
-      logFeedEvent(dirs, state.agentName, "edit", filePath);
+      logFeedEvent(process.cwd(), state.agentName, "edit", filePath);
       pendingEdits.delete(filePath);
     }, EDIT_DEBOUNCE_MS));
   }
@@ -687,15 +722,16 @@ Mode: action (if provided) > legacy key-based routing`,
     if (toolName === "bash") {
       const command = input.command as string;
       if (command) {
+        const cwd = ctx.cwd ?? process.cwd();
         if (isGitCommit(command)) {
           const msg = extractCommitMessage(command);
-          logFeedEvent(dirs, state.agentName, "commit", undefined, msg);
+          logFeedEvent(cwd, state.agentName, "commit", undefined, msg);
           setLastToolCall(`commit: ${msg}`);
           trackRecentCommit();
         }
         if (isTestRun(command)) {
           const passed = !event.isError;
-          logFeedEvent(dirs, state.agentName, "test", undefined, passed ? "passed" : "failed");
+          logFeedEvent(cwd, state.agentName, "test", undefined, passed ? "passed" : "failed");
           setLastToolCall(`test: ${passed ? "passed" : "failed"}`);
           trackRecentTest();
         }
@@ -713,38 +749,41 @@ Mode: action (if provided) > legacy key-based routing`,
 
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
+    startStatusHeartbeat();
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type === "custom" && entry.customType === "crew-state") {
         restoreAutonomousState(entry.data as Parameters<typeof restoreAutonomousState>[0]);
       }
     }
+    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
+    if (staleCleared && ctx.hasUI) {
+      ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
+    }
 
     state.isHuman = ctx.hasUI;
+    try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
 
     const shouldAutoRegister = config.autoRegister || 
       matchesAutoRegisterPath(process.cwd(), config.autoRegisterPaths);
-    
-    if (!shouldAutoRegister) return;
+
+    if (!shouldAutoRegister) {
+      maybeAutoOpenCrewOverlay(ctx);
+      return;
+    }
 
     if (store.register(state, dirs, ctx, nameTheme)) {
+      const cwd = ctx.cwd ?? process.cwd();
       store.startWatcher(state, dirs, deliverMessage);
       updateStatus(ctx);
-      pruneFeed(dirs, config.feedRetention);
-      logFeedEvent(dirs, state.agentName, "join");
+      pruneFeed(cwd, config.feedRetention);
+      logFeedEvent(cwd, state.agentName, "join");
 
       if (config.registrationContext) {
-        const folder = extractFolder(process.cwd());
-        const locationPart = state.gitBranch
-          ? `${folder} on ${state.gitBranch}`
-          : folder;
-        const specPart = state.spec ? ` working on ${displaySpecPath(state.spec, process.cwd())}` : "";
-        pi.sendMessage({
-          customType: "messenger_context",
-          content: `You are agent "${state.agentName}" in ${locationPart}${specPart}. Use pi_messenger({ swarm: true }) to see task status, pi_messenger({ claim: "TASK-X" }) to claim tasks.`,
-          display: false
-        }, { triggerTurn: false });
+        sendRegistrationContext(ctx);
       }
     }
+
+    maybeAutoOpenCrewOverlay(ctx);
   });
 
   function recoverWatcherIfNeeded(): void {
@@ -754,24 +793,126 @@ Mode: action (if provided) > legacy key-based routing`,
     }
   }
 
+  function maybeAutoOpenCrewOverlay(ctx: ExtensionContext): void {
+    const cwd = ctx.cwd ?? process.cwd();
+    if (config.autoOverlayPlanning) {
+      markPlanningOverlayPending(cwd);
+    }
+
+    const autonomousPending =
+      config.autoOverlay &&
+      autonomousState.active &&
+      autonomousState.autoOverlayPending;
+
+    const planningPending =
+      config.autoOverlayPlanning ? getPlanningOverlayPending(cwd) : null;
+
+    if ((!autonomousPending && !planningPending) || !ctx.hasUI || overlayTui || overlayOpening) {
+      return;
+    }
+
+    if (autonomousPending) {
+      autonomousState.autoOverlayPending = false;
+    }
+
+    const planningRunId = planningPending
+      ? consumePlanningOverlayPending(cwd)?.runId ?? null
+      : null;
+
+    overlayOpening = true;
+    const callbacks: OverlayCallbacks = {
+      onBackground: (snapshotText) => {
+        overlayHandle?.setHidden(true);
+        pi.sendMessage({
+          customType: "crew_snapshot",
+          content: snapshotText,
+          display: true,
+        }, { triggerTurn: true });
+      },
+    };
+
+    ctx.ui.custom<string | undefined>(
+      (tui, theme, _keybindings, done) => {
+        overlayTui = tui;
+        return new MessengerOverlay(tui, theme, state, dirs, done, callbacks);
+      },
+      {
+        overlay: true,
+        onHandle: (handle) => {
+          overlayHandle = handle;
+        },
+      }
+    ).then((snapshot) => {
+      if (planningRunId) {
+        dismissPlanningOverlayRun(planningRunId);
+      }
+      if (snapshot) {
+        pi.sendMessage({
+          customType: "crew_snapshot",
+          content: snapshot,
+          display: true,
+        }, { triggerTurn: true });
+      }
+      clearAllUnreadCounts();
+      overlayOpening = false;
+      overlayHandle = null;
+      overlayTui = null;
+      updateStatus(ctx);
+    }).catch(() => {
+      overlayOpening = false;
+      overlayHandle = null;
+      overlayTui = null;
+      if (config.autoOverlayPlanning) {
+        markPlanningOverlayPending(cwd);
+      }
+    });
+  }
+
   pi.on("session_switch", async (_event, ctx) => {
     latestCtx = ctx;
+    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
+    if (staleCleared && ctx.hasUI) {
+      ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
+    }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
+    maybeAutoOpenCrewOverlay(ctx);
   });
   pi.on("session_fork", async (_event, ctx) => {
     latestCtx = ctx;
+    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
+    if (staleCleared && ctx.hasUI) {
+      ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
+    }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
+    maybeAutoOpenCrewOverlay(ctx);
   });
   pi.on("session_tree", async (_event, ctx) => {
     latestCtx = ctx;
+    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
+    if (staleCleared && ctx.hasUI) {
+      ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
+    }
     updateStatus(ctx);
+    maybeAutoOpenCrewOverlay(ctx);
   });
 
   pi.on("turn_end", async (event, ctx) => {
     latestCtx = ctx;
     store.processAllPendingMessages(state, dirs, deliverMessage);
+    const lobbyId = process.env.PI_LOBBY_ID;
+    if (lobbyId) {
+      const cwd = ctx.cwd ?? process.cwd();
+      const aliveFile = join(cwd, ".pi", "messenger", "crew", `lobby-${lobbyId}.alive`);
+      if (fs.existsSync(aliveFile)) {
+        pi.sendMessage({
+          customType: "lobby_keepalive",
+          content: "[Keep-alive] Planning in progress. No task assigned yet. Acknowledge with a single period.",
+          display: false,
+        }, { triggerTurn: true, deliverAs: "steer" });
+      }
+    }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
 
@@ -786,6 +927,8 @@ Mode: action (if provided) > legacy key-based routing`,
         }
       }
     }
+
+    maybeAutoOpenCrewOverlay(ctx);
   });
 
   // ===========================================================================
@@ -793,7 +936,25 @@ Mode: action (if provided) > legacy key-based routing`,
   // ===========================================================================
 
   pi.on("agent_end", async (_event, ctx) => {
-    // Only continue if autonomous mode is active
+    // --- Auto-work after plan completion ---
+    const autoWork = consumePendingAutoWork();
+    if (autoWork && !overlayTui) {
+      const cwd = autoWork.cwd;
+      const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
+      const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
+      if (readyTasks.length > 0) {
+        const plan = crewStore.getPlan(cwd);
+        const label = plan ? crewStore.getPlanLabel(plan) : "plan";
+        pi.sendMessage({
+          customType: "crew_auto_work",
+          content: `Plan complete — ${readyTasks.length} task(s) ready for ${label}. Starting autonomous work.\n\nCall: pi_messenger({ action: "work", autonomous: true })`,
+          display: true,
+        }, { triggerTurn: true, deliverAs: "steer" });
+        return;
+      }
+    }
+
+    // --- Existing autonomous continuation ---
     if (!autonomousState.active) return;
 
     const cwd = autonomousState.cwd ?? ctx.cwd ?? process.cwd();
@@ -810,7 +971,7 @@ Mode: action (if provided) > legacy key-based routing`,
     }
 
     // Check for ready tasks
-    const readyTasks = crewStore.getReadyTasks(cwd);
+    const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
     
     if (readyTasks.length === 0) {
       // No ready tasks - check if all done or blocked
@@ -844,8 +1005,17 @@ Mode: action (if provided) > legacy key-based routing`,
   });
 
   pi.on("session_shutdown", async () => {
+    shutdownLobbyWorkers(process.cwd());
+    shutdownAllWorkers();
+    stopStatusHeartbeat();
+    overlayOpening = false;
+    overlayHandle = null;
+    overlayTui = null;
+    if (isPlanningForCwd(process.cwd()) && planningState.pid === process.pid) {
+      clearPlanningState(process.cwd());
+    }
     if (state.registered) {
-      logFeedEvent(dirs, state.agentName, "leave");
+      logFeedEvent(process.cwd(), state.agentName, "leave");
     }
     if (state.registryFlushTimer) {
       clearTimeout(state.registryFlushTimer);
@@ -867,13 +1037,13 @@ Mode: action (if provided) > legacy key-based routing`,
   // ===========================================================================
 
   pi.on("tool_call", async (event, _ctx) => {
-    // Only block write operations - reading reserved files is fine
     if (!["edit", "write"].includes(event.toolName)) return;
 
-    const path = event.input.path as string;
-    if (!path) return;
+    const input = event.input as Record<string, unknown>;
+    const filePath = typeof input.path === "string" ? input.path : null;
+    if (!filePath) return;
 
-    const conflicts = store.getConflictsWithOtherAgents(path, state, dirs);
+    const conflicts = store.getConflictsWithOtherAgents(filePath, state, dirs);
     if (conflicts.length === 0) return;
 
     const c = conflicts[0];
@@ -882,10 +1052,10 @@ Mode: action (if provided) > legacy key-based routing`,
       ? ` (in ${folder} on ${c.registration.gitBranch})`
       : ` (in ${folder})`;
 
-    const lines = [path, `Reserved by: ${c.agent}${locationPart}`];
+    const lines = [filePath, `Reserved by: ${c.agent}${locationPart}`];
     if (c.reason) lines.push(`Reason: "${c.reason}"`);
     lines.push("");
-    lines.push(`Coordinate via pi_messenger({ to: "${c.agent}", message: "..." })`);
+    lines.push(`Coordinate via pi_messenger({ action: "send", to: "${c.agent}", message: "..." })`);
 
     return { block: true, reason: lines.join("\n") };
   });

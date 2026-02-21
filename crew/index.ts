@@ -10,16 +10,11 @@ import type { MessengerState, Dirs, AgentMailMessage, NameThemeConfig } from "..
 import * as handlers from "../handlers.js";
 import type { CrewParams, AppendEntryFn } from "./types.js";
 import { result } from "./utils/result.js";
-import { ensureAgentsInstalled, ensureSkillsInstalled } from "./utils/install.js";
+import { isPlanningForCwd, cancelPlanningRun } from "./state.js";
+import { logFeedEvent } from "../feed.js";
 
 type DeliverFn = (msg: AgentMailMessage) => void;
 type UpdateStatusFn = (ctx: ExtensionContext) => void;
-
-/** Ensure both agents and skills are installed */
-function ensureCrewInstalled() {
-  ensureAgentsInstalled();
-  ensureSkillsInstalled();
-}
 
 export interface CrewActionConfig {
   stuckThreshold?: number;
@@ -79,25 +74,17 @@ export async function executeCrewAction(
     // ═══════════════════════════════════════════════════════════════════════
     // Coordination actions (delegate to existing handlers)
     // ═══════════════════════════════════════════════════════════════════════
-    case 'status': {
-      // Check if this is a crew status request
-      try {
-        const statusHandler = await import("./handlers/status.js");
-        return statusHandler.execute(params, state, dirs, ctx);
-      } catch {
-        // Fall back to messenger status
-        return handlers.executeStatus(state, dirs);
-      }
-    }
+    case 'status':
+      return handlers.executeStatus(state, dirs, ctx.cwd ?? process.cwd());
 
     case 'list':
-      return handlers.executeList(state, dirs, { stuckThreshold: config?.stuckThreshold });
+      return handlers.executeList(state, dirs, ctx.cwd ?? process.cwd(), { stuckThreshold: config?.stuckThreshold });
 
     case 'whois': {
       if (!params.name) {
         return result("Error: name required for whois action.", { mode: "whois", error: "missing_name" });
       }
-      return handlers.executeWhois(state, dirs, params.name, { stuckThreshold: config?.stuckThreshold });
+      return handlers.executeWhois(state, dirs, ctx.cwd ?? process.cwd(), params.name, { stuckThreshold: config?.stuckThreshold });
     }
 
     case 'set_status': {
@@ -105,7 +92,7 @@ export async function executeCrewAction(
     }
 
     case 'feed': {
-      return handlers.executeFeed(dirs, params.limit, config?.crewEventsInFeed ?? true);
+      return handlers.executeFeed(ctx.cwd ?? process.cwd(), params.limit, config?.crewEventsInFeed ?? true);
     }
 
     case 'spec':
@@ -115,10 +102,10 @@ export async function executeCrewAction(
       return handlers.executeSetSpec(state, dirs, ctx, params.spec);
 
     case 'send':
-      return handlers.executeSend(state, dirs, params.to, false, params.message, params.replyTo);
+      return handlers.executeSend(state, dirs, ctx.cwd ?? process.cwd(), params.to, false, params.message, params.replyTo);
 
     case 'broadcast':
-      return handlers.executeSend(state, dirs, undefined, true, params.message, params.replyTo);
+      return handlers.executeSend(state, dirs, ctx.cwd ?? process.cwd(), undefined, true, params.message, params.replyTo);
 
     case 'reserve':
       if (!params.paths || params.paths.length === 0) {
@@ -166,7 +153,7 @@ export async function executeCrewAction(
       }
       try {
         const taskHandlers = await import("./handlers/task.js");
-        return taskHandlers.execute(op, params, state, dirs, ctx);
+        return taskHandlers.execute(op, params, state, ctx);
       } catch (e) {
         return result(`Error: task.${op} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
           { mode: "task", error: "handler_error", operation: op });
@@ -174,11 +161,18 @@ export async function executeCrewAction(
     }
 
     case 'plan': {
-      // Auto-install agents if missing
-      ensureCrewInstalled();
+      if (op === 'cancel') {
+        const cwd = ctx.cwd ?? process.cwd();
+        if (!isPlanningForCwd(cwd)) {
+          return result("No active planning to cancel.", { mode: "plan.cancel" });
+        }
+        cancelPlanningRun(cwd);
+        logFeedEvent(cwd, state.agentName || "unknown", "plan.cancel");
+        return result("Planning cancelled.", { mode: "plan.cancel" });
+      }
       try {
         const planHandler = await import("./handlers/plan.js");
-        return planHandler.execute(params, ctx);
+        return planHandler.execute(params, ctx, state.agentName || "unknown", () => updateStatus(ctx));
       } catch (e) {
         return result(`Error: plan handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
           { mode: "plan", error: "handler_error" });
@@ -186,8 +180,6 @@ export async function executeCrewAction(
     }
 
     case 'work': {
-      // Auto-install agents if missing
-      ensureCrewInstalled();
       try {
         const workHandler = await import("./handlers/work.js");
         return workHandler.execute(params, dirs, ctx, appendEntry, signal);
@@ -198,8 +190,6 @@ export async function executeCrewAction(
     }
 
     case 'review': {
-      // Auto-install agents if missing
-      ensureCrewInstalled();
       try {
         const reviewHandler = await import("./handlers/review.js");
         return reviewHandler.execute(params, ctx);
@@ -209,24 +199,10 @@ export async function executeCrewAction(
       }
     }
 
-    case 'interview': {
-      // Auto-install agents if missing
-      ensureCrewInstalled();
-      try {
-        const interviewHandler = await import("./handlers/interview.js");
-        return interviewHandler.execute(params, state, dirs, ctx);
-      } catch (e) {
-        return result(`Error: interview handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
-          { mode: "interview", error: "handler_error" });
-      }
-    }
-
     case 'sync': {
-      // Auto-install agents if missing
-      ensureCrewInstalled();
       try {
         const syncHandler = await import("./handlers/sync.js");
-        return syncHandler.execute(params, state, dirs, ctx);
+        return syncHandler.execute(params, ctx);
       } catch (e) {
         return result(`Error: sync handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
           { mode: "sync", error: "handler_error" });
@@ -240,7 +216,7 @@ export async function executeCrewAction(
       }
       try {
         const statusHandlers = await import("./handlers/status.js");
-        return statusHandlers.executeCrew(op, params, state, dirs, ctx);
+        return statusHandlers.executeCrew(op, ctx);
       } catch (e) {
         return result(`Error: crew.${op} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
           { mode: "crew", error: "handler_error", operation: op });

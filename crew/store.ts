@@ -32,6 +32,10 @@ function getBlocksDir(cwd: string): string {
   return path.join(getCrewDir(cwd), "blocks");
 }
 
+export function cleanupBlockFiles(cwd: string, taskId: string): void {
+  try { fs.unlinkSync(path.join(getBlocksDir(cwd), `${taskId}.md`)); } catch {}
+}
+
 // =============================================================================
 // JSON Helpers
 // =============================================================================
@@ -76,11 +80,12 @@ export function getPlan(cwd: string): Plan | null {
   return readJson<Plan>(path.join(getCrewDir(cwd), "plan.json"));
 }
 
-export function createPlan(cwd: string, prdPath: string): Plan {
+export function createPlan(cwd: string, prdPath: string, prompt?: string): Plan {
   const now = new Date().toISOString();
   
   const plan: Plan = {
     prd: prdPath,
+    ...(prompt ? { prompt } : {}),
     created_at: now,
     updated_at: now,
     task_count: 0,
@@ -89,6 +94,13 @@ export function createPlan(cwd: string, prdPath: string): Plan {
 
   writeJson(path.join(getCrewDir(cwd), "plan.json"), plan);
   return plan;
+}
+
+export function getPlanLabel(plan: Plan, maxLen = 60): string {
+  if (!plan.prompt) return plan.prd;
+  return plan.prompt.length > maxLen
+    ? plan.prompt.slice(0, maxLen - 3) + "..."
+    : plan.prompt;
 }
 
 export function updatePlan(cwd: string, updates: Partial<Plan>): Plan | null {
@@ -127,6 +139,14 @@ export function deletePlan(cwd: string): boolean {
   if (fs.existsSync(tasksDir)) {
     for (const file of fs.readdirSync(tasksDir)) {
       fs.unlinkSync(path.join(tasksDir, file));
+    }
+  }
+
+  // Delete all block files
+  const blocksDir = getBlocksDir(cwd);
+  if (fs.existsSync(blocksDir)) {
+    for (const file of fs.readdirSync(blocksDir)) {
+      fs.unlinkSync(path.join(blocksDir, file));
     }
   }
   
@@ -186,8 +206,17 @@ export function createTask(
   return task;
 }
 
+function normalizeTask(raw: Task): Task {
+  return {
+    ...raw,
+    depends_on: Array.isArray(raw.depends_on) ? raw.depends_on : [],
+    attempt_count: typeof raw.attempt_count === "number" ? raw.attempt_count : 0,
+  };
+}
+
 export function getTask(cwd: string, taskId: string): Task | null {
-  return readJson<Task>(path.join(getTasksDir(cwd), `${taskId}.json`));
+  const raw = readJson<Task>(path.join(getTasksDir(cwd), `${taskId}.json`));
+  return raw ? normalizeTask(raw) : null;
 }
 
 export function updateTask(cwd: string, taskId: string, updates: Partial<Task>): Task | null {
@@ -211,8 +240,8 @@ export function getTasks(cwd: string): Task[] {
   const tasks: Task[] = [];
   for (const file of fs.readdirSync(dir)) {
     if (!file.endsWith(".json")) continue;
-    const task = readJson<Task>(path.join(dir, file));
-    if (task) tasks.push(task);
+    const raw = readJson<Task>(path.join(dir, file));
+    if (raw) tasks.push(normalizeTask(raw));
   }
 
   // Sort by ID number (task-1, task-2, ...)
@@ -227,31 +256,84 @@ export function getTaskSpec(cwd: string, taskId: string): string | null {
   return readText(path.join(getTasksDir(cwd), `${taskId}.md`));
 }
 
+export function appendTaskProgress(cwd: string, taskId: string, agent: string, message: string): void {
+  const progressPath = path.join(getTasksDir(cwd), `${taskId}.progress.md`);
+  ensureDir(path.dirname(progressPath));
+  const timestamp = new Date().toISOString();
+  fs.appendFileSync(progressPath, `[${timestamp}] (${agent}) ${message}\n`);
+}
+
+export function getTaskProgress(cwd: string, taskId: string): string | null {
+  const content = readText(path.join(getTasksDir(cwd), `${taskId}.progress.md`));
+  return content && content.trim().length > 0 ? content : null;
+}
+
+export function getBlockContext(cwd: string, taskId: string): string | null {
+  return readText(path.join(getBlocksDir(cwd), `${taskId}.md`));
+}
+
 export function setTaskSpec(cwd: string, taskId: string, content: string): void {
   writeText(path.join(getTasksDir(cwd), `${taskId}.md`), content);
   updateTask(cwd, taskId, {}); // Touch updated_at
+}
+
+export function deleteTask(cwd: string, taskId: string): boolean {
+  const task = getTask(cwd, taskId);
+  if (!task) return false;
+
+  const tasksDir = getTasksDir(cwd);
+  for (const ext of [".json", ".md", ".progress.md"]) {
+    try { fs.unlinkSync(path.join(tasksDir, `${taskId}${ext}`)); } catch {}
+  }
+
+  try { fs.unlinkSync(path.join(getBlocksDir(cwd), `${taskId}.md`)); } catch {}
+
+  const allTasks = getTasks(cwd);
+  for (const t of allTasks) {
+    if (t.depends_on.includes(taskId)) {
+      updateTask(cwd, t.id, {
+        depends_on: t.depends_on.filter(d => d !== taskId),
+      });
+    }
+  }
+
+  const plan = getPlan(cwd);
+  if (plan) {
+    const updates: Partial<Plan> = { task_count: plan.task_count - 1 };
+    if (task.status === "done") {
+      updates.completed_count = plan.completed_count - 1;
+    }
+    updatePlan(cwd, updates);
+  }
+
+  return true;
 }
 
 // =============================================================================
 // Task Lifecycle Operations
 // =============================================================================
 
+export function getBaseCommit(cwd: string): string | undefined {
+  try {
+    return execSync("git rev-parse HEAD", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 2000,
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
 export function startTask(cwd: string, taskId: string, agentName: string): Task | null {
   const task = getTask(cwd, taskId);
   if (!task || task.status !== "todo") return null;
 
-  // Capture current git commit
-  let baseCommit: string | undefined;
-  try {
-    baseCommit = execSync("git rev-parse HEAD", { cwd, encoding: "utf-8" }).trim();
-  } catch {
-    // Not a git repo or git not available
-  }
-
   return updateTask(cwd, taskId, {
     status: "in_progress",
     started_at: new Date().toISOString(),
-    base_commit: baseCommit,
+    base_commit: getBaseCommit(cwd),
     assigned_to: agentName,
     attempt_count: task.attempt_count + 1,
   });
@@ -282,6 +364,8 @@ export function completeTask(
     }
   }
 
+  autoCompleteMilestones(cwd);
+
   return updated;
 }
 
@@ -304,13 +388,7 @@ export function unblockTask(cwd: string, taskId: string): Task | null {
   const task = getTask(cwd, taskId);
   if (!task || task.status !== "blocked") return null;
 
-  // Remove block file if exists
-  const blockPath = path.join(getBlocksDir(cwd), `${taskId}.md`);
-  try {
-    fs.unlinkSync(blockPath);
-  } catch {
-    // Ignore if doesn't exist
-  }
+  cleanupBlockFiles(cwd, taskId);
 
   return updateTask(cwd, taskId, {
     status: "todo",
@@ -339,6 +417,8 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
   });
   if (updated) resetTasks.push(updated);
 
+  cleanupBlockFiles(cwd, taskId);
+
   // If cascade, reset all tasks that depend on this one
   if (cascade) {
     const allTasks = getTasks(cwd);
@@ -366,17 +446,47 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
 // Ready Tasks (Dependency Resolution)
 // =============================================================================
 
-export function getReadyTasks(cwd: string): Task[] {
+export function getReadyTasks(cwd: string, options?: { advisory?: boolean }): Task[] {
   const tasks = getTasks(cwd);
+  if (options?.advisory) {
+    return tasks.filter(t => t.status === "todo" && !t.milestone);
+  }
   const doneIds = new Set(tasks.filter(t => t.status === "done").map(t => t.id));
 
   return tasks.filter(task => {
     // Must be in "todo" status
     if (task.status !== "todo") return false;
+    if (task.milestone) return false;
 
     // All dependencies must be done
     return task.depends_on.every(depId => doneIds.has(depId));
   });
+}
+
+export function autoCompleteMilestones(cwd: string): void {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const tasks = getTasks(cwd);
+    for (const task of tasks) {
+      if (!task.milestone || task.status !== "todo") continue;
+      const allDepsDone = task.depends_on.every(depId => {
+        const dep = getTask(cwd, depId);
+        return dep?.status === "done";
+      });
+      if (allDepsDone) {
+        updateTask(cwd, task.id, {
+          status: "done",
+          completed_at: new Date().toISOString(),
+          summary: "All subtasks completed",
+        });
+        const doneCount = getTasks(cwd).filter(t => t.status === "done").length;
+        const plan = getPlan(cwd);
+        if (plan) updatePlan(cwd, { completed_count: doneCount });
+        changed = true;
+      }
+    }
+  }
 }
 
 // =============================================================================
@@ -469,6 +579,29 @@ export function validatePlan(cwd: string): ValidationResult {
     errors,
     warnings,
   };
+}
+
+// =============================================================================
+// Dependency Graph
+// =============================================================================
+
+export function getTransitiveDependents(cwd: string, targetId: string): Task[] {
+  const tasks = getTasks(cwd);
+  const collected = new Set<string>();
+  const queue = [targetId];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const task of tasks) {
+      if (collected.has(task.id) || task.id === targetId) continue;
+      if (task.depends_on.includes(current)) {
+        collected.add(task.id);
+        queue.push(task.id);
+      }
+    }
+  }
+
+  return tasks.filter(t => collected.has(t.id));
 }
 
 // =============================================================================

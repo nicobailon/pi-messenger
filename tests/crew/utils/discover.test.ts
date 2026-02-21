@@ -1,18 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { createTempCrewDirs, type TempCrewDirs } from "../../helpers/temp-dirs.js";
 import { discoverCrewAgents } from "../../../crew/utils/discover.js";
-
-const homedirMock = vi.hoisted(() => vi.fn());
-
-vi.mock("node:os", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:os")>();
-  return {
-    ...actual,
-    homedir: homedirMock,
-  };
-});
 
 function writeAgent(filePath: string, content: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -21,51 +11,46 @@ function writeAgent(filePath: string, content: string): void {
 
 describe("crew/utils/discover", () => {
   let dirs: TempCrewDirs;
+  let extensionAgentsDir: string;
+  let projectAgentsDir: string;
 
   beforeEach(() => {
     dirs = createTempCrewDirs();
-    homedirMock.mockReset();
-    homedirMock.mockReturnValue(dirs.root);
+    extensionAgentsDir = path.join(dirs.root, "extension-agents");
+    projectAgentsDir = path.join(dirs.cwd, ".pi", "messenger", "crew", "agents");
+    fs.mkdirSync(extensionAgentsDir, { recursive: true });
   });
 
-  it("discovers crew agents and parses frontmatter fields", () => {
-    const userAgentPath = path.join(dirs.root, ".pi", "agent", "agents", "crew-worker.md");
-    writeAgent(userAgentPath, `---
+  it("discovers agents from injected extension directory", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-worker.md"), `---
 name: crew-worker
 description: Worker implementation agent
 tools: read, bash, pi_messenger
 model: gpt-4.1-mini
 crewRole: worker
-maxOutput: { bytes: 2048, lines: 100 }
 ---
 You are a worker.
 `);
 
-    const agents = discoverCrewAgents(dirs.cwd);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
     expect(agents).toHaveLength(1);
     expect(agents[0].name).toBe("crew-worker");
-    expect(agents[0].description).toBe("Worker implementation agent");
-    expect(agents[0].tools).toEqual(["read", "bash", "pi_messenger"]);
+    expect(agents[0].source).toBe("extension");
     expect(agents[0].model).toBe("gpt-4.1-mini");
-    expect(agents[0].crewRole).toBe("worker");
-    expect(agents[0].maxOutput).toEqual({ bytes: 2048, lines: 100 });
-    expect(agents[0].systemPrompt).toContain("You are a worker.");
+    expect(agents[0].tools).toEqual(["read", "bash", "pi_messenger"]);
   });
 
-  it("project agents override user agents with the same name", () => {
-    const userAgentPath = path.join(dirs.root, ".pi", "agent", "agents", "crew-reviewer.md");
-    const projectAgentPath = path.join(dirs.cwd, ".pi", "agents", "crew-reviewer.md");
-
-    writeAgent(userAgentPath, `---
+  it("project agents override extension agents with the same name", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-reviewer.md"), `---
 name: crew-reviewer
-description: User reviewer
+description: Extension reviewer
 crewRole: reviewer
-model: user-model
+model: extension-model
 ---
-User prompt.
+Extension prompt.
 `);
 
-    writeAgent(projectAgentPath, `---
+    writeAgent(path.join(projectAgentsDir, "crew-reviewer.md"), `---
 name: crew-reviewer
 description: Project reviewer
 crewRole: reviewer
@@ -74,7 +59,7 @@ model: project-model
 Project prompt.
 `);
 
-    const agents = discoverCrewAgents(dirs.cwd);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
     expect(agents).toHaveLength(1);
     expect(agents[0].name).toBe("crew-reviewer");
     expect(agents[0].description).toBe("Project reviewer");
@@ -83,66 +68,87 @@ Project prompt.
     expect(agents[0].systemPrompt).toContain("Project prompt.");
   });
 
-  it("ignores files missing required name/description fields", () => {
-    const agentsDir = path.join(dirs.root, ".pi", "agent", "agents");
-
-    writeAgent(path.join(agentsDir, "missing-name.md"), `---
-description: Missing name
+  it("includes project-only agents alongside extension defaults", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-worker.md"), `---
+name: crew-worker
+description: Extension worker
 crewRole: worker
 ---
-Prompt
+Extension worker prompt.
 `);
 
-    writeAgent(path.join(agentsDir, "missing-description.md"), `---
-name: unnamed
+    writeAgent(path.join(projectAgentsDir, "crew-custom.md"), `---
+name: crew-custom
+description: Project custom agent
 crewRole: worker
 ---
-Prompt
+Project custom prompt.
 `);
 
-    writeAgent(path.join(agentsDir, "valid.md"), `---
-name: valid-worker
-description: Valid
-crewRole: worker
----
-Prompt
-`);
-
-    const agents = discoverCrewAgents(dirs.cwd);
-    expect(agents).toHaveLength(1);
-    expect(agents[0].name).toBe("valid-worker");
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    const names = agents.map(agent => agent.name).sort();
+    expect(names).toEqual(["crew-custom", "crew-worker"]);
+    expect(agents.find(agent => agent.name === "crew-worker")?.source).toBe("extension");
+    expect(agents.find(agent => agent.name === "crew-custom")?.source).toBe("project");
   });
 
-  it("parses tools as comma-separated list with trimming", () => {
-    const userAgentPath = path.join(dirs.root, ".pi", "agent", "agents", "crew-planner.md");
-    writeAgent(userAgentPath, `---
+  it("returns extension agents when project directory is missing", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-planner.md"), `---
 name: crew-planner
 description: Planner
-tools: read,  bash ,edit,   , write
 crewRole: planner
 ---
-Planner prompt
+Planner prompt.
 `);
 
-    const agents = discoverCrewAgents(dirs.cwd);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
     expect(agents).toHaveLength(1);
-    expect(agents[0].tools).toEqual(["read", "bash", "edit", "write"]);
+    expect(agents[0].name).toBe("crew-planner");
+    expect(agents[0].source).toBe("extension");
   });
 
-  it("parses model from frontmatter", () => {
-    const userAgentPath = path.join(dirs.root, ".pi", "agent", "agents", "crew-analyst.md");
-    writeAgent(userAgentPath, `---
+  it("parses thinking from frontmatter", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-thinker.md"), `---
+name: crew-thinker
+description: Deep thinker
+thinking: high
+model: claude-opus-4-6
+---
+Think hard.
+`);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    expect(agents[0].thinking).toBe("high");
+  });
+
+  it("thinking defaults to undefined when not specified", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-simple.md"), `---
+name: crew-simple
+description: No thinking
+---
+Simple.
+`);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    expect(agents[0].thinking).toBeUndefined();
+  });
+
+  it("parses frontmatter fields", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-analyst.md"), `---
 name: crew-analyst
 description: Analyst
+tools: read,  bash ,edit,   , write
 crewRole: analyst
 model: claude-3-5-haiku
+maxOutput: { bytes: 2048, lines: 100 }
 ---
 Analyst prompt
 `);
 
-    const agents = discoverCrewAgents(dirs.cwd);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
     expect(agents).toHaveLength(1);
+    expect(agents[0].name).toBe("crew-analyst");
     expect(agents[0].model).toBe("claude-3-5-haiku");
     expect(agents[0].crewRole).toBe("analyst");
+    expect(agents[0].tools).toEqual(["read", "bash", "edit", "write"]);
+    expect(agents[0].maxOutput).toEqual({ bytes: 2048, lines: 100 });
   });
 });

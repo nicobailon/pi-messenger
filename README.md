@@ -4,7 +4,7 @@
 
 # Pi Messenger
 
-**What if multiple agents in different terminals sharing a folder could talk to each other like they're in a chat room?** Join, see who's online and what they're doing. Claim tasks, reserve files, send messages. Built on [Pi's](https://github.com/badlogic/pi-mono) extension system. No daemon, no server, just files.
+**What if multiple agents in different terminals sharing a folder could talk to each other like they're in a chat room?** Join, see who's online and what they're doing. Claim tasks, reserve files, send messages. An extension for [Pi coding agent](https://pi.dev/) — install it and go. No daemon, no server, just files.
 
 [![npm version](https://img.shields.io/npm/v/pi-messenger?style=for-the-badge)](https://www.npmjs.com/package/pi-messenger)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
@@ -16,13 +16,15 @@
 pi install npm:pi-messenger
 ```
 
-Crew agents and the `pi-messenger-crew` skill are auto-installed on first use of `plan`, `work`, or `review`. To install them ahead of time:
+Crew agents ship with the extension (`crew/agents/*.md`) and are discovered automatically. The `pi-messenger-crew` skill is auto-loaded from the extension.
+
+To show available crew agents:
 
 ```bash
 npx pi-messenger --crew-install
 ```
 
-This copies `crew/agents/*.md` to `~/.pi/agent/agents/` and `skills/pi-messenger-crew/` to `~/.pi/agent/skills/`.
+To customize an agent for one project, copy it to `.pi/messenger/crew/agents/` and edit it.
 
 To remove the extension:
 
@@ -30,7 +32,7 @@ To remove the extension:
 npx pi-messenger --remove
 ```
 
-To also remove crew agents and skill:
+To remove stale crew agent copies from the shared legacy directory (`~/.pi/agent/agents/`):
 
 ```bash
 npx pi-messenger --crew-uninstall
@@ -96,7 +98,14 @@ Crew turns a PRD into a dependency graph of tasks, then executes them in paralle
 2. **Work** — Workers implement ready tasks (all dependencies met) in parallel waves. A single `work` call runs one wave. `autonomous: true` runs waves back-to-back until everything is done or blocked.
 3. **Review** — Reviewer checks each implementation: SHIP, NEEDS_WORK, or MAJOR_RETHINK.
 
-No special PRD format required — the planner auto-discovers `PRD.md`, `SPEC.md`, `DESIGN.md`, etc. in your project root and `docs/`.
+No special PRD format required — the planner auto-discovers `PRD.md`, `SPEC.md`, `DESIGN.md`, etc. in your project root and `docs/`. Or skip the file entirely:
+
+```typescript
+pi_messenger({ action: "plan", prompt: "Scan the codebase for bugs" })
+
+// Plan + auto-start autonomous work when planning completes
+pi_messenger({ action: "plan" })  // auto-starts workers (default)
+```
 
 ### Wave Execution
 
@@ -116,20 +125,54 @@ The planner structures tasks to maximize parallelism. Foundation work has no dep
 
 ### Crew Configuration
 
-Add to `~/.pi/agent/pi-messenger.json`:
+Crew spawns multiple LLM sessions in parallel — it can burn tokens fast. Start with a cheap worker model and scale up once you've seen the workflow. Add this to `~/.pi/agent/pi-messenger.json`:
+
+```json
+{ "crew": { "models": { "worker": "claude-haiku-4-5" } } }
+```
+
+The planner and reviewer keep their frontmatter defaults; only workers (the bulk of the spend) get the cheap model. Override per-role as needed:
 
 ```json
 {
   "crew": {
-    "concurrency": { "workers": 2 },
-    "models": { "worker": "claude-sonnet-4-20250514" },
+    "models": {
+      "worker": "claude-haiku-4-5",
+      "planner": "claude-sonnet-4-6",
+      "reviewer": "claude-sonnet-4-6"
+    }
+  }
+}
+```
+
+Model strings accept `provider/model` format for explicit provider selection and `:level` suffix for inline thinking control. These work anywhere a model is specified — config, frontmatter, or per-task override:
+
+```json
+{
+  "crew": {
+    "models": {
+      "worker": "anthropic/claude-haiku-4-5",
+      "planner": "openrouter/anthropic/claude-sonnet-4:high"
+    }
+  }
+}
+```
+
+The `:level` suffix and the `thinking.<role>` config are independent — if both are set, the suffix takes precedence and the `--thinking` flag is skipped to avoid double-application.
+
+Full config reference (all fields optional — only set what you want to change):
+
+```json
+{
+  "crew": {
+    "concurrency": { "workers": 2, "max": 10 },
+    "coordination": "chatty",
+    "models": { "worker": "claude-haiku-4-5" },
     "review": { "enabled": true, "maxIterations": 3 },
-    "planning": { "maxPasses": 3 },
+    "planning": { "maxPasses": 1 },
     "work": {
       "maxAttemptsPerTask": 5,
-      "maxWaves": 50,
-      "shutdownGracePeriodMs": 30000,
-      "env": { "NODE_ENV": "test" }
+      "maxWaves": 50
     }
   }
 }
@@ -137,17 +180,39 @@ Add to `~/.pi/agent/pi-messenger.json`:
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| `concurrency.workers` | Max parallel workers per wave | `2` |
-| `models.worker` | Model for spawned workers (overridden by per-task or per-wave `model` param) | agent `.md` frontmatter |
+| `concurrency.workers` | Default parallel workers per wave | `2` |
+| `concurrency.max` | Maximum workers allowed (hard ceiling is 10) | `10` |
+| `dependencies` | Dependency scheduling mode: `advisory` or `strict` | `"advisory"` |
+| `coordination` | Worker coordination level: `none`, `minimal`, `moderate`, `chatty` | `"chatty"` |
+| `messageBudgets` | Max outgoing messages per worker per level (sends rejected after limit) | `{ none: 0, minimal: 2, moderate: 5, chatty: 10 }` |
+| `models.planner` | Model for planner agent | `anthropic/claude-opus-4-6` |
+| `models.worker` | Model for workers (overridden by per-task or per-wave `model` param) | `anthropic/claude-haiku-4-5` |
+| `models.reviewer` | Model for reviewer agent | `anthropic/claude-opus-4-6` |
+| `models.analyst` | Model for analyst (plan-sync) agent | `anthropic/claude-haiku-4-5` |
+| `thinking.planner` | Thinking level for planner agent | (from frontmatter) |
+| `thinking.worker` | Thinking level for worker agents | (from frontmatter) |
+| `thinking.reviewer` | Thinking level for reviewer agents | (from frontmatter) |
+| `thinking.analyst` | Thinking level for analyst agents | (from frontmatter) |
 | `review.enabled` | Auto-review after task completion | `true` |
 | `review.maxIterations` | Max review/fix cycles per task | `3` |
-| `planning.maxPasses` | Max planner/reviewer refinement passes | `3` |
+| `planning.maxPasses` | Max planner/reviewer refinement passes | `1` |
 | `work.maxAttemptsPerTask` | Auto-block after N failures | `5` |
 | `work.maxWaves` | Max autonomous waves | `50` |
 | `work.shutdownGracePeriodMs` | Grace period before SIGTERM on abort | `30000` |
 | `work.env` | Environment variables passed to spawned workers | `{}` |
 
-Crew agents (planner, worker, reviewer, interview-generator, plan-sync) are **auto-installed** on first use. Run `npx pi-messenger --crew-install` to manually install or update.
+### Default Agent Models
+
+Each crew agent ships with a default model in its frontmatter. Override any of these via `crew.models.<role>` in config:
+
+| Agent | Role | Default Model |
+|-------|------|---------------|
+| `crew-planner` | planner | `anthropic/claude-opus-4-6` |
+| `crew-worker` | worker | `anthropic/claude-haiku-4-5` |
+| `crew-reviewer` | reviewer | `anthropic/claude-opus-4-6` |
+| `crew-plan-sync` | analyst | `anthropic/claude-haiku-4-5` |
+
+Agent definitions live in `crew/agents/` within the extension. To customize one for a project, copy it to `.pi/messenger/crew/agents/` and edit the frontmatter — project-level agents override extension defaults by name. Agents support `thinking: <level>` in frontmatter (off, minimal, low, medium, high, xhigh). Config `thinking.<role>` overrides the frontmatter value.
 
 ## API Reference
 
@@ -171,7 +236,7 @@ Crew agents (planner, worker, reviewer, interview-generator, plan-sync) are **au
 
 | Action | Description |
 |--------|-------------|
-| `plan` | Create plan from PRD (`prd` optional — auto-discovers if omitted) |
+| `plan` | Create plan from PRD or inline prompt (`prd`, `prompt` optional — auto-discovers PRD if omitted, auto-starts workers unless `autoWork: false`) |
 | `work` | Run ready tasks (`autonomous`, `concurrency` optional) |
 | `review` | Review implementation (`target` task ID required) |
 | `task.list` | List all tasks |
@@ -185,8 +250,8 @@ Crew agents (planner, worker, reviewer, interview-generator, plan-sync) are **au
 | `crew.status` | Overall crew status |
 | `crew.validate` | Validate plan dependencies |
 | `crew.agents` | List available crew agents |
-| `crew.install` | Install/update crew agents |
-| `crew.uninstall` | Remove crew agents and skill |
+| `crew.install` | Show discovered crew agents and their sources |
+| `crew.uninstall` | Remove stale shared-directory crew agent copies |
 
 ### Swarm (Spec-Based)
 
@@ -208,7 +273,8 @@ Create `~/.pi/agent/pi-messenger.json`:
   "scopeToFolder": false,
   "nameTheme": "default",
   "stuckThreshold": 900,
-  "stuckNotify": true
+  "stuckNotify": true,
+  "autoOverlayPlanning": true
 }
 ```
 
@@ -223,6 +289,8 @@ Create `~/.pi/agent/pi-messenger.json`:
 | `stuckThreshold` | Seconds of inactivity before stuck detection | `900` |
 | `stuckNotify` | Show notification when a peer appears stuck | `true` |
 | `autoStatus` | Auto-generate status messages from activity | `true` |
+| `autoOverlay` | Auto-open overlay when autonomous crew work starts | `true` |
+| `autoOverlayPlanning` | Auto-open Crew overlay when planning starts or is restored in-progress | `true` |
 | `crewEventsInFeed` | Include crew task events in activity feed | `true` |
 | `contextMode` | Context injection level: `full`, `minimal`, `none` | `"full"` |
 
@@ -236,7 +304,7 @@ Incoming messages wake the receiving agent via `pi.sendMessage()` with `triggerT
 
 Crew workers are spawned as `pi --mode json` subprocesses with the agent's system prompt, model, and tool restrictions from their `.md` definitions. Progress is tracked via JSONL streaming — the overlay subscribes to a live progress store that shows each worker's current tool, call count, and token usage in real time. Aborting a work run triggers graceful shutdown: each worker receives an inbox message asking it to stop, followed by a grace period before SIGTERM. The planner and reviewer work the same way — just pi instances with different agent configs.
 
-All coordination is file-based, no daemon required. Global state (registry, inboxes, activity feed) lives in `~/.pi/agent/messenger/`. Per-project crew data (plan, tasks, artifacts) lives in `.pi/messenger/crew/` inside your project. Dead agents are detected via PID checks and cleaned up automatically.
+All coordination is file-based, no daemon required. Shared state (registry, inboxes, swarm claims/completions) lives in `~/.pi/agent/messenger/`. Activity feed and crew data are project-scoped under `.pi/messenger/` inside your project. Dead agents are detected via PID checks and cleaned up automatically.
 
 ## Credits
 

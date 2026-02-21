@@ -6,17 +6,15 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { MessengerState, Dirs } from "../../lib.js";
 import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
 import { spawnAgents } from "../agents.js";
 import { discoverCrewAgents } from "../utils/discover.js";
+import { loadCrewConfig } from "../utils/config.js";
 import * as store from "../store.js";
 
 export async function execute(
   params: CrewParams,
-  _state: MessengerState,
-  _dirs: Dirs,
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
@@ -57,6 +55,7 @@ export async function execute(
   }
 
   // Check for plan-sync agent
+  const config = loadCrewConfig(store.getCrewDir(cwd));
   const availableAgents = discoverCrewAgents(cwd);
   const hasSyncAgent = availableAgents.some(a => a.name === "crew-plan-sync");
   if (!hasSyncAgent) {
@@ -126,8 +125,9 @@ Follow the output format in your instructions.`;
   // Spawn sync agent
   const [syncResult] = await spawnAgents([{
     agent: "crew-plan-sync",
-    task: prompt
-  }], 1, cwd);
+    task: prompt,
+    modelOverride: config.models?.analyst,
+  }], cwd);
 
   if (syncResult.exitCode !== 0) {
     return result(`Error: Sync agent failed: ${syncResult.error ?? "Unknown error"}`, {
@@ -163,7 +163,7 @@ ${update.newContent}`;
     }
   }
 
-  const readyTasks = store.getReadyTasks(cwd);
+  const readyTasks = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
   const text = `# Sync Complete: ${target}
 
 **Dependent tasks checked:** ${dependentTasks.length}

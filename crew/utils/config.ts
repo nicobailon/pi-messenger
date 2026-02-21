@@ -9,8 +9,27 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { MaxOutputConfig } from "./truncate.js";
 
+export type CoordinationLevel = "none" | "minimal" | "moderate" | "chatty";
+
 const USER_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "pi-messenger.json");
 const PROJECT_CONFIG_FILE = "config.json";
+
+const COORDINATION_LEVELS: CoordinationLevel[] = ["none", "minimal", "moderate", "chatty"];
+
+let coordinationOverride: CoordinationLevel | null = null;
+
+export function setCoordinationOverride(level: CoordinationLevel): void {
+  coordinationOverride = level;
+}
+
+export function getCoordinationOverride(): CoordinationLevel | null {
+  return coordinationOverride;
+}
+
+export function cycleCoordinationLevel(current: CoordinationLevel): CoordinationLevel {
+  const idx = COORDINATION_LEVELS.indexOf(current);
+  return COORDINATION_LEVELS[(idx + 1) % COORDINATION_LEVELS.length];
+}
 
 export interface CrewConfig {
   models?: {
@@ -19,8 +38,15 @@ export interface CrewConfig {
     reviewer?: string;
     analyst?: string;
   };
+  thinking?: {
+    planner?: string;
+    worker?: string;
+    reviewer?: string;
+    analyst?: string;
+  };
   concurrency: {
     workers: number;
+    max: number;
   };
   truncation: {
     planners: MaxOutputConfig;
@@ -43,11 +69,15 @@ export interface CrewConfig {
     env?: Record<string, string>;
     shutdownGracePeriodMs?: number;
   };
+  dependencies: "advisory" | "strict";
+  coordination: CoordinationLevel;
+  messageBudgets: Record<CoordinationLevel, number>;
 }
 
 const DEFAULT_CONFIG: CrewConfig = {
   concurrency: {
     workers: 2,
+    max: 10,
   },
   truncation: {
     planners: { bytes: 204800, lines: 5000 },
@@ -59,8 +89,11 @@ const DEFAULT_CONFIG: CrewConfig = {
   memory: { enabled: false },
   planSync: { enabled: false },
   review: { enabled: true, maxIterations: 3 },
-  planning: { maxPasses: 3 },
+  planning: { maxPasses: 1 },
   work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false, shutdownGracePeriodMs: 30000 },
+  dependencies: "advisory",
+  coordination: "chatty",
+  messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
 };
 
 function loadJson(filePath: string): Record<string, unknown> {
@@ -104,8 +137,12 @@ export function loadCrewConfig(crewDir: string): CrewConfig {
   // Project-level config (from .pi/messenger/crew/config.json)
   const projectConfig = loadJson(path.join(crewDir, PROJECT_CONFIG_FILE)) as Partial<CrewConfig>;
 
-  // Merge: defaults <- user <- project
-  return deepMerge(DEFAULT_CONFIG, userCrewConfig, projectConfig);
+  // Merge: defaults <- user <- project <- runtime override
+  const merged = deepMerge(DEFAULT_CONFIG, userCrewConfig, projectConfig);
+  if (coordinationOverride !== null) {
+    merged.coordination = coordinationOverride;
+  }
+  return merged;
 }
 
 export function getTruncationForRole(config: CrewConfig, role: string): MaxOutputConfig {

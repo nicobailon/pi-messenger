@@ -122,7 +122,7 @@ Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback
     agent: "crew-reviewer",
     task: prompt,
     modelOverride,
-  }], 1, cwd);
+  }], cwd);
 
   if (reviewResult.exitCode !== 0) {
     return result(`Error: Reviewer failed: ${reviewResult.error ?? "Unknown error"}`, {
@@ -144,6 +144,9 @@ Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback
       reviewed_at: new Date().toISOString()
     }
   });
+  const shortSummary = verdict.summary.split("\n")[0].slice(0, 120);
+  const progressMsg = `Review: ${verdict.verdict} — ${shortSummary}`;
+  store.appendTaskProgress(cwd, taskId, "system", progressMsg);
 
   const text = `# Review: ${taskId}
 
@@ -198,7 +201,7 @@ async function reviewPlan(cwd: string, modelOverride?: string) {
 
 ## Plan Information
 
-**PRD:** ${plan.prd}
+**PRD:** ${store.getPlanLabel(plan)}
 **Tasks:** ${tasks.length}
 **Progress:** ${plan.completed_count}/${plan.task_count}
 
@@ -227,7 +230,7 @@ Output your verdict as SHIP (plan is solid), NEEDS_WORK (minor adjustments), or 
     agent: "crew-reviewer",
     task: prompt,
     modelOverride,
-  }], 1, cwd);
+  }], cwd);
 
   if (reviewResult.exitCode !== 0) {
     return result(`Error: Reviewer failed: ${reviewResult.error ?? "Unknown error"}`, {
@@ -241,7 +244,7 @@ Output your verdict as SHIP (plan is solid), NEEDS_WORK (minor adjustments), or 
 
   const text = `# Plan Review
 
-**PRD:** ${plan.prd}
+**PRD:** ${store.getPlanLabel(plan)}
 **Verdict:** ${verdict.verdict}
 
 ${verdict.summary}

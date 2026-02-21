@@ -20,6 +20,7 @@ function makeInfo(taskId: string, agent: string) {
   return {
     taskId,
     agent,
+    name: "TestWorker",
     startedAt: Date.now(),
     progress: {
       agent,

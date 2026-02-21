@@ -1,14 +1,17 @@
 /**
  * Crew - Agent Discovery
- * 
- * Discovers agent definitions from user and project directories,
- * with crew-specific filtering by role.
+ *
+ * Discovers agent definitions from extension and project directories.
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { MaxOutputConfig } from "./truncate.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DEFAULT_EXTENSION_AGENTS_DIR = path.resolve(__dirname, "..", "agents");
 
 export type CrewRole = "planner" | "worker" | "reviewer" | "analyst";
 
@@ -17,24 +20,16 @@ export interface CrewAgentConfig {
   description: string;
   tools?: string[];
   model?: string;
+  thinking?: string;
   systemPrompt: string;
-  source: "user" | "project";
+  source: "extension" | "project";
   filePath: string;
-  // Crew-specific extensions
   crewRole?: CrewRole;
   maxOutput?: MaxOutputConfig;
   parallel?: boolean;
   retryable?: boolean;
 }
 
-export interface AgentDiscoveryResult {
-  agents: CrewAgentConfig[];
-  projectAgentsDir: string | null;
-}
-
-/**
- * Parse YAML-like frontmatter from markdown content.
- */
 function parseFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {
   const normalized = content.replace(/\r\n/g, "\n");
   if (!normalized.startsWith("---")) {
@@ -52,49 +47,27 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, unknow
     const match = line.match(/^([\w-]+):\s*(.*)$/);
     if (match) {
       let value: unknown = match[2].trim();
-      // Handle quoted strings
-      if ((value as string).startsWith('"') || (value as string).startsWith("'")) {
+      if ((value as string).startsWith("\"") || (value as string).startsWith("'")) {
         value = (value as string).slice(1, -1);
       }
-      // Handle inline YAML objects (e.g., maxOutput: { bytes: 1024, lines: 500 })
       if ((value as string).startsWith("{") && (value as string).endsWith("}")) {
         try {
-          // YAML inline objects don't require quoted keys, but JSON does
-          const jsonStr = (value as string).replace(/(\w+):/g, '"$1":');
+          const jsonStr = (value as string).replace(/(\w+):/g, "\"$1\":");
           value = JSON.parse(jsonStr);
         } catch {
           // Keep as string if parse fails
         }
       }
-      // Handle booleans
       if (value === "true") value = true;
       if (value === "false") value = false;
       frontmatter[match[1]] = value;
     }
   }
+
   return { frontmatter, body };
 }
 
-function isDirectory(p: string): boolean {
-  try {
-    return fs.statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function findProjectAgentsDir(cwd: string): string | null {
-  let currentDir = cwd;
-  while (true) {
-    const candidate = path.join(currentDir, ".pi", "agents");
-    if (isDirectory(candidate)) return candidate;
-    const parentDir = path.dirname(currentDir);
-    if (parentDir === currentDir) return null;
-    currentDir = parentDir;
-  }
-}
-
-function loadAgentsFromDir(dir: string, source: "user" | "project"): CrewAgentConfig[] {
+function loadAgentsFromDir(dir: string, source: "extension" | "project"): CrewAgentConfig[] {
   if (!fs.existsSync(dir)) return [];
   const agents: CrewAgentConfig[] = [];
 
@@ -109,11 +82,10 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): CrewAgentCo
     } catch {
       continue;
     }
-    const { frontmatter, body } = parseFrontmatter(content);
 
+    const { frontmatter, body } = parseFrontmatter(content);
     if (!frontmatter.name || !frontmatter.description) continue;
 
-    // Parse tools (comma-separated, filter empty)
     const tools = (frontmatter.tools as string)
       ?.split(",")
       .map(t => t.trim())
@@ -124,41 +96,30 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): CrewAgentCo
       description: frontmatter.description as string,
       tools: tools && tools.length > 0 ? tools : undefined,
       model: frontmatter.model as string | undefined,
+      thinking: frontmatter.thinking as string | undefined,
       systemPrompt: body,
       source,
       filePath,
-      // Crew extensions
       crewRole: frontmatter.crewRole as CrewRole | undefined,
       maxOutput: frontmatter.maxOutput as MaxOutputConfig | undefined,
-      parallel: frontmatter.parallel as boolean | undefined ?? true,
-      retryable: frontmatter.retryable as boolean | undefined ?? true,
+      parallel: (frontmatter.parallel as boolean | undefined) ?? true,
+      retryable: (frontmatter.retryable as boolean | undefined) ?? true,
     });
   }
+
   return agents;
 }
 
-/**
- * Discover all agents from user and/or project directories.
- */
-export function discoverAgents(cwd: string, scope: "user" | "project" | "both"): AgentDiscoveryResult {
-  const userDir = path.join(os.homedir(), ".pi", "agent", "agents");
-  const projectDir = findProjectAgentsDir(cwd);
+export function discoverCrewAgents(cwd: string, extensionAgentsDir?: string): CrewAgentConfig[] {
+  const extDir = extensionAgentsDir ?? DEFAULT_EXTENSION_AGENTS_DIR;
+  const projectAgentsDir = path.join(cwd, ".pi", "messenger", "crew", "agents");
 
-  const userAgents = scope !== "project" ? loadAgentsFromDir(userDir, "user") : [];
-  const projectAgents = scope !== "user" && projectDir ? loadAgentsFromDir(projectDir, "project") : [];
+  const extensionAgents = loadAgentsFromDir(extDir, "extension");
+  const projectAgents = loadAgentsFromDir(projectAgentsDir, "project");
 
-  // Project overrides user (same name = project wins)
   const agentMap = new Map<string, CrewAgentConfig>();
-  for (const a of userAgents) agentMap.set(a.name, a);
-  for (const a of projectAgents) agentMap.set(a.name, a);
+  for (const agent of extensionAgents) agentMap.set(agent.name, agent);
+  for (const agent of projectAgents) agentMap.set(agent.name, agent);
 
-  return { agents: Array.from(agentMap.values()), projectAgentsDir: projectDir };
+  return Array.from(agentMap.values());
 }
-
-/**
- * Discover only crew agents (those with crewRole set).
- */
-export function discoverCrewAgents(cwd: string): CrewAgentConfig[] {
-  return discoverAgents(cwd, "both").agents.filter(a => a.crewRole !== undefined);
-}
-
