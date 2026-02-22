@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.12.1] - 2026-02-22
+
+### Fixed
+- **Wrong model resolved for `provider/model` format** - Worker spawn passed `--model zai/glm-5` as a single flag, which pi's model resolver matched as a literal model ID under `vercel-ai-gateway` instead of interpreting `zai` as the provider. Now splits `provider/model` into separate `--provider` and `--model` flags, matching the intended provider. Affects both task workers and lobby workers.
+
 ## [0.12.0] - 2026-02-21
 
 ### Added

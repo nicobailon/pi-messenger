@@ -58,6 +58,15 @@ export function resolveModel(
   return taskModel ?? paramModel ?? configModel ?? agentModel;
 }
 
+export function pushModelArgs(args: string[], model: string): void {
+  const slashIdx = model.indexOf("/");
+  if (slashIdx !== -1) {
+    args.push("--provider", model.substring(0, slashIdx), "--model", model.substring(slashIdx + 1));
+  } else {
+    args.push("--model", model);
+  }
+}
+
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 export function resolveThinking(
@@ -195,7 +204,7 @@ async function runAgent(
     // Build args for pi command
     const args = ["--mode", "json", "--no-session", "-p"];
     const model = task.modelOverride ?? agentConfig?.model;
-    if (model) args.push("--model", model);
+    if (model) pushModelArgs(args, model);
 
     const thinking = resolveThinking(
       config.thinking?.[role],

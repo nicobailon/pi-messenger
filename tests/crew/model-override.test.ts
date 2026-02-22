@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveModel, spawnAgents } from "../../crew/agents.js";
+import { resolveModel, pushModelArgs, spawnAgents } from "../../crew/agents.js";
 import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -103,5 +103,44 @@ describe("crew/model override", () => {
 
     expect(modelFlagIndex).toBeGreaterThan(-1);
     expect(args[modelFlagIndex + 1]).toBe("agent-default-model");
+  });
+
+  it("spawnAgents splits provider/model into --provider and --model flags", async () => {
+    writeWorkerAgent(dirs.cwd, "zai/glm-5");
+
+    await spawnAgents([{
+      agent: "crew-worker",
+      task: "Implement task",
+      taskId: "task-1",
+    }], dirs.cwd);
+
+    const args = spawnMock.mock.calls[0][1] as string[];
+    const providerIdx = args.indexOf("--provider");
+    const modelIdx = args.indexOf("--model");
+
+    expect(providerIdx).toBeGreaterThan(-1);
+    expect(args[providerIdx + 1]).toBe("zai");
+    expect(modelIdx).toBeGreaterThan(-1);
+    expect(args[modelIdx + 1]).toBe("glm-5");
+  });
+
+  describe("pushModelArgs", () => {
+    it("splits provider/model into separate flags", () => {
+      const args: string[] = [];
+      pushModelArgs(args, "zai/glm-5");
+      expect(args).toEqual(["--provider", "zai", "--model", "glm-5"]);
+    });
+
+    it("passes plain model as --model only", () => {
+      const args: string[] = [];
+      pushModelArgs(args, "claude-sonnet-4");
+      expect(args).toEqual(["--model", "claude-sonnet-4"]);
+    });
+
+    it("splits on first slash only for openrouter-style IDs", () => {
+      const args: string[] = [];
+      pushModelArgs(args, "openrouter/anthropic/claude-3-5-sonnet");
+      expect(args).toEqual(["--provider", "openrouter", "--model", "anthropic/claude-3-5-sonnet"]);
+    });
   });
 });

@@ -13,7 +13,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { generateMemorableName } from "../lib.js";
-import { resolveThinking, modelHasThinkingSuffix } from "./agents.js";
+import { resolveThinking, modelHasThinkingSuffix, pushModelArgs } from "./agents.js";
 import { discoverCrewAgents } from "./utils/discover.js";
 import { loadCrewConfig, type CrewConfig } from "./utils/config.js";
 import {
@@ -70,7 +70,7 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   const args = ["--mode", "json", "--no-session", "-p"];
   const model = config.models?.worker ?? workerConfig.model;
-  if (model) args.push("--model", model);
+  if (model) pushModelArgs(args, model);
 
   const thinking = resolveThinking(
     config.thinking?.worker,
