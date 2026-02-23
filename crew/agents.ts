@@ -203,7 +203,7 @@ async function runAgent(
   return new Promise((resolve) => {
     // Build args for pi command
     const args = ["--mode", "json", "--no-session", "-p"];
-    const model = task.modelOverride ?? agentConfig?.model;
+    const model = task.modelOverride ?? config.models?.[role] ?? agentConfig?.model;
     if (model) pushModelArgs(args, model);
 
     const thinking = resolveThinking(

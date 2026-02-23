@@ -51,6 +51,12 @@ You are a test worker.
   fs.writeFileSync(filePath, content);
 }
 
+function writeCrewConfig(cwd: string, models: Record<string, string | null>): void {
+  const configPath = path.join(cwd, ".pi", "messenger", "crew", "config.json");
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify({ models }));
+}
+
 describe("crew/model override", () => {
   let dirs: TempCrewDirs;
 
@@ -91,6 +97,7 @@ describe("crew/model override", () => {
 
   it("spawnAgents falls back to agent model when no override is provided", async () => {
     writeWorkerAgent(dirs.cwd, "agent-default-model");
+    writeCrewConfig(dirs.cwd, { worker: null });
 
     await spawnAgents([{
       agent: "crew-worker",
@@ -107,6 +114,7 @@ describe("crew/model override", () => {
 
   it("spawnAgents splits provider/model into --provider and --model flags", async () => {
     writeWorkerAgent(dirs.cwd, "zai/glm-5");
+    writeCrewConfig(dirs.cwd, { worker: null });
 
     await spawnAgents([{
       agent: "crew-worker",

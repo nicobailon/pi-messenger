@@ -341,7 +341,8 @@ export function renderEmptyState(theme: Theme, cwd: string, width: number, heigh
     lines.push(theme.fg("dim", "  (none discovered)"));
   } else {
     for (const agent of agents) {
-      const model = agent.model ? ` (model: ${agent.model})` : "";
+      const effectiveModel = crewConfig.models?.[agent.crewRole ?? "worker"] ?? agent.model;
+      const model = effectiveModel ? ` (model: ${effectiveModel})` : "";
       lines.push(`  ${agent.name}${model}`);
     }
   }
