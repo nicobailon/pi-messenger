@@ -58,6 +58,7 @@ Synthesize everything you've found. Identify:
 - **Edge cases**: Error states, boundary conditions, race conditions
 - **Security concerns**: Input validation, auth, data exposure
 - **Testing requirements**: What types of tests are needed, what should be covered
+- **INDIRECTION RISK**: For each task, flag if the bug/feature touches code that is NOT directly invoked by tests — configuration classes, initialization routines, factory methods, type registrations. These are where root causes hide while crash sites get the blame. (Ref: Mockito_8 — root cause in `registerTypeVariablesOn()` line 80, crash at `getActualTypeArgumentFor()` line 185.)
 
 ## Phase 6: Task Breakdown
 

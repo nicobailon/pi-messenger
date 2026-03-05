@@ -50,9 +50,19 @@ pi_messenger({ action: "reserve", paths: ["src/path/to/files/"], reason: "<TASK_
 ## Phase 4: Implement
 
 1. Read relevant existing code to understand patterns
-2. Implement the feature following project conventions
-3. Write tests if applicable
+2. **Write a failing test first (RED).** Confirm it fails for the right reason.
+   - VACUOUS TEST GUARD: Would this test pass with an empty/stub implementation? If yes → rewrite to assert specific outputs that ONLY the correct implementation produces.
+   - RIGHT-REASON CHECK: Failure must be "expected X got Y", NOT "Cannot find module" or syntax error.
+3. Implement the feature following project conventions (GREEN). Make the test pass.
 4. Run tests to verify: `bash({ command: "npm test" })` or equivalent
+
+### Pre-Completion Checks
+Before marking done, verify:
+- **Name resolution audit**: For any function call with a common name (`format`, `parse`, `render`, `get`, `set`), trace the import chain. Module-level names shadow builtins. (Ref: django-13670 — `format()` resolved to wrong definition.)
+- **Indirection check**: Is your fix at the **root cause** or the **crash site**? If they're the same location, trace one level upstream. (Ref: Mockito_8 — crash at line 185, root cause at line 80.)
+
+### Anti-pattern: Confident Wrong Answers
+If you've done deep analysis and feel highly confident, PAUSE. Re-read the error message literally. The most dangerous bugs are the ones where thorough analysis leads to a plausible but wrong conclusion. (Ref: py_5 — deep analysis led to wrong fix with high confidence.)
 
 **Progress Logging:** After each significant step above, log what you did:
 

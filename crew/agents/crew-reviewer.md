@@ -23,6 +23,8 @@ You review task implementations. Your prompt contains the task context and git d
    - Does it follow project conventions?
    - Are there security concerns?
    - Is the code well-structured and maintainable?
+   - **Name Resolution Audit**: For any function call with a common name (`format`, `parse`, `render`, `get`, `set`), verify the import resolves to the intended definition, not a module-level shadow. (Ref: django-13670)
+   - **Anti-pattern — "Dismiss Subtle Differences"**: If the implementation looks "close enough" but has minor discrepancies in naming, types, or argument order — those ARE the bug. Do not dismiss subtle differences between expected and actual behavior.
 
 ## Output Format
 
