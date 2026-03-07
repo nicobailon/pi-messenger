@@ -915,6 +915,14 @@ Usage (action-based API - preferred):
         }, { triggerTurn: true, deliverAs: "steer" });
       }
     }
+    // Collaborator keepalive: stay alive to receive messages from the spawning agent
+    if (process.env.PI_CREW_COLLABORATOR === "1") {
+      pi.sendMessage({
+        customType: "collaborator_keepalive",
+        content: "[Collaborator keep-alive] You are in a collaboration session. Wait for the next message from your partner. Do NOT take any action, make any tool calls, or generate any output. Respond with only: .",
+        display: false,
+      }, { triggerTurn: true, deliverAs: "steer" });
+    }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
 
