@@ -765,7 +765,8 @@ Usage (action-based API - preferred):
     state.isHuman = ctx.hasUI;
     try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
 
-    const shouldAutoRegister = config.autoRegister || 
+    const isCollaborator = process.env.PI_CREW_COLLABORATOR === "1";
+    const shouldAutoRegister = isCollaborator || config.autoRegister || 
       matchesAutoRegisterPath(process.cwd(), config.autoRegisterPaths);
 
     if (!shouldAutoRegister) {
