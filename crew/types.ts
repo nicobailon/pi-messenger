@@ -70,6 +70,9 @@ export interface CrewParams {
   // Action
   action?: string;
 
+  // Spawn/dismiss
+  agent?: string;                // Agent definition name for spawn
+
   // Plan
   prd?: string;                  // PRD file path for plan action
 

@@ -16,7 +16,7 @@ const __dirname = path.dirname(__filename);
 const DEFAULT_EXTENSION_AGENTS_DIR = path.resolve(__dirname, "..", "agents");
 const DEFAULT_EXTENSION_SKILLS_DIR = path.resolve(__dirname, "..", "skills");
 
-export type CrewRole = "planner" | "worker" | "reviewer" | "analyst";
+export type CrewRole = "planner" | "worker" | "reviewer" | "analyst" | "collaborator";
 
 export interface CrewAgentConfig {
   name: string;

@@ -65,6 +65,7 @@ import { runLegacyAgentCleanupMigration } from "./crew/utils/install.js";
 import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
 import { shutdownAllWorkers } from "./crew/agents.js";
 import { shutdownLobbyWorkers } from "./crew/lobby.js";
+import { shutdownCollaborators } from "./crew/handlers/collab.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -104,6 +105,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     customStatus: false,
     registryFlushTimer: null,
     sessionStartedAt: new Date().toISOString(),
+    registrationContextSent: false,
   };
 
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
@@ -318,6 +320,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   // ===========================================================================
 
   function sendRegistrationContext(ctx: ExtensionContext): void {
+    if (state.registrationContextSent) return;
+    state.registrationContextSent = true;
     const folder = extractFolder(process.cwd());
     const locationPart = state.gitBranch
       ? `${folder} on ${state.gitBranch}`
@@ -408,7 +412,8 @@ Usage (action-based API - preferred):
       cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
       limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
-      name: Type.Optional(Type.String({ description: "New name for rename action" })),
+      name: Type.Optional(Type.String({ description: "New name for rename action, or collaborator name for dismiss action" })),
+      agent: Type.Optional(Type.String({ description: "Agent definition name for spawn action (e.g., 'crew-challenger')" })),
 
       // ═══════════════════════════════════════════════════════════════════════
       // MESSAGING & COORDINATION PARAMETERS
@@ -763,7 +768,8 @@ Usage (action-based API - preferred):
     state.isHuman = ctx.hasUI;
     try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
 
-    const shouldAutoRegister = config.autoRegister || 
+    const isCollaborator = process.env.PI_CREW_COLLABORATOR === "1";
+    const shouldAutoRegister = isCollaborator || config.autoRegister || 
       matchesAutoRegisterPath(process.cwd(), config.autoRegisterPaths);
 
     if (!shouldAutoRegister) {
@@ -913,6 +919,7 @@ Usage (action-based API - preferred):
         }, { triggerTurn: true, deliverAs: "steer" });
       }
     }
+
     recoverWatcherIfNeeded();
     updateStatus(ctx);
 
@@ -1007,6 +1014,7 @@ Usage (action-based API - preferred):
   pi.on("session_shutdown", async () => {
     shutdownLobbyWorkers(process.cwd());
     shutdownAllWorkers();
+    await shutdownCollaborators(process.pid, dirs);
     stopStatusHeartbeat();
     overlayOpening = false;
     overlayHandle = null;

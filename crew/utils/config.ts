@@ -37,12 +37,14 @@ export interface CrewConfig {
     worker?: string;
     reviewer?: string;
     analyst?: string;
+    collaborator?: string;
   };
   thinking?: {
     planner?: string;
     worker?: string;
     reviewer?: string;
     analyst?: string;
+    collaborator?: string;
   };
   concurrency: {
     workers: number;

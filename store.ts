@@ -939,6 +939,17 @@ export function getMyInbox(state: MessengerState, dirs: Dirs): string {
   return join(dirs.inbox, state.agentName);
 }
 
+export function hasPendingMessages(state: MessengerState, dirs: Dirs): boolean {
+  if (!state.registered) return false;
+  const inbox = getMyInbox(state, dirs);
+  try {
+    const files = fs.readdirSync(inbox).filter(f => f.endsWith(".json"));
+    return files.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function processAllPendingMessages(
   state: MessengerState,
   dirs: Dirs,

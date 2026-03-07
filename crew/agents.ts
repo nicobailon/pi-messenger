@@ -116,7 +116,7 @@ function discoverWorkerName(
   return null;
 }
 
-const SHUTDOWN_MESSAGE = `⚠️ SHUTDOWN REQUESTED: Please wrap up your current work.
+export const SHUTDOWN_MESSAGE = `⚠️ SHUTDOWN REQUESTED: Please wrap up your current work.
 1. Release any file reservations
 2. If the task is not complete, leave it as in_progress (do NOT mark done)
 3. Do NOT commit anything
