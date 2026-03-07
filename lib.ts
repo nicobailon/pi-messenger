@@ -83,7 +83,7 @@ export interface MessengerState {
   customStatus: boolean;
   registryFlushTimer: ReturnType<typeof setTimeout> | null;
   sessionStartedAt: string;
-  collaboratorKeepaliveScheduled?: boolean;
+  lastCollaboratorKeepalive?: number;
 }
 
 export interface Dirs {

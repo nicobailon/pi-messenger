@@ -917,24 +917,19 @@ Usage (action-based API - preferred):
       }
     }
     // Collaborator keepalive: prevent exit between messages from spawning agent.
-    // Only fires when no pending inbox messages — real messages take priority via
-    // deliverMessage() with triggerTurn:true. Uses a delayed send so that any
-    // incoming message delivery (which also uses triggerTurn) wins the race.
-    if (process.env.PI_CREW_COLLABORATOR === "1" && !state.collaboratorKeepaliveScheduled) {
-      state.collaboratorKeepaliveScheduled = true;
-      setTimeout(() => {
-        state.collaboratorKeepaliveScheduled = false;
-        // Check for pending messages before keepalive — if deliverMessage already
-        // triggered a turn, this is a no-op (pi queues steering messages).
-        const pending = store.hasPendingMessages(state, dirs);
-        if (!pending) {
-          pi.sendMessage({
-            customType: "collaborator_keepalive",
-            content: "[Collaborator keep-alive] You are in a collaboration session. Wait for the next message from your partner. Do NOT take any action, make any tool calls, or generate any output. Respond with only: .",
-            display: false,
-          }, { triggerTurn: true, deliverAs: "steer" });
-        }
-      }, 5000); // 5s delay — gives inbox watcher time to deliver real messages first
+    // Must fire synchronously (no setTimeout) — pi exits before delayed timers fire.
+    // Throttled: skip if a real message was delivered recently (let deliverMessage handle it).
+    if (process.env.PI_CREW_COLLABORATOR === "1") {
+      const now = Date.now();
+      const pending = store.hasPendingMessages(state, dirs);
+      if (!pending) {
+        state.lastCollaboratorKeepalive = now;
+        pi.sendMessage({
+          customType: "collaborator_keepalive",
+          content: "[waiting] Reply with: .",
+          display: false,
+        }, { triggerTurn: true, deliverAs: "steer" });
+      }
     }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
