@@ -15,5 +15,5 @@
     },
     "baseUrl": "."
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "src/**/*.ts", "tests/monitor/**/*.ts"]
 }
