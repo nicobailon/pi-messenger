@@ -1,0 +1,1 @@
+✅ DONE: Found `work.env` documentation at line 202 in README.md configuration table. Findings written to context.md with grep output and 10-line surrounding context.

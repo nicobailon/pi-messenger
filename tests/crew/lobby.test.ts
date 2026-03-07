@@ -419,4 +419,95 @@ describe("lobby workers", () => {
     expect(promptArg).toContain("Standing by for task assignment");
     expect(promptArg).not.toContain("Chat With Your Team");
   });
+
+  // ── Reliability: configurable executable & ENOENT handling ──────────────────
+
+  it("uses PI_CREW_EXECUTABLE env var as the spawned executable", async () => {
+    const orig = process.env.PI_CREW_EXECUTABLE;
+    process.env.PI_CREW_EXECUTABLE = "my-custom-pi";
+    try {
+      const { spawn } = await import("node:child_process");
+      vi.mocked(spawn).mockClear();
+
+      lobby.spawnLobbyWorker("/test/cwd");
+
+      const calls = vi.mocked(spawn).mock.calls;
+      expect(calls.length).toBe(1);
+      expect(calls[0][0]).toBe("my-custom-pi");
+    } finally {
+      if (orig === undefined) delete process.env.PI_CREW_EXECUTABLE;
+      else process.env.PI_CREW_EXECUTABLE = orig;
+    }
+  });
+
+  it("uses config.work.executable when set (overrides default, below env var)", async () => {
+    const config = await import("../../crew/utils/config.js");
+    vi.mocked(config.loadCrewConfig).mockReturnValue({
+      concurrency: { workers: 4 },
+      models: {},
+      artifacts: { enabled: false },
+      work: { executable: "helios-pi" },
+      coordination: "chatty",
+    } as any);
+
+    const orig = process.env.PI_CREW_EXECUTABLE;
+    delete process.env.PI_CREW_EXECUTABLE;
+    try {
+      const { spawn } = await import("node:child_process");
+      vi.mocked(spawn).mockClear();
+
+      lobby.spawnLobbyWorker("/test/cwd");
+
+      const calls = vi.mocked(spawn).mock.calls;
+      expect(calls.length).toBe(1);
+      expect(calls[0][0]).toBe("helios-pi");
+    } finally {
+      if (orig === undefined) delete process.env.PI_CREW_EXECUTABLE;
+      else process.env.PI_CREW_EXECUTABLE = orig;
+    }
+  });
+
+  it("handles ENOENT gracefully: error handler is registered and does not throw", async () => {
+    const { spawn } = await import("node:child_process");
+    vi.mocked(spawn).mockClear();
+
+    const worker = lobby.spawnLobbyWorker("/test/cwd")!;
+    expect(worker).not.toBeNull();
+
+    const proc = worker.proc as any;
+
+    // An 'error' handler MUST be registered to prevent unhandled error crash
+    expect(proc._handlers["error"]).toBeDefined();
+
+    // Firing the handler with ENOENT must not throw
+    const enoentErr = Object.assign(new Error("spawn pi ENOENT"), { code: "ENOENT" });
+    expect(() => proc._handlers["error"](enoentErr)).not.toThrow();
+  });
+
+  it("env var PI_CREW_EXECUTABLE takes priority over config.work.executable", async () => {
+    const config = await import("../../crew/utils/config.js");
+    vi.mocked(config.loadCrewConfig).mockReturnValue({
+      concurrency: { workers: 4 },
+      models: {},
+      artifacts: { enabled: false },
+      work: { executable: "config-pi" },
+      coordination: "chatty",
+    } as any);
+
+    const orig = process.env.PI_CREW_EXECUTABLE;
+    process.env.PI_CREW_EXECUTABLE = "env-pi";
+    try {
+      const { spawn } = await import("node:child_process");
+      vi.mocked(spawn).mockClear();
+
+      lobby.spawnLobbyWorker("/test/cwd");
+
+      const calls = vi.mocked(spawn).mock.calls;
+      expect(calls.length).toBe(1);
+      expect(calls[0][0]).toBe("env-pi");
+    } finally {
+      if (orig === undefined) delete process.env.PI_CREW_EXECUTABLE;
+      else process.env.PI_CREW_EXECUTABLE = orig;
+    }
+  });
 });

@@ -109,7 +109,10 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   const envOverrides = config.work.env ?? {};
   const env = { ...process.env, ...envOverrides, PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id };
 
-  const proc = spawn("pi", args, {
+  // Executable resolution: env var > crew config > default "pi"
+  const executable = process.env.PI_CREW_EXECUTABLE ?? config.work.executable ?? "pi";
+
+  const proc = spawn(executable, args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     env,
@@ -165,6 +168,17 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
         }
       }
     } catch {}
+  });
+
+  // Guard against ENOENT and other spawn failures — without this handler
+  // Node.js would emit an uncaught error and crash the orchestrator.
+  proc.on("error", (err: NodeJS.ErrnoException) => {
+    // Log to stderr but do not rethrow; the close event fires immediately
+    // after the error event and the existing close handler resets the task.
+    process.stderr.write(
+      `[pi-messenger] Failed to spawn worker "${executable}": ${err.message} (${err.code ?? "unknown"})
+`
+    );
   });
 
   proc.on("close", (exitCode) => {

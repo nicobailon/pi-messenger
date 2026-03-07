@@ -68,6 +68,8 @@ export interface CrewConfig {
     stopOnBlock: boolean;
     env?: Record<string, string>;
     shutdownGracePeriodMs?: number;
+    /** Override the spawned executable (default: "pi"). Also overridden by PI_CREW_EXECUTABLE env var. */
+    executable?: string;
   };
   dependencies: "advisory" | "strict";
   coordination: CoordinationLevel;
