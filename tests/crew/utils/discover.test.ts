@@ -12,13 +12,16 @@ function writeAgent(filePath: string, content: string): void {
 describe("crew/utils/discover", () => {
   let dirs: TempCrewDirs;
   let extensionAgentsDir: string;
+  let userAgentsDir: string;
   let projectAgentsDir: string;
 
   beforeEach(() => {
     dirs = createTempCrewDirs();
     extensionAgentsDir = path.join(dirs.root, "extension-agents");
+    userAgentsDir = path.join(dirs.root, "user-agents");
     projectAgentsDir = path.join(dirs.cwd, ".pi", "messenger", "crew", "agents");
     fs.mkdirSync(extensionAgentsDir, { recursive: true });
+    fs.mkdirSync(userAgentsDir, { recursive: true });
   });
 
   it("discovers agents from injected extension directory", () => {
@@ -32,7 +35,7 @@ crewRole: worker
 You are a worker.
 `);
 
-    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
     expect(agents).toHaveLength(1);
     expect(agents[0].name).toBe("crew-worker");
     expect(agents[0].source).toBe("extension");
@@ -59,7 +62,7 @@ model: project-model
 Project prompt.
 `);
 
-    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
     expect(agents).toHaveLength(1);
     expect(agents[0].name).toBe("crew-reviewer");
     expect(agents[0].description).toBe("Project reviewer");
@@ -85,7 +88,7 @@ crewRole: worker
 Project custom prompt.
 `);
 
-    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
     const names = agents.map(agent => agent.name).sort();
     expect(names).toEqual(["crew-custom", "crew-worker"]);
     expect(agents.find(agent => agent.name === "crew-worker")?.source).toBe("extension");
@@ -101,7 +104,7 @@ crewRole: planner
 Planner prompt.
 `);
 
-    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
     expect(agents).toHaveLength(1);
     expect(agents[0].name).toBe("crew-planner");
     expect(agents[0].source).toBe("extension");
@@ -116,7 +119,7 @@ model: claude-opus-4-6
 ---
 Think hard.
 `);
-    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
     expect(agents[0].thinking).toBe("high");
   });
 
@@ -127,7 +130,7 @@ description: No thinking
 ---
 Simple.
 `);
-    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
     expect(agents[0].thinking).toBeUndefined();
   });
 
@@ -143,12 +146,152 @@ maxOutput: { bytes: 2048, lines: 100 }
 Analyst prompt
 `);
 
-    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir);
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
     expect(agents).toHaveLength(1);
     expect(agents[0].name).toBe("crew-analyst");
     expect(agents[0].model).toBe("claude-3-5-haiku");
     expect(agents[0].crewRole).toBe("analyst");
     expect(agents[0].tools).toEqual(["read", "bash", "edit", "write"]);
     expect(agents[0].maxOutput).toEqual({ bytes: 2048, lines: 100 });
+  });
+
+  // --- user-level agent discovery tests ---
+
+  it("discovers user-level agents with source='user'", () => {
+    writeAgent(path.join(userAgentsDir, "crew-worker.md"), `---
+name: crew-worker
+description: Helios Feynman worker
+crewRole: worker
+model: user-model
+---
+User-level worker prompt.
+`);
+
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].name).toBe("crew-worker");
+    expect(agents[0].source).toBe("user");
+    expect(agents[0].model).toBe("user-model");
+  });
+
+  it("user agents override extension agents with same name", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-worker.md"), `---
+name: crew-worker
+description: Extension worker
+model: extension-model
+crewRole: worker
+---
+Extension prompt.
+`);
+    writeAgent(path.join(userAgentsDir, "crew-worker.md"), `---
+name: crew-worker
+description: User Feynman worker
+model: user-model
+crewRole: worker
+---
+User prompt.
+`);
+
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].source).toBe("user");
+    expect(agents[0].model).toBe("user-model");
+    expect(agents[0].systemPrompt).toContain("User prompt.");
+  });
+
+  it("project agents override user agents with same name", () => {
+    writeAgent(path.join(userAgentsDir, "crew-reviewer.md"), `---
+name: crew-reviewer
+description: User reviewer
+model: user-model
+crewRole: reviewer
+---
+User prompt.
+`);
+    writeAgent(path.join(projectAgentsDir, "crew-reviewer.md"), `---
+name: crew-reviewer
+description: Project reviewer
+model: project-model
+crewRole: reviewer
+---
+Project prompt.
+`);
+
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].source).toBe("project");
+    expect(agents[0].model).toBe("project-model");
+    expect(agents[0].systemPrompt).toContain("Project prompt.");
+  });
+
+  it("all three tiers coexist with correct precedence: extension < user < project", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-planner.md"), `---
+name: crew-planner
+description: Extension planner
+model: ext-model
+crewRole: planner
+---
+Extension planner.
+`);
+    writeAgent(path.join(extensionAgentsDir, "crew-worker.md"), `---
+name: crew-worker
+description: Extension worker
+model: ext-model
+crewRole: worker
+---
+Extension worker.
+`);
+    writeAgent(path.join(userAgentsDir, "crew-worker.md"), `---
+name: crew-worker
+description: Feynman worker
+model: user-model
+crewRole: worker
+---
+User worker.
+`);
+    writeAgent(path.join(userAgentsDir, "crew-reviewer.md"), `---
+name: crew-reviewer
+description: User reviewer
+model: user-model
+crewRole: reviewer
+---
+User reviewer.
+`);
+    writeAgent(path.join(projectAgentsDir, "crew-reviewer.md"), `---
+name: crew-reviewer
+description: Project reviewer
+model: project-model
+crewRole: reviewer
+---
+Project reviewer.
+`);
+
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
+    const byName = Object.fromEntries(agents.map(a => [a.name, a]));
+
+    // crew-planner: only in extension → source extension
+    expect(byName["crew-planner"].source).toBe("extension");
+    // crew-worker: extension + user → user wins
+    expect(byName["crew-worker"].source).toBe("user");
+    expect(byName["crew-worker"].model).toBe("user-model");
+    // crew-reviewer: user + project → project wins
+    expect(byName["crew-reviewer"].source).toBe("project");
+    expect(byName["crew-reviewer"].model).toBe("project-model");
+    expect(agents).toHaveLength(3);
+  });
+
+  it("works when user agents dir does not exist", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-planner.md"), `---
+name: crew-planner
+description: Planner
+crewRole: planner
+---
+Planner prompt.
+`);
+    const missingUserDir = path.join(dirs.root, "nonexistent-user-agents");
+
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, missingUserDir);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].source).toBe("extension");
   });
 });

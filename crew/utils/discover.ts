@@ -1,11 +1,18 @@
 /**
  * Crew - Agent Discovery
  *
- * Discovers agent definitions from extension and project directories.
+ * Discovers agent definitions from extension, user, and project directories.
+ * Precedence (lowest → highest): extension < user < project
+ *
+ * Directories:
+ *  - extension: bundled agents from the pi-messenger package itself
+ *  - user:      ~/.pi/agent/agents/crew  (Helios/Feynman enriched agents)
+ *  - project:   <cwd>/.pi/messenger/crew/agents  (per-project overrides)
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { MaxOutputConfig } from "./truncate.js";
 
@@ -22,7 +29,7 @@ export interface CrewAgentConfig {
   model?: string;
   thinking?: string;
   systemPrompt: string;
-  source: "extension" | "project";
+  source: "extension" | "user" | "project";
   filePath: string;
   crewRole?: CrewRole;
   maxOutput?: MaxOutputConfig;
@@ -67,7 +74,7 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, unknow
   return { frontmatter, body };
 }
 
-function loadAgentsFromDir(dir: string, source: "extension" | "project"): CrewAgentConfig[] {
+function loadAgentsFromDir(dir: string, source: "extension" | "user" | "project"): CrewAgentConfig[] {
   if (!fs.existsSync(dir)) return [];
   const agents: CrewAgentConfig[] = [];
 
@@ -110,15 +117,32 @@ function loadAgentsFromDir(dir: string, source: "extension" | "project"): CrewAg
   return agents;
 }
 
-export function discoverCrewAgents(cwd: string, extensionAgentsDir?: string): CrewAgentConfig[] {
+/**
+ * Discover crew agents from all tiers.
+ *
+ * Precedence (lowest to highest): extension < user < project
+ *
+ * @param cwd             - project root (used to locate .pi/messenger/crew/agents)
+ * @param extensionAgentsDir - override for extension tier (used in tests)
+ * @param userAgentsDir      - override for user tier (used in tests; defaults to ~/.pi/agent/agents/crew)
+ */
+export function discoverCrewAgents(
+  cwd: string,
+  extensionAgentsDir?: string,
+  userAgentsDir?: string,
+): CrewAgentConfig[] {
   const extDir = extensionAgentsDir ?? DEFAULT_EXTENSION_AGENTS_DIR;
+  const userDir = userAgentsDir ?? path.join(homedir(), ".pi", "agent", "agents", "crew");
   const projectAgentsDir = path.join(cwd, ".pi", "messenger", "crew", "agents");
 
   const extensionAgents = loadAgentsFromDir(extDir, "extension");
+  const userAgents = loadAgentsFromDir(userDir, "user");
   const projectAgents = loadAgentsFromDir(projectAgentsDir, "project");
 
+  // Apply precedence: extension → user → project (later entries win)
   const agentMap = new Map<string, CrewAgentConfig>();
   for (const agent of extensionAgents) agentMap.set(agent.name, agent);
+  for (const agent of userAgents) agentMap.set(agent.name, agent);
   for (const agent of projectAgents) agentMap.set(agent.name, agent);
 
   return Array.from(agentMap.values());
