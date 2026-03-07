@@ -916,9 +916,7 @@ Usage (action-based API - preferred):
         }, { triggerTurn: true, deliverAs: "steer" });
       }
     }
-    // NOTE: Collaborator keepalive is in agent_end, NOT here.
-    // turn_end fires after each tool call (mid-work). Keepalive here would
-    // interrupt the collaborator's initial prompt processing.
+
     recoverWatcherIfNeeded();
     updateStatus(ctx);
 
@@ -942,23 +940,6 @@ Usage (action-based API - preferred):
   // ===========================================================================
 
   pi.on("agent_end", async (_event, ctx) => {
-    // --- Collaborator keepalive: fires in agent_end (not turn_end) ---
-    // agent_end means the LLM finished its full response (no more tool calls).
-    // This is the right time to keepalive — the collaborator completed its work
-    // (read files, composed challenge, sent message) and is now idle.
-    // turn_end fires after each tool call (mid-work) which would interrupt processing.
-    if (process.env.PI_CREW_COLLABORATOR === "1") {
-      const pending = store.hasPendingMessages(state, dirs);
-      if (!pending) {
-        pi.sendMessage({
-          customType: "collaborator_keepalive",
-          content: "[waiting] Reply with: .",
-          display: false,
-        }, { triggerTurn: true, deliverAs: "steer" });
-      }
-      return; // Collaborators don't participate in autonomous work
-    }
-
     // --- Auto-work after plan completion ---
     const autoWork = consumePendingAutoWork();
     if (autoWork && !overlayTui) {

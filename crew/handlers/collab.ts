@@ -2,8 +2,10 @@
  * Crew - Collaboration Handlers
  *
  * spawn/dismiss actions for agent-to-agent collaboration.
- * Wraps existing Crew subprocess machinery to let a running agent
- * programmatically spawn a collaborator, exchange messages, and dismiss it.
+ * Uses RPC mode (stdin/stdout JSON protocol) to keep collaborator
+ * subprocesses alive between message exchanges. No keepalive needed —
+ * the open stdin pipe keeps the process alive. Messages are delivered
+ * via the extension's FSWatcher + pi.sendMessage(triggerTurn) path.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -19,7 +21,7 @@ import { result } from "../utils/result.js";
 import { generateMemorableName } from "../../lib.js";
 import { discoverCrewAgents } from "../utils/discover.js";
 import { loadCrewConfig } from "../utils/config.js";
-import { pushModelArgs, resolveThinking, modelHasThinkingSuffix, SHUTDOWN_MESSAGE } from "../agents.js";
+import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../agents.js";
 import {
   registerWorker,
   unregisterWorker,
@@ -36,6 +38,7 @@ const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", 
 
 const POLL_INTERVAL_MS = 100;
 const POLL_TIMEOUT_MS = 30_000;
+const STDIN_CLOSE_GRACE_MS = 15_000;
 const SIGKILL_DELAY_MS = 5_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,7 +82,7 @@ export async function executeSpawn(
     );
   }
 
-  // Security gate: only collaborator-role agents can be spawned via this action
+  // Security gate: only collaborator-role agents can be spawned
   if (agentConfig.crewRole !== "collaborator") {
     return result(
       `Error: Agent "${agentName}" has crewRole "${agentConfig.crewRole ?? "none"}", not "collaborator". ` +
@@ -92,8 +95,8 @@ export async function executeSpawn(
   const collabName = generateMemorableName();
   const collabId = randomUUID().slice(0, 8);
 
-  // Build args
-  const args = ["--mode", "json", "--no-session", "-p"];
+  // Build args — RPC mode, no -p flag (prompt goes via stdin)
+  const args = ["--mode", "rpc", "--no-session"];
 
   const model = params.model
     ?? config.models?.collaborator
@@ -102,7 +105,7 @@ export async function executeSpawn(
 
   const thinking = resolveThinking(
     config.thinking?.collaborator,
-    agentConfig.thinking,
+    agentConfig?.thinking,
   );
   if (thinking && !modelHasThinkingSuffix(model)) {
     args.push("--thinking", thinking);
@@ -135,9 +138,6 @@ export async function executeSpawn(
     args.push("--append-system-prompt", promptPath);
   }
 
-  // The user-facing prompt (the task description with context)
-  args.push(prompt);
-
   // Env setup
   const envOverrides = config.work.env ?? {};
   const env = {
@@ -159,16 +159,21 @@ export async function executeSpawn(
     // Fall back to /dev/null if log file creation fails
   }
 
-  // Spawn the process
+  // Spawn: stdin is PIPE (keeps process alive), stdout/stderr to log
   const proc = spawn("pi", args, {
     cwd,
-    stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
+    stdio: ["pipe", logFd ?? "ignore", logFd ?? "ignore"],
     env,
   });
 
   if (logFd !== undefined) {
     try { fs.closeSync(logFd); } catch {}
   }
+
+  // Send initial prompt via RPC protocol on stdin
+  const rpcPrompt = JSON.stringify({ type: "prompt", message: prompt });
+  proc.stdin!.write(rpcPrompt + "\n");
+  // Do NOT close stdin — the open pipe keeps the process alive
 
   // Register in worker registry
   const taskId = `__collab-${collabId}__`;
@@ -192,7 +197,8 @@ export async function executeSpawn(
   const ready = await pollUntilReady(registryPath, proc, POLL_TIMEOUT_MS);
 
   if (!ready) {
-    // Collaborator failed to join mesh in time — clean up
+    // Collaborator failed to join mesh — clean up
+    try { proc.stdin!.end(); } catch {}
     if (proc.exitCode === null) proc.kill("SIGTERM");
     unregisterWorker(cwd, taskId);
     cleanupTmpDir(promptTmpDir);
@@ -243,7 +249,7 @@ export async function executeDismiss(
   }
 
   const cwd = ctx.cwd ?? process.cwd();
-  await gracefulDismiss(entry, dirs);
+  await gracefulDismiss(entry);
   logFeedEvent(cwd, "crew", "dismiss", name);
 
   return result(
@@ -253,12 +259,11 @@ export async function executeDismiss(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Shared graceful shutdown — used by both dismiss and orphan cleanup
+// Graceful shutdown — close stdin, process exits naturally
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function gracefulDismiss(
   entry: CollaboratorEntry,
-  dirs: Dirs,
 ): Promise<void> {
   // Already exited?
   if (entry.proc.exitCode !== null) {
@@ -267,31 +272,14 @@ export async function gracefulDismiss(
     return;
   }
 
-  // Send SHUTDOWN_MESSAGE to inbox
-  const inboxDir = path.join(dirs.inbox, entry.name);
-  try {
-    fs.mkdirSync(inboxDir, { recursive: true });
-    const msg = {
-      id: randomUUID(),
-      from: "crew-orchestrator",
-      to: entry.name,
-      text: SHUTDOWN_MESSAGE,
-      timestamp: new Date().toISOString(),
-      replyTo: null,
-    };
-    const random = Math.random().toString(36).substring(2, 8);
-    const msgFile = path.join(inboxDir, `${Date.now()}-${random}.json`);
-    fs.writeFileSync(msgFile, JSON.stringify(msg, null, 2));
-  } catch {
-    // If inbox write fails, fall through to SIGTERM
-  }
+  // Close stdin — pi sees EOF and exits cleanly
+  try { entry.proc.stdin!.end(); } catch {}
 
-  // Wait for graceful exit
-  const gracePeriodMs = 10_000; // Shorter than default worker grace — collaborators are lighter
-  const exited = await pollUntilExited(entry.proc, gracePeriodMs);
+  // Wait for clean exit
+  const exited = await pollUntilExited(entry.proc, STDIN_CLOSE_GRACE_MS);
 
   if (!exited) {
-    // SIGTERM
+    // SIGTERM fallback
     try { entry.proc.kill("SIGTERM"); } catch {}
     const killed = await pollUntilExited(entry.proc, SIGKILL_DELAY_MS);
     if (!killed) {
@@ -314,7 +302,7 @@ export async function shutdownCollaborators(
   const collaborators = getCollaboratorsBySpawner(spawnerPid);
   if (collaborators.length === 0) return;
 
-  await Promise.all(collaborators.map(entry => gracefulDismiss(entry, dirs)));
+  await Promise.all(collaborators.map(entry => gracefulDismiss(entry)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -329,19 +317,16 @@ function pollUntilReady(
   return new Promise(resolve => {
     const startTime = Date.now();
     const timer = setInterval(() => {
-      // Process died?
       if (proc.exitCode !== null) {
         clearInterval(timer);
         resolve(false);
         return;
       }
-      // Registered?
       if (fs.existsSync(registryPath)) {
         clearInterval(timer);
         resolve(true);
         return;
       }
-      // Timeout?
       if (Date.now() - startTime >= timeoutMs) {
         clearInterval(timer);
         resolve(false);
