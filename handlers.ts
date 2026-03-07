@@ -277,7 +277,8 @@ export function executeSend(
 
   const crewDir = crewStore.getCrewDir(cwd);
   const crewConfig = loadCrewConfig(crewDir);
-  const budget = crewConfig.messageBudgets?.[crewConfig.coordination] ?? 10;
+  const isCollaborator = process.env.PI_CREW_COLLABORATOR === "1";
+  const budget = isCollaborator ? Infinity : (crewConfig.messageBudgets?.[crewConfig.coordination] ?? 10);
   if (messagesSentThisSession >= budget) {
     return result(
       `Message budget reached (${messagesSentThisSession}/${budget} for ${crewConfig.coordination} level). Focus on your task.`,
