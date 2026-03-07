@@ -401,7 +401,7 @@ function taskStart(cwd: string, params: CrewParams, state: MessengerState) {
 
 **Title:** ${started.title}
 **Assigned to:** ${agentName}
-**Attempt:** ${started.attempt_count}
+**Attempt:** ${started.attempt_count}${started.spawn_failure_count && started.spawn_failure_count > 0 ? ` (${started.spawn_failure_count} spawn failures)` : ""}
 ${started.base_commit ? `**Base commit:** ${started.base_commit.slice(0, 8)}` : ""}${specPreview}
 
 When done: \`pi_messenger({ action: "task.done", id: "${id}", summary: "..." })\`
