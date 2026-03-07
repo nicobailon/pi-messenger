@@ -105,6 +105,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     customStatus: false,
     registryFlushTimer: null,
     sessionStartedAt: new Date().toISOString(),
+    registrationContextSent: false,
   };
 
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
@@ -319,6 +320,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   // ===========================================================================
 
   function sendRegistrationContext(ctx: ExtensionContext): void {
+    if (state.registrationContextSent) return;
+    state.registrationContextSent = true;
     const folder = extractFolder(process.cwd());
     const locationPart = state.gitBranch
       ? `${folder} on ${state.gitBranch}`

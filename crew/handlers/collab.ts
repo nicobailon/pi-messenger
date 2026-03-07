@@ -171,7 +171,9 @@ export async function executeSpawn(
   }
 
   // Send initial prompt via RPC protocol on stdin
-  const rpcPrompt = JSON.stringify({ type: "prompt", message: prompt });
+  // Prepend spawner name so the collaborator knows who to reply to
+  const fullPrompt = `Reply to: ${state.agentName}\n\n${prompt}`;
+  const rpcPrompt = JSON.stringify({ type: "prompt", message: fullPrompt });
   proc.stdin!.write(rpcPrompt + "\n");
   // Do NOT close stdin — the open pipe keeps the process alive
 
