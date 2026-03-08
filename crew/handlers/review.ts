@@ -14,6 +14,7 @@ import { discoverCrewAgents } from "../utils/discover.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { parseVerdict, type ParsedReview } from "../utils/verdict.js";
 import * as store from "../store.js";
+import { buildCrewTaskSyncPayload, syncCrewTask } from "../task-sync.js";
 
 // =============================================================================
 // Namespace helpers
@@ -148,7 +149,7 @@ Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback
   const verdict: ParsedReview = parseVerdict(reviewResult.output);
 
   // Store review feedback in task for retry context
-  store.updateTask(cwd, taskId, {
+  const reviewed = store.updateTask(cwd, taskId, {
     last_review: {
       verdict: verdict.verdict,
       summary: verdict.summary,
@@ -157,6 +158,15 @@ Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback
       reviewed_at: new Date().toISOString()
     }
   });
+
+  if (reviewed) {
+    syncCrewTask(buildCrewTaskSyncPayload(reviewed, "task.reviewed", {
+      review_id: `review-${taskId}-${Date.now()}`,
+      verdict: verdict.verdict,
+      notes: verdict.summary,
+      reviewer: "crew-reviewer",
+    }));
+  }
   const shortSummary = verdict.summary.split("\n")[0].slice(0, 120);
   const progressMsg = `Review: ${verdict.verdict} — ${shortSummary}`;
   store.appendTaskProgress(cwd, taskId, "system", progressMsg);

@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { execSync } from "node:child_process";
 import type { Plan, Task, TaskEvidence } from "./types.js";
 import { allocateTaskId } from "./id-allocator.js";
+import { buildCrewTaskSyncPayload, syncCrewTask, type CrewTaskSyncEvent } from "./task-sync.js";
 import { enforceTransition } from "./state-machine.js";
 
 // =============================================================================
@@ -171,6 +172,14 @@ export function setPlanSpec(cwd: string, content: string): void {
 // Task Operations
 // =============================================================================
 
+function inferTaskSyncEvent(previousStatus: Task["status"], nextStatus?: Task["status"]): CrewTaskSyncEvent | undefined {
+  if (!nextStatus) return undefined;
+  if (nextStatus === "in_progress") return "task.started";
+  if (nextStatus === "done") return "task.done";
+  if (nextStatus === "todo" && previousStatus !== "todo") return "task.reset";
+  return undefined;
+}
+
 export function createTask(
   cwd: string,
   title: string,
@@ -204,6 +213,16 @@ export function createTask(
     updatePlan(cwd, { task_count: plan.task_count + 1 });
   }
 
+  syncCrewTask(
+    buildCrewTaskSyncPayload(task, "task.created", {
+      namespace: "",
+      content: description ?? "",
+      plan_id: plan?.prd ?? "",
+      source_spec_id: `${id}.md`,
+      depends_on: dependsOn ?? [],
+    }),
+  );
+
   return task;
 }
 
@@ -220,7 +239,7 @@ export function getTask(cwd: string, taskId: string): Task | null {
   return raw ? normalizeTask(raw) : null;
 }
 
-export function updateTask(cwd: string, taskId: string, updates: Partial<Task>): Task | null {
+export function updateTask(cwd: string, taskId: string, updates: Partial<Task>, syncEvent?: CrewTaskSyncEvent): Task | null {
   const task = getTask(cwd, taskId);
   if (!task) return null;
 
@@ -235,6 +254,12 @@ export function updateTask(cwd: string, taskId: string, updates: Partial<Task>):
   };
 
   writeJson(path.join(getTasksDir(cwd), `${taskId}.json`), updated);
+
+  const syncEventToSend = syncEvent ?? inferTaskSyncEvent(task.status, updated.status);
+  if (syncEventToSend) {
+    syncCrewTask(buildCrewTaskSyncPayload(updated, syncEventToSend));
+  }
+
   return updated;
 }
 
@@ -386,11 +411,17 @@ export function blockTask(cwd: string, taskId: string, reason: string): Task | n
   const blockPath = path.join(getBlocksDir(cwd), `${taskId}.md`);
   writeText(blockPath, `# Blocked: ${task.title}\n\n**Reason:** ${reason}\n\n**Blocked at:** ${new Date().toISOString()}\n`);
 
-  return updateTask(cwd, taskId, {
+  const blocked = updateTask(cwd, taskId, {
     status: "blocked",
     blocked_reason: reason,
     assigned_to: undefined,
   });
+
+  if (blocked) {
+    syncCrewTask(buildCrewTaskSyncPayload(blocked, "task.blocked"));
+  }
+
+  return blocked;
 }
 
 export function unblockTask(cwd: string, taskId: string): Task | null {
@@ -423,7 +454,7 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
     evidence: undefined,
     blocked_reason: undefined,
     // Keep attempt_count for tracking
-  });
+  }, "task.reset");
   if (updated) resetTasks.push(updated);
 
   cleanupBlockFiles(cwd, taskId);

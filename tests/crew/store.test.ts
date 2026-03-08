@@ -1,16 +1,64 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as store from "../../crew/store.js";
 import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.js";
 
 describe("crew/store", () => {
   let dirs: TempCrewDirs;
   let cwd: string;
+  let originalSyncScriptPath: string | undefined;
+
+
+function writeSyncCaptureScript(outputPath: string): string {
+  const scriptPath = path.join(dirs.root, "sync-crew-task.sh");
+  fs.writeFileSync(
+    scriptPath,
+    `#!/usr/bin/env bash
+cat - >> "$SYNC_OUTPUT"
+printf '%s\n' '---' >> "$SYNC_OUTPUT"
+exit 1
+`
+  );
+  fs.chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function readSyncEvents(outputPath: string): Array<Record<string, unknown>> {
+  if (!fs.existsSync(outputPath)) return [];
+
+  const raw = fs.readFileSync(outputPath, "utf-8").trim();
+  if (!raw) return [];
+
+  return raw
+    .split("---")
+    .map(chunk => {
+      const payloadMatch = chunk.match(/\{[\s\S]*\}/);
+      if (!payloadMatch) return null;
+      try {
+        return JSON.parse(payloadMatch[0].trim()) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .filter((event): event is Record<string, unknown> => event !== null);
+}
 
   beforeEach(() => {
     dirs = createTempCrewDirs();
     cwd = dirs.cwd;
+    originalSyncScriptPath = process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT;
+    process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT = path.join(dirs.root, "__missing_sync_script__");
+    delete process.env.SYNC_OUTPUT;
+  });
+
+  afterEach(() => {
+    if (originalSyncScriptPath === undefined) {
+      delete process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT;
+    } else {
+      process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT = originalSyncScriptPath;
+    }
+    delete process.env.SYNC_OUTPUT;
   });
 
   describe("plan CRUD", () => {
@@ -261,6 +309,64 @@ describe("crew/store", () => {
       expect(store.getTask(cwd, t3.id)?.status).toBe("todo");
       expect(store.getPlan(cwd)?.completed_count).toBe(0);
     });
+
+    it("sync hook is best-effort for task lifecycle changes", () => {
+      const syncOutput = path.join(dirs.root, "sync-events.log");
+      process.env.SYNC_OUTPUT = syncOutput;
+      process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT = writeSyncCaptureScript(syncOutput);
+
+      store.createPlan(cwd, "docs/PRD.md");
+      const task = store.createTask(cwd, "Task one", "Desc one");
+
+      const started = store.startTask(cwd, task.id, "WorkerAlpha");
+      expect(started?.status).toBe("in_progress");
+
+      const blocked = store.blockTask(cwd, task.id, "blocked by dependency");
+      expect(blocked?.status).toBe("blocked");
+
+      const reset = store.resetTask(cwd, task.id);
+      expect(reset).toHaveLength(1);
+
+      try {
+        const events = readSyncEvents(syncOutput).map(event => event.event);
+        expect(events).toEqual([
+          "task.created",
+          "task.started",
+          "task.blocked",
+          "task.reset",
+        ]);
+      } finally {
+        delete process.env.SYNC_OUTPUT;
+        delete process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT;
+      }
+    });
+
+    it("sync hook infers reset for todo transition from non-todo status", () => {
+      const syncOutput = path.join(dirs.root, "sync-events-reset.log");
+      process.env.SYNC_OUTPUT = syncOutput;
+      process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT = writeSyncCaptureScript(syncOutput);
+
+      store.createPlan(cwd, "docs/PRD.md");
+      const task = store.createTask(cwd, "Task one", "Desc one");
+      const started = store.startTask(cwd, task.id, "WorkerAlpha");
+      expect(started?.status).toBe("in_progress");
+
+      const resetTask = store.updateTask(cwd, task.id, { status: "todo", assigned_to: undefined });
+      expect(resetTask?.status).toBe("todo");
+
+      try {
+        const events = readSyncEvents(syncOutput).map(event => event.event);
+        expect(events).toEqual([
+          "task.created",
+          "task.started",
+          "task.reset",
+        ]);
+      } finally {
+        delete process.env.SYNC_OUTPUT;
+        delete process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT;
+      }
+    });
+
   });
 
   describe("dependency resolution (getReadyTasks)", () => {
