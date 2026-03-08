@@ -136,7 +136,7 @@ describe("crew/graceful shutdown", () => {
     const task = store.createTask(dirs.cwd, "Task one", "Desc one");
 
     vi.spyOn(agents, "spawnAgents").mockImplementation(async () => {
-      store.updateTask(dirs.cwd, task.id, { status: "in_progress", assigned_to: "crew-worker" });
+      store.startTask(dirs.cwd, task.id, "crew-worker");
       return [{
         agent: "crew-worker",
         exitCode: 0,
@@ -183,7 +183,8 @@ describe("crew/graceful shutdown", () => {
     vi.spyOn(agents, "spawnAgents").mockImplementation(async () => {
       call++;
       if (call === 1) {
-        store.updateTask(dirs.cwd, t1.id, { status: "done" });
+        store.startTask(dirs.cwd, t1.id, "crew-worker");
+        store.completeTask(dirs.cwd, t1.id, "Done");
         return [{
           agent: "crew-worker",
           exitCode: 1,
@@ -203,7 +204,7 @@ describe("crew/graceful shutdown", () => {
         }];
       }
 
-      store.updateTask(dirs.cwd, t2.id, { status: "in_progress", assigned_to: "crew-worker" });
+      store.startTask(dirs.cwd, t2.id, "crew-worker");
       return [{
         agent: "crew-worker",
         exitCode: 1,
@@ -262,7 +263,7 @@ describe("crew/graceful shutdown", () => {
     const task = store.createTask(dirs.cwd, "Task one", "Desc one");
 
     vi.spyOn(agents, "spawnAgents").mockImplementation(async () => {
-      store.updateTask(dirs.cwd, task.id, { status: "in_progress", assigned_to: "crew-worker" });
+      store.startTask(dirs.cwd, task.id, "crew-worker");
       return [{
         agent: "crew-worker",
         exitCode: 1,
@@ -367,7 +368,8 @@ describe("crew/graceful shutdown", () => {
     vi.spyOn(agents, "spawnAgents").mockImplementation(async (tasks: Array<{ taskId?: string }>) => {
       for (const t of tasks) {
         if (t.taskId) {
-          store.updateTask(dirs.cwd, t.taskId, { status: "done" });
+          store.startTask(dirs.cwd, t.taskId, "crew-worker");
+          store.completeTask(dirs.cwd, t.taskId, "Done");
         }
       }
       return tasks.map(t => ({

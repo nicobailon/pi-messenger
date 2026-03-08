@@ -208,8 +208,7 @@ describe("crew/store", () => {
       store.createPlan(cwd, "docs/PRD.md");
       const task = store.createTask(cwd, "Task one", "Desc one");
       store.startTask(cwd, task.id, "WorkerAlpha");
-      store.completeTask(cwd, task.id, "Completed", { tests: ["npm test"] });
-      store.blockTask(cwd, task.id, "Manually blocked after completion");
+      store.blockTask(cwd, task.id, "Manually blocked during work");
 
       const reset = store.resetTask(cwd, task.id);
       const reloaded = store.getTask(cwd, task.id);

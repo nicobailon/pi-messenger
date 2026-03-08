@@ -25,7 +25,7 @@ export interface Plan {
 // Task Types
 // =============================================================================
 
-export type TaskStatus = "todo" | "in_progress" | "done" | "blocked";
+export type TaskStatus = "todo" | "assigned" | "starting" | "in_progress" | "done" | "blocked";
 
 export interface TaskEvidence {
   commits?: string[];            // Commit SHAs

@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { execSync } from "node:child_process";
 import type { Plan, Task, TaskEvidence } from "./types.js";
 import { allocateTaskId } from "./id-allocator.js";
+import { enforceTransition } from "./state-machine.js";
 
 // =============================================================================
 // Directory Helpers
@@ -223,6 +224,10 @@ export function updateTask(cwd: string, taskId: string, updates: Partial<Task>):
   const task = getTask(cwd, taskId);
   if (!task) return null;
 
+  if (updates.status && updates.status !== task.status && !task.milestone) {
+    enforceTransition(taskId, task.status, updates.status);
+  }
+
   const updated: Task = {
     ...task,
     ...updates,
@@ -329,6 +334,10 @@ export function getBaseCommit(cwd: string): string | undefined {
 export function startTask(cwd: string, taskId: string, agentName: string): Task | null {
   const task = getTask(cwd, taskId);
   if (!task || task.status !== "todo") return null;
+
+  // Traverse state machine: todo → assigned → starting → in_progress
+  updateTask(cwd, taskId, { status: "assigned" });
+  updateTask(cwd, taskId, { status: "starting" });
 
   return updateTask(cwd, taskId, {
     status: "in_progress",
