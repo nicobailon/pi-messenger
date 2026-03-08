@@ -12,6 +12,7 @@ import { discoverCrewSkills } from "./utils/discover.js";
 import { buildWorkerPrompt } from "./prompt.js";
 import { resolveRuntime } from "./utils/adapters/index.js";
 import { logFeedEvent } from "../feed.js";
+import { spawnAgents } from "./agents.js";
 import {
   spawnWorkerForTask,
   getAvailableLobbyWorkers,
@@ -69,19 +70,40 @@ export function spawnWorkersForReadyTasks(
     assigned++;
   }
 
+  // For remaining tasks, try lobby spawn (pi-only), or fall back to spawnAgents (any runtime)
+  const runtime = resolveRuntime(config, "worker");
   while (assigned < maxWorkers) {
     const fresh = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
     if (fresh.length === 0) break;
 
     const task = fresh[0];
     const others = fresh.filter(t => t.id !== task.id);
-    const runtime2 = resolveRuntime(config, "worker");
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, runtime2, "pre-claimed");
-    const worker = spawnWorkerForTask(cwd, task.id, prompt);
-    if (!worker) break;
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, runtime, "pre-claimed");
 
-    if (!firstWorkerName) firstWorkerName = worker.name;
-    assigned++;
+    if (runtime === "pi") {
+      const worker = spawnWorkerForTask(cwd, task.id, prompt);
+      if (!worker) break;
+      if (!firstWorkerName) firstWorkerName = worker.name;
+      assigned++;
+    } else {
+      // Non-pi runtime: use spawnAgents (runtime-aware path)
+      store.updateTask(cwd, task.id, {
+        status: "in_progress",
+        started_at: new Date().toISOString(),
+        base_commit: store.getBaseCommit(cwd),
+        attempt_count: task.attempt_count + 1,
+      });
+      store.appendTaskProgress(cwd, task.id, "system", `Assigned via ${runtime} runtime (attempt ${task.attempt_count + 1})`);
+      logFeedEvent(cwd, "crew", "task.start", task.id, task.title);
+
+      // Fire and forget — spawnAgents will handle the result
+      spawnAgents(
+        [{ agent: "crew-worker", task: prompt, taskId: task.id }],
+        cwd,
+      ).catch(() => {});
+      if (!firstWorkerName) firstWorkerName = `${runtime}-worker`;
+      assigned++;
+    }
   }
 
   return { assigned, firstWorkerName };
@@ -103,8 +125,24 @@ export function spawnSingleWorker(
   const skills = discoverCrewSkills(cwd);
   const readyTasks = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
   const others = readyTasks.filter(t => t.id !== task.id);
-  const runtime = resolveRuntime(config, "worker");
-  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, runtime, "pre-claimed");
-  const worker = spawnWorkerForTask(cwd, taskId, prompt);
-  return worker ? { name: worker.name } : null;
+  const singleRuntime = resolveRuntime(config, "worker");
+  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, singleRuntime, "pre-claimed");
+
+  if (singleRuntime === "pi") {
+    const worker = spawnWorkerForTask(cwd, taskId, prompt);
+    return worker ? { name: worker.name } : null;
+  }
+
+  // Non-pi runtime: use spawnAgents
+  store.updateTask(cwd, taskId, {
+    status: "in_progress",
+    started_at: new Date().toISOString(),
+    base_commit: store.getBaseCommit(cwd),
+    attempt_count: task.attempt_count + 1,
+  });
+  spawnAgents(
+    [{ agent: "crew-worker", task: prompt, taskId }],
+    cwd,
+  ).catch(() => {});
+  return { name: `${singleRuntime}-worker` };
 }
