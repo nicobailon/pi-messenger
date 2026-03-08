@@ -1,23 +1,67 @@
 /**
  * SessionMonitorPanel — pi TUI component for real-time session monitoring.
  *
- * Implements the Component and Focusable interfaces from @mariozechner/pi-tui,
- * following the pattern established in overlay.ts.
+ * Provides grouped session overview (task-3): Running, Queued, Completed, Failed.
  */
 
-import type { Component, Focusable } from "@mariozechner/pi-tui";
-import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import type { SessionState } from "../types/session.js";
 import type { SessionFeedSubscriber } from "../feed/subscriber.js";
-import type { SessionMetricsAggregator, ComputedMetrics } from "../metrics/aggregator.js";
+import type { SessionMetricsAggregator } from "../metrics/aggregator.js";
 import {
-  renderSessionRow,
-  renderStatusBadge,
-  renderMetricsSummary,
-  renderHealthIndicator,
+  renderGroupedSessions,
   ANSI,
-  type HealthStatus,
 } from "./render.js";
+
+// ─── Minimal local interfaces ─────────────────────────────────────────────────
+
+/** Minimal Component interface for TUI panels. */
+export interface Component {
+  render(width: number): string[];
+}
+
+/** Minimal Focusable interface for TUI panels. */
+export interface Focusable {
+  focused: boolean;
+  handleInput(data: string): void;
+  invalidate(): void;
+}
+
+// ─── Inline key-matching helpers ─────────────────────────────────────────────
+
+/** Returns the visible character count of a string (strips ANSI codes). */
+function visibleWidth(s: string): number {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+/**
+ * Returns true when raw terminal input `data` matches the named key.
+ * Accepts both ANSI escape sequences AND literal key name strings (e.g. "down")
+ * for testability.
+ */
+function matchesKey(
+  data: string,
+  key: "up" | "down" | "left" | "right" | "home" | "end" | "enter",
+): boolean {
+  switch (key) {
+    case "up":
+      return data === "\x1b[A" || data === "\x1bOA" || data === "up";
+    case "down":
+      return data === "\x1b[B" || data === "\x1bOB" || data === "down";
+    case "left":
+      return data === "\x1b[D" || data === "\x1bOD" || data === "left";
+    case "right":
+      return data === "\x1b[C" || data === "\x1bOC" || data === "right";
+    case "home":
+      return data === "\x1b[H" || data === "\x1b[1~" || data === "\x1bOH" || data === "home";
+    case "end":
+      return data === "\x1b[F" || data === "\x1b[4~" || data === "\x1bOF" || data === "end";
+    case "enter":
+      return data === "\r" || data === "\n" || data === "enter";
+    default:
+      return false;
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,7 +79,7 @@ export interface SessionMonitorPanelOptions {
 // ─── SessionMonitorPanel ──────────────────────────────────────────────────────
 
 /**
- * A TUI panel that displays a real-time session list with status badges,
+ * A TUI panel that displays a grouped session list with status badges,
  * live metrics, health indicators, and keyboard navigation.
  */
 export class SessionMonitorPanel implements Component, Focusable {
@@ -50,6 +94,7 @@ export class SessionMonitorPanel implements Component, Focusable {
   private maxHeight?: number;
   private onEventUnsub?: () => void;
   private onChangeCallback?: () => void;
+  private onSelectCallback?: (session: SessionState) => void;
 
   constructor(options?: SessionMonitorPanelOptions) {
     this.subscriber = options?.subscriber;
@@ -87,6 +132,14 @@ export class SessionMonitorPanel implements Component, Focusable {
     this.onChangeCallback = cb;
   }
 
+  /**
+   * Register a callback invoked when the user selects a session (Enter key).
+   * Called with the currently selected session.
+   */
+  onSelect(cb: (session: SessionState) => void): void {
+    this.onSelectCallback = cb;
+  }
+
   /** Release resources (emitter subscriptions, timers). */
   dispose(): void {
     this.onEventUnsub?.();
@@ -97,6 +150,7 @@ export class SessionMonitorPanel implements Component, Focusable {
 
   /**
    * Render the panel into an array of lines for the given viewport width.
+   * Uses renderGroupedSessions to show Running/Queued/Completed/Failed sections.
    */
   render(width: number): string[] {
     const w = Math.max(20, width);
@@ -114,7 +168,7 @@ export class SessionMonitorPanel implements Component, Focusable {
     // ── Top border with title ────────────────────────────────────────────────
     const titleLabel = `${ANSI.bold}${this.title}${ANSI.reset}`;
     const titleVisible = visibleWidth(titleLabel);
-    const dashTotal = Math.max(0, w - 2 - titleVisible - 2); // 2 spaces around title
+    const dashTotal = Math.max(0, w - 2 - titleVisible - 2);
     const dashLeft = Math.floor(dashTotal / 2);
     const dashRight = dashTotal - dashLeft;
 
@@ -130,33 +184,35 @@ export class SessionMonitorPanel implements Component, Focusable {
       ),
     );
 
-    // ── Session rows ─────────────────────────────────────────────────────────
+    // ── Session rows (grouped) ───────────────────────────────────────────────
     if (this.sessions.length === 0) {
       lines.push(row(`${ANSI.dim}No active sessions${ANSI.reset}`));
     } else {
+      const groupedRows = renderGroupedSessions(
+        this.sessions,
+        this.selectedIndex,
+        innerW,
+      );
       const maxRows = this.maxHeight != null ? this.maxHeight - 3 : Infinity;
       let rowsRendered = 0;
 
-      for (let i = 0; i < this.sessions.length; i++) {
-        if (rowsRendered + 2 > maxRows) break;
-        const session = this.sessions[i];
-        const selected = i === this.selectedIndex;
-        const sessionRows = renderSessionRow(session, selected, innerW);
-
-        for (const sessionRow of sessionRows) {
-          lines.push(row(sessionRow));
-          rowsRendered++;
-        }
+      for (const groupedRow of groupedRows) {
+        if (rowsRendered >= maxRows) break;
+        lines.push(row(groupedRow));
+        rowsRendered++;
       }
     }
 
     // ── Bottom border with legend ─────────────────────────────────────────────
     const legend =
       this.focused
-        ? `${ANSI.dim}↑↓ navigate  ←→ scroll${ANSI.reset}`
+        ? `${ANSI.dim}↑↓ navigate  Enter select${ANSI.reset}`
         : "";
     const legendVisible = visibleWidth(legend);
-    const bottomDashes = Math.max(0, w - 2 - legendVisible - (legendVisible > 0 ? 2 : 0));
+    const bottomDashes = Math.max(
+      0,
+      w - 2 - legendVisible - (legendVisible > 0 ? 2 : 0),
+    );
     const bottomLeft = Math.floor(bottomDashes / 2);
     const bottomRight = bottomDashes - bottomLeft;
 
@@ -181,27 +237,36 @@ export class SessionMonitorPanel implements Component, Focusable {
 
   /**
    * Handle keyboard input when the panel has focus.
-   * ↑ / k — move selection up
-   * ↓ / j — move selection down
+   * ↑ / k        — move selection up
+   * ↓ / j        — move selection down
+   * Enter        — open detail view (calls onSelect callback)
+   * Home / End   — jump to first / last session
    */
   handleInput(data: string): void {
-    if (this.sessions.length === 0) return;
-
     if (matchesKey(data, "up") || data === "k") {
+      if (this.sessions.length === 0) return;
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
       this.onChangeCallback?.();
     } else if (matchesKey(data, "down") || data === "j") {
+      if (this.sessions.length === 0) return;
       this.selectedIndex = Math.min(
         this.sessions.length - 1,
         this.selectedIndex + 1,
       );
       this.onChangeCallback?.();
     } else if (matchesKey(data, "home")) {
+      if (this.sessions.length === 0) return;
       this.selectedIndex = 0;
       this.onChangeCallback?.();
     } else if (matchesKey(data, "end")) {
+      if (this.sessions.length === 0) return;
       this.selectedIndex = Math.max(0, this.sessions.length - 1);
       this.onChangeCallback?.();
+    } else if (matchesKey(data, "enter")) {
+      const session = this.getSelectedSession();
+      if (session && this.onSelectCallback) {
+        this.onSelectCallback(session);
+      }
     }
   }
 

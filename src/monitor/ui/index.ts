@@ -4,10 +4,13 @@ export {
   renderStatusBadge,
   renderMetricsSummary,
   renderHealthIndicator,
+  renderGroupedSessions,
+  groupSessionsByLifecycle,
   formatDuration,
   stripAnsi,
   visibleLen,
   ANSI,
   type HealthStatus,
+  type SessionGroup,
 } from "./render.js";
 export * from "./inspector.js";

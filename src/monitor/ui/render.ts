@@ -24,6 +24,16 @@ export const ANSI = {
 /** Local HealthStatus definition (mirrors src/monitor/health/types.ts) */
 export type HealthStatus = "healthy" | "degraded" | "critical";
 
+// ─── Session group interface ───────────────────────────────────────────────────
+
+/** Sessions organized into lifecycle buckets for grouped display. */
+export interface SessionGroup {
+  running: SessionState[];
+  queued: SessionState[];
+  completed: SessionState[];
+  failed: SessionState[];
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /**
@@ -158,4 +168,154 @@ export function renderSessionRow(
   const line2 = padToVisible(line2Raw, innerWidth);
 
   return [line1, line2];
+}
+
+// ─── Grouped session functions ────────────────────────────────────────────────
+
+/**
+ * Return the timestamp (ms) of the most recent event in a session, or null.
+ */
+function getLastEventTimestamp(session: SessionState): number | null {
+  if (!session.events.length) return null;
+  let max = 0;
+  for (const event of session.events) {
+    const t = new Date(event.timestamp).getTime();
+    if (t > max) max = t;
+  }
+  return max || null;
+}
+
+/**
+ * Extract a concise reason string from the last relevant event, if available.
+ * Supports both {type, data} (old) and {type, payload} (new) event shapes.
+ */
+function getEventReason(session: SessionState): string | null {
+  const relevantTypes =
+    session.status === "error"
+      ? ["error", "session.error"]
+      : ["paused", "session.paused"];
+
+  for (let i = session.events.length - 1; i >= 0; i--) {
+    const event = session.events[i] as any;
+    const matches = relevantTypes.some((t) => event.type.includes(t));
+    if (matches) {
+      const payload = event.data ?? event.payload;
+      if (payload && typeof payload === "object" && "reason" in payload) {
+        return String((payload as any).reason);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Group sessions into four lifecycle buckets.
+ *
+ * Mapping:
+ *   active         → running
+ *   paused, idle   → queued
+ *   ended          → completed
+ *   error          → failed
+ */
+export function groupSessionsByLifecycle(sessions: SessionState[]): SessionGroup {
+  const group: SessionGroup = {
+    running: [],
+    queued: [],
+    completed: [],
+    failed: [],
+  };
+
+  for (const session of sessions) {
+    switch (session.status) {
+      case "active":
+        group.running.push(session);
+        break;
+      case "paused":
+      case "idle":
+        group.queued.push(session);
+        break;
+      case "ended":
+        group.completed.push(session);
+        break;
+      case "error":
+        group.failed.push(session);
+        break;
+    }
+  }
+
+  return group;
+}
+
+/**
+ * Render a grouped session list with section headers.
+ *
+ * Sections are ordered: Running → Queued → Completed → Failed.
+ * Each session row shows: status badge, name, taskId, last-activity age.
+ * Failed and queued rows append a reason summary when available.
+ *
+ * @param sessions      Full session list (order determines selectedIndex mapping).
+ * @param selectedIndex Index into `sessions` that is currently selected.
+ * @param width         Target visible width for rows.
+ * @param now           Optional timestamp (ms) for age calculation (default: Date.now()).
+ * @returns             Array of strings ready for panel rendering.
+ */
+export function renderGroupedSessions(
+  sessions: SessionState[],
+  selectedIndex: number,
+  width: number,
+  now: number = Date.now(),
+): string[] {
+  const grouped = groupSessionsByLifecycle(sessions);
+  const selectedSession = sessions[selectedIndex] ?? null;
+  const lines: string[] = [];
+
+  const sectionHeader = (title: string, count: number): string =>
+    `${ANSI.bold}${ANSI.cyan}${title}${ANSI.reset} ${ANSI.dim}(${count})${ANSI.reset}`;
+
+  const renderGroup = (group: SessionState[]) => {
+    for (const session of group) {
+      const selected = session === selectedSession;
+      const prefix = selected ? "> " : "  ";
+      const name = session.metadata.name || session.metadata.id;
+      const badge = renderStatusBadge(session.status);
+
+      // taskId indicator
+      const taskPart = session.metadata.taskId
+        ? ` ${ANSI.dim}[${session.metadata.taskId}]${ANSI.reset}`
+        : "";
+
+      // Last activity age
+      const lastTs = getLastEventTimestamp(session);
+      const agePart =
+        lastTs != null
+          ? ` ${ANSI.dim}${formatDuration(now - lastTs)} ago${ANSI.reset}`
+          : "";
+
+      lines.push(`${prefix}${badge} ${name}${taskPart}${agePart}`);
+
+      // Metrics summary line
+      const metricsSummary = renderMetricsSummary(session.metrics);
+      lines.push(`     ${ANSI.dim}${metricsSummary}${ANSI.reset}`);
+
+      // Reason line for failed/queued sessions
+      const reason = getEventReason(session);
+      if (reason) {
+        lines.push(`     ${ANSI.dim}Reason: ${reason}${ANSI.reset}`);
+      }
+    }
+  };
+
+  lines.push(sectionHeader("Running", grouped.running.length));
+  renderGroup(grouped.running);
+
+  lines.push(sectionHeader("Queued", grouped.queued.length));
+  renderGroup(grouped.queued);
+
+  lines.push(sectionHeader("Completed", grouped.completed.length));
+  renderGroup(grouped.completed);
+
+  lines.push(sectionHeader("Failed", grouped.failed.length));
+  renderGroup(grouped.failed);
+
+  return lines;
 }
