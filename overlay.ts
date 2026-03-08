@@ -260,7 +260,7 @@ export class MessengerOverlay implements Component, Focusable {
     }
   }
 
-  handleInput(data: string): void {
+  handleInput(data: string): boolean | void {
     this.cancelCompletionTimer();
 
     if (data === "\x14") {
@@ -481,7 +481,7 @@ export class MessengerOverlay implements Component, Focusable {
       if (this.crewViewState.mode === "monitor") {
         if (this.attentionPanel && this.attentionPanel.getSelectedItem()) {
           this.attentionPanel.handleInput("\r");
-          return;
+          return true;
         }
         this.crewViewState.mode = "monitor-detail";
         this.crewViewState.monitorDetailScroll = 0;

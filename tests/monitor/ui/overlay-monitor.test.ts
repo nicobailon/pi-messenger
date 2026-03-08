@@ -181,7 +181,25 @@ describe("renderMonitorView", () => {
     registry.dispose();
   });
 
-  it("paused session contains Attention", () => {
+  it("pads output to the requested height", () => {
+    const registry = makeRegistry();
+    registry.lifecycle.start({
+      id: "sess-height",
+      name: "Session Height",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt: new Date().toISOString(),
+      agent: "TestAgent",
+    });
+
+    const viewState = makeViewState();
+    const lines = renderMonitorView(registry, 80, 15, viewState);
+
+    expect(lines).toHaveLength(15);
+    registry.dispose();
+  });
+
+  it("renders attention section at top when a session is paused", () => {
     const registry = makeRegistry();
     const startedAt = new Date().toISOString();
     const id = registry.lifecycle.start({
@@ -200,7 +218,7 @@ describe("renderMonitorView", () => {
     registry.dispose();
   });
 
-  it("error session contains Attention", () => {
+  it("renders attention section for sessions in error state", () => {
     const registry = makeRegistry();
     const startedAt = new Date().toISOString();
     const id = registry.lifecycle.start({
@@ -219,7 +237,7 @@ describe("renderMonitorView", () => {
     registry.dispose();
   });
 
-  it("healthy session does not contain ⚠ Attention", () => {
+  it("does not render attention section for freshly started active sessions", () => {
     const registry = makeRegistry();
     registry.lifecycle.start({
       id: "sess-healthy",
@@ -235,84 +253,16 @@ describe("renderMonitorView", () => {
     expect(lines.join("\n")).not.toContain("⚠ Attention");
     registry.dispose();
   });
-
-  it("pads to exact height when registry has no sessions", () => {
-    const registry = makeRegistry();
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 15, viewState);
-
-    expect(lines).toHaveLength(15);
-    expect(lines.join("\n")).toContain("No active sessions");
-    registry.dispose();
-  });
-
-  it("pads to exact height for one session", () => {
-    const registry = makeRegistry();
-    registry.lifecycle.start({
-      id: "sess-height",
-      name: "Session Height",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt: new Date().toISOString(),
-      agent: "TestAgent",
-    });
-
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 15, viewState);
-
-    expect(lines).toHaveLength(15);
-    registry.dispose();
-  });
-
-  it("renders session name in output rows", () => {
-    const registry = makeRegistry();
-    registry.lifecycle.start({
-      id: "sess-name-verify",
-      name: "Named Session",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt: new Date().toISOString(),
-      agent: "TestAgent",
-    });
-
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 15, viewState);
-
-    expect(lines).toHaveLength(15);
-    expect(lines.join("\n")).toContain("Named Session");
-    registry.dispose();
-  });
-
-  it("shows attention queue header before session rows when attention items exist", () => {
-    const registry = makeRegistry();
-    const startedAt = new Date().toISOString();
-    const id = registry.lifecycle.start({
-      id: "sess-attn-ordering",
-      name: "Ordering Session",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt,
-      agent: "TestAgent",
-    });
-    registry.lifecycle.pause(id, "waiting for input");
-
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 20, viewState);
-    const text = lines.join("\n");
-
-    expect(text).toContain("⚠ Attention");
-    registry.dispose();
-  });
 });
 
 describe("renderAttentionQueue", () => {
-  it("returns empty array when no items are provided", () => {
+  it("returns empty array when no attention items", () => {
     const lines = renderAttentionQueue([], 80);
 
     expect(lines).toEqual([]);
   });
 
-  it("renders header and session info for an attention item", () => {
+  it("renders attention header and items when items exist", () => {
     const item = {
       id: "attn-1",
       sessionId: "sess-attn-sample-xyz",

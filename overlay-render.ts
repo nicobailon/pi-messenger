@@ -912,7 +912,7 @@ function attentionReasonLabel(reason: AttentionItem["reason"]): string {
 export function renderAttentionQueue(items: AttentionItem[], width: number): string[] {
   if (items.length === 0) return [];
   const lines: string[] = [];
-  lines.push(`${ANSI_BOLD_ATTN}${ANSI_YELLOW}⚠ Attention Queue (${items.length})${ANSI_RESET_ATTN}`);
+  lines.push(`${ANSI_BOLD_ATTN}${ANSI_YELLOW}⚠ Attention (${items.length})${ANSI_RESET_ATTN}`);
   for (const item of items) {
     const sessionId = item.sessionId.slice(0, 12);
     const label = attentionReasonLabel(item.reason);
