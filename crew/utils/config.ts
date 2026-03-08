@@ -46,6 +46,11 @@ export interface CrewConfig {
     analyst?: string;
     collaborator?: string;
   };
+  runtime?: {
+    planner?: string;
+    worker?: string;
+    reviewer?: string;
+  };
   concurrency: {
     workers: number;
     max: number;
