@@ -22,6 +22,7 @@ import { logFeedEvent } from "../../feed.js";
 import { clearHeartbeat } from "../heartbeat.js";
 import { checkStaleHeartbeats } from "../lobby.js";
 import { recordReviewOutcome, getReviewIntensity } from "../credibility.js";
+import { classifyTask, recordTaskOutcome } from "../specialization.js";
 
 type NamespaceParams = CrewParams & {
   crew?: string;
@@ -502,6 +503,20 @@ export async function execute(
   }
 
   syncCompletedCount(cwd, crewNamespace);
+
+  // Record specialization outcomes for completed/failed tasks
+  for (const taskId of [...succeeded, ...failed]) {
+    const task = store.getTask(cwd, taskId);
+    if (task) {
+      const spec = store.getTaskSpec(cwd, taskId) ?? "";
+      const taskType = classifyTask(task.title, spec);
+      const duration = task.started_at
+        ? Date.now() - new Date(task.started_at).getTime()
+        : 0;
+      const modelUsed = task.assigned_to ?? "unknown";
+      recordTaskOutcome(modelUsed, taskType, succeeded.includes(taskId), duration);
+    }
+  }
 
   // Clear heartbeats for completed/failed/blocked tasks
   for (const taskId of [...succeeded, ...failed, ...blocked]) {
