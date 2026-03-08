@@ -314,6 +314,31 @@ describe("Session row rendering with required fields", () => {
     expect(text).toContain("MySession");
   });
 
+  it("shows agent and health state for running sessions in the shared overview row", () => {
+    const session = makeSession({
+      status: "active",
+      metadata: makeMetadata({ name: "MySession", agent: "Scout" }),
+      events: [
+        {
+          type: "session.start",
+          timestamp: new Date(Date.now() - 30_000).toISOString(),
+          data: {},
+        },
+        {
+          type: "tool.call",
+          timestamp: new Date(Date.now() - 5_000).toISOString(),
+          data: {},
+        },
+      ],
+    });
+
+    const lines = renderGroupedSessions([session], 0, 120, Date.now());
+    const text = lines.join("\n");
+
+    expect(text).toContain("Scout");
+    expect(text).toContain("healthy");
+  });
+
   it("shows assigned task (taskId from metadata)", () => {
     const session = makeSession({
       metadata: makeMetadata({ taskId: "task-42" }),

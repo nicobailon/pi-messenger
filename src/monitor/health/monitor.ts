@@ -295,7 +295,7 @@ export class SessionHealthMonitor {
   }
 
   private inferState(
-    session: { status: string; metadata: { startedAt: string } },
+    session: { status: string; metadata: { id: string; startedAt: string } },
     signals: SignalHistory,
     now: number,
   ): InferredSessionState {

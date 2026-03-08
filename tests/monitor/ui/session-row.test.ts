@@ -113,53 +113,68 @@ describe("renderAttentionBadge", () => {
 });
 
 describe("renderSessionRow", () => {
-  it("renders agent, task, lifecycle, freshness, and summary in row form", () => {
+  it("renders agent, task, lifecycle, freshness, and concise summary in row form", () => {
     const row = renderSessionRow(makeRowData());
     const plain = stripAnsi(row);
 
     expect(plain).toContain("ScoutAgent");
     expect(plain).toContain("task-42");
     expect(plain).toContain("Scout River");
-    expect(plain).toContain("active");
+    expect(plain).toContain("running");
     expect(plain).toContain("25s ago");
-    expect(plain).toContain("4 events · 2 tools");
+    expect(plain).toContain("4e · 2t");
   });
 
-  it("renders failed rows differently from completed rows", () => {
-    const failed = renderSessionRow(
-      makeRowData({
-        session: makeSession({ status: "error", metrics: makeMetrics({ errorCount: 2 }) }),
-        attention: "failed_recoverable",
-      }),
+  it("distinguishes lifecycle variants with labels and glyphs", () => {
+    const running = stripAnsi(renderSessionRow(makeRowData({ session: makeSession({ status: "active" }) })));
+    const queued = stripAnsi(
+      renderSessionRow(makeRowData({ session: makeSession({ status: "paused" }) })),
     );
-    const completed = renderSessionRow(
-      makeRowData({
-        session: makeSession({ status: "ended" }),
-      }),
-    );
+    const completed = stripAnsi(renderSessionRow(makeRowData({ session: makeSession({ status: "ended" }) })));
+    const failed = stripAnsi(renderSessionRow(makeRowData({ session: makeSession({ status: "error" }) })));
 
-    const failedPlain = stripAnsi(failed);
-    const completedPlain = stripAnsi(completed);
-
-    expect(failedPlain).toContain("error");
-    expect(failedPlain).toContain("retryable");
-    expect(completedPlain).toContain("ended");
-    expect(completedPlain).not.toContain("retryable");
+    expect(running).toMatch(/▶\s+running/);
+    expect(queued).toMatch(/⏸\s+queued/);
+    expect(completed).toMatch(/✓\s+completed/);
+    expect(failed).toMatch(/✖\s+failed/);
   });
 
-  it("surfaces degraded and waiting states without opening details", () => {
+  it("promotes actionable attention badge near the front of the row", () => {
     const row = renderSessionRow(
       makeRowData({
-        health: "degraded",
-        attention: "waiting_on_human",
-        lastActivityAt: Date.parse("2026-03-08T03:01:10.000Z"),
+        session: makeSession({
+          metadata: {
+            ...makeSession().metadata,
+            name: "A very long session name that would force truncation of the end of the row",
+          },
+        }),
+        attention: "stuck",
       }),
+      { width: 50 },
     );
 
     const plain = stripAnsi(row);
-    expect(plain).toContain("degraded");
-    expect(plain).toContain("waiting on human");
-    expect(plain).toContain("50s ago");
+    expect(plain).toContain("[needs attention]");
+  });
+
+  it("surfaces waiting/degraded states from attention in row form", () => {
+    const waiting = renderSessionRow(
+      makeRowData({
+        attention: "waiting_on_human",
+        health: "critical",
+      }),
+    );
+    const degraded = renderSessionRow(
+      makeRowData({
+        health: "degraded",
+        attention: "degraded",
+      }),
+    );
+
+    expect(stripAnsi(waiting)).toContain("[waiting on human]");
+    expect(stripAnsi(waiting)).toContain("critical");
+    expect(stripAnsi(degraded)).toContain("[needs attention]");
+    expect(stripAnsi(degraded)).toContain("degraded");
   });
 
   it("shows keyboard focus/selection state with a leading arrow", () => {
@@ -187,27 +202,41 @@ describe("renderSessionRow", () => {
     expect(stripAnsi(row)).toContain("sess-1");
   });
 
-  it("omits health badge for queued sessions where health is not applicable", () => {
+  it("omits health badge for queued sessions without attention", () => {
     const row = renderSessionRow(
       makeRowData({
         session: makeSession({ status: "paused" }),
         health: "degraded" as HealthStatus,
+        attention: null,
       }),
     );
 
     const plain = stripAnsi(row);
-    expect(plain).toContain("paused");
+    expect(plain).toContain("queued");
     expect(plain).not.toContain("degraded");
   });
 
-  it("shows blocked badge when attention is blocked-like", () => {
+  it("shows health badge for queued sessions with attention flags", () => {
     const row = renderSessionRow(
       makeRowData({
         session: makeSession({ status: "paused" }),
-        attention: "stuck",
+        health: "degraded" as HealthStatus,
+        attention: "degraded",
       }),
     );
 
-    expect(stripAnsi(row)).toContain("needs attention");
+    expect(stripAnsi(row)).toContain("degraded");
+  });
+
+  it("shows blocked-like rows as actionable", () => {
+    const row = renderSessionRow(
+      makeRowData({
+        session: makeSession({ status: "error", metrics: makeMetrics({ errorCount: 2 }) }),
+        attention: "failed_recoverable",
+      }),
+    );
+
+    expect(stripAnsi(row)).toContain("failed");
+    expect(stripAnsi(row)).toContain("[retryable]");
   });
 });

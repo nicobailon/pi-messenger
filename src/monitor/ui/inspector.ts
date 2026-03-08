@@ -12,7 +12,7 @@ function truncate(str: string, width: number): string {
   if (width <= 0) return "";
   const vis = visibleLen(str);
   if (vis <= width) return str;
-  return str.substring(0, width - 3) + "..."; 
+  return str.substring(0, width - 3) + "...";
 }
 
 export function renderSessionInspector(
@@ -33,7 +33,7 @@ export function renderSessionInspector(
   let lastToolUsed = "None";
   let lastSuccessfulActivity = "None";
   let failureReason = "None";
-  let reservations: string[] = [];
+  const reservations: string[] = [];
   
   const events = [...session.events].sort((a, b) => {
     return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
@@ -94,6 +94,7 @@ export function renderSessionInspector(
   lines.push(pad(` ${ANSI.bold}Last Active:${ANSI.reset} ${new Date(lastHeartbeat).toLocaleString()}`, innerWidth));
   lines.push(pad(` ${ANSI.bold}Last Tool:${ANSI.reset}   ${lastToolUsed}`, innerWidth));
   lines.push(pad(` ${ANSI.bold}Last Success:${ANSI.reset} ${lastSuccessfulActivity}`, innerWidth));
+  lines.push(pad(` ${ANSI.bold}Age:${ANSI.reset}        ${formatDuration(Date.now() - Date.parse(lastHeartbeat))}`, innerWidth));
   
   if (reservations.length > 0) {
       lines.push(pad(` ${ANSI.bold}Reservations:${ANSI.reset} ${truncate(reservations.join(", "), innerWidth - 20)}`, innerWidth));
@@ -104,9 +105,19 @@ export function renderSessionInspector(
       lines.push(pad(` ${ANSI.red}Diagnostics:${ANSI.reset} ${truncate(failureReason, innerWidth - 15)}`, innerWidth));
   } else if (health === "degraded" || health === "critical") {
       lines.push("".padEnd(innerWidth, "─"));
-      const alertMsg = alert ? alert.reason : "Session is not healthy";
-      const color = health === "critical" ? ANSI.red : ANSI.yellow;
-      lines.push(pad(` ${color}Diagnostics:${ANSI.reset} ${truncate(alertMsg, innerWidth - 15)}`, innerWidth));
+      const selected = alert?.explanation;
+      if (selected) {
+        const color = health === "critical" ? ANSI.red : ANSI.yellow;
+        lines.push(pad(` ${color}Diagnostics:${ANSI.reset} ${truncate(selected.summary, innerWidth - 15)}`, innerWidth));
+        lines.push(pad(` ${ANSI.dim}repeat ${selected.repeatCount} / history ${selected.historyCount}${ANSI.reset}`, innerWidth));
+        if (selected.recommendedAction) {
+          lines.push(pad(` ${ANSI.dim}Action:${ANSI.reset} ${truncate(selected.recommendedAction, innerWidth - 10)}`, innerWidth));
+        }
+      } else {
+        const alertMsg = alert ? alert.reason : "Session is not healthy";
+        const color = health === "critical" ? ANSI.red : ANSI.yellow;
+        lines.push(pad(` ${color}Diagnostics:${ANSI.reset} ${truncate(alertMsg, innerWidth - 15)}`, innerWidth));
+      }
   }
 
   lines.push("".padEnd(innerWidth, "─"));

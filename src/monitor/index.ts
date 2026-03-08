@@ -35,6 +35,9 @@ export * from "./replay/index.js";
 // Session store
 export * from "./store/index.js";
 
+// Registry
+export { MonitorRegistry, createMonitorRegistry } from "./registry.js";
+
 // Types (attention, operator, commands) — session types exported selectively below
 export * from "./types/attention.js";
 export * from "./types/operator.js";
@@ -58,6 +61,7 @@ export {
   SessionHistoryEntrySchema,
   SessionStateSchema,
   buildWorkerSessionMetadata,
+  buildWorkerSessionState,
 } from "./types/session.js";
 
 // UI rendering components — export selectively to avoid re-exporting HealthStatus

@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  appendWorkerRuntimeEvent,
+  archiveWorkerRuntimeSession,
   getLiveWorkers,
+  getWorkerRuntimeSession,
   hasLiveWorkers,
   onLiveWorkersChanged,
   removeLiveWorker,
@@ -101,5 +104,37 @@ describe("crew/live-progress", () => {
     expect(bWorkers.size).toBe(1);
     expect(hasLiveWorkers("/tmp/project-a")).toBe(true);
     expect(hasLiveWorkers("/tmp/project-b")).toBe(true);
+  });
+
+  it("archives runtime JSON events for replay after a worker exits", () => {
+    updateLiveWorker(CWD, "task-9", makeInfo("task-9", "crew-worker"));
+    appendWorkerRuntimeEvent(CWD, "task-9", {
+      type: "tool_execution_start",
+      toolName: "bash",
+      args: { command: "npm test" },
+    });
+    appendWorkerRuntimeEvent(CWD, "task-9", {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "All green" }],
+      },
+    });
+
+    archiveWorkerRuntimeSession(CWD, "task-9", {
+      status: "completed",
+      finalOutput: "All green",
+      exitCode: 0,
+      endedAt: 2_000,
+    });
+    removeLiveWorker(CWD, "task-9");
+
+    const runtime = getWorkerRuntimeSession(CWD, "task-9");
+    expect(getLiveWorkers(CWD).has("task-9")).toBe(false);
+    expect(runtime?.status).toBe("completed");
+    expect(runtime?.finalOutput).toBe("All green");
+    expect(runtime?.events).toHaveLength(2);
+    expect(runtime?.events[0]?.event.type).toBe("tool_execution_start");
+    expect(runtime?.events[1]?.event.type).toBe("message_end");
   });
 });

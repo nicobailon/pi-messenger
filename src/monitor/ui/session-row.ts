@@ -6,6 +6,7 @@ export const ANSI = {
   green: "\x1b[32m",
   yellow: "\x1b[33m",
   red: "\x1b[31m",
+  dim: "\x1b[2m",
   reset: "\x1b[0m",
 } as const;
 
@@ -65,6 +66,24 @@ function truncateLine(
   return rendered;
 }
 
+function lifecycleLabel(status: SessionState["status"]): string {
+  if (status === "active") return "running";
+  if (status === "error") return "failed";
+  if (status === "ended") return "completed";
+  return "queued";
+}
+
+function lifecycleGlyph(status: SessionState["status"]): string {
+  if (status === "active") return "▶";
+  if (status === "error") return "✖";
+  if (status === "ended") return "✓";
+  return "⏸";
+}
+
+function statusToken(status: SessionState["status"]): string {
+  return `${lifecycleGlyph(status)} ${lifecycleLabel(status)} (${status})`;
+}
+
 function statusColor(status: SessionState["status"]): string {
   if (status === "active") return ANSI.green;
   if (status === "error") return ANSI.red;
@@ -108,6 +127,10 @@ function attentionText(reason: AttentionReason): string {
   }
 }
 
+function renderAttentionText(reason: AttentionReason): string {
+  return `[${attentionText(reason)}]`;
+}
+
 export function formatFreshness(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
 
@@ -143,6 +166,19 @@ export function renderAttentionBadge(reason: AttentionReason): string {
   return `${ANSI.red}${attentionText(reason)}${ANSI.reset}`;
 }
 
+function renderMetricsSummary(metrics: SessionState["metrics"]): string {
+  const parts = [`${metrics.eventCount}e`, `${metrics.toolCalls}t`];
+  if (metrics.errorCount > 0) {
+    parts.push(`${metrics.errorCount}⚠`);
+  }
+  return parts.join(" · ");
+}
+
+function shouldShowHealth(status: SessionState["status"], attention: AttentionReason | null): boolean {
+  const isQueued = status === "paused" || status === "idle";
+  return status === "active" || (isQueued && attention !== null);
+}
+
 export function renderSessionRow(
   row: SessionRowData,
   options: { selected?: boolean; width?: number } = {},
@@ -157,23 +193,22 @@ export function renderSessionRow(
 
   const segments: Array<{ text: string; color?: string }> = [
     { text: prefix },
-    { text: status, color: statusColor(status) },
-    { text: row.session.metadata.agent },
-    { text: row.session.metadata.taskId ?? "" },
-    { text: name },
-    { text: freshness, color: statusFreshnessColor(ageMs) },
-    {
-      text: `${row.session.metrics.eventCount} events · ${row.session.metrics.toolCalls} tools`,
-    },
+    { text: statusToken(status), color: statusColor(status) },
+    { text: row.attention ? renderAttentionText(row.attention) : "", color: ANSI.red },
   ];
 
-  if (status === "active") {
+  segments.push({ text: row.session.metadata.agent });
+  segments.push({ text: row.session.metadata.taskId ?? "" });
+  segments.push({ text: name });
+  segments.push({ text: freshness, color: statusFreshnessColor(ageMs) });
+
+  if (shouldShowHealth(status, row.attention)) {
     segments.push({ text: row.health, color: healthColor(row.health) });
   }
 
-  if (row.attention) {
-    segments.push({ text: attentionText(row.attention), color: ANSI.red });
-  }
+  segments.push({
+    text: renderMetricsSummary(row.session.metrics),
+  });
 
   const normalized = segments.filter((segment) => segment.text.length > 0);
   const joined = normalized.map((segment, index) => ({
