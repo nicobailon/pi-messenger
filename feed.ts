@@ -34,7 +34,8 @@ export type FeedEventType =
   | "plan.cancel"
   | "plan.failed"
   | "stuck"
-  | "health";
+  | "health"
+  | "heartbeat.stale";
 
 export interface FeedEvent {
   ts: string;

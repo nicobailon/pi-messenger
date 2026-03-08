@@ -525,3 +525,26 @@ The task will already be claimed and started for you — do NOT call \`task.star
 
   return prompt;
 }
+
+// =============================================================================
+// Heartbeat Stale Detection
+// =============================================================================
+
+import { getStaleAgents } from "./heartbeat.js";
+
+/**
+ * Check for stale worker heartbeats and log warnings.
+ * Call this from any monitoring/polling cycle (e.g. work waves, autonomous loop).
+ */
+export function checkStaleHeartbeats(cwd: string): void {
+  const stale = getStaleAgents(cwd);
+  for (const hb of stale) {
+    logFeedEvent(
+      cwd,
+      hb.agentName,
+      "heartbeat.stale",
+      hb.taskId,
+      `Agent ${hb.agentName} stale on ${hb.taskId} (last heartbeat: ${hb.timestamp})`,
+    );
+  }
+}

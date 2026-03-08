@@ -19,6 +19,8 @@ import { hasActiveWorker } from "../registry.js";
 import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, addWaveResult, clampConcurrency } from "../state.js";
 import { getAvailableLobbyWorkers, assignTaskToLobbyWorker, cleanupUnassignedAliveFiles } from "../lobby.js";
 import { logFeedEvent } from "../../feed.js";
+import { clearHeartbeat } from "../heartbeat.js";
+import { checkStaleHeartbeats } from "../lobby.js";
 
 type NamespaceParams = CrewParams & {
   crew?: string;
@@ -45,6 +47,93 @@ function fromNamespacedTaskId(taskId: string | undefined, crewNamespace: string)
   if (crewNamespace === "shared") return taskId;
   const prefix = `${crewNamespace}::`;
   return taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
+}
+
+
+/**
+ * Spawn an adversarial reviewer for a completed task (async/non-blocking).
+ * The reviewer examines the task diff and spec, producing an APPROVE/REJECT verdict.
+ * If rejected, the task is reset to "todo" with reviewer feedback in progress.
+ */
+function spawnAdversarialReview(
+  taskId: string,
+  taskTitle: string,
+  taskSummary: string | undefined,
+  baseCommit: string | undefined,
+  cwd: string,
+  config: ReturnType<typeof loadCrewConfig>,
+  dirs: Dirs,
+): void {
+  const reviewPrompt = [
+    `## Adversarial Review: ${taskId}`,
+    ``,
+    `### Task: ${taskTitle}`,
+    ``,
+    taskSummary ? `### Completion Summary:\n${taskSummary}` : "",
+    ``,
+    `### Instructions:`,
+    `1. Read the task spec from the plan in the crew directory`,
+    `2. Examine the git diff: \`git diff ${baseCommit ?? "HEAD~1"}..HEAD\``,
+    `3. Find at least 3 issues (scope drift, missing edge cases, style violations, test gaps, security concerns)`,
+    `4. Output a structured verdict: APPROVE or REJECT`,
+    ``,
+    `Working directory: ${cwd}`,
+  ].filter(Boolean).join("\n");
+
+  store.appendTaskProgress(cwd, taskId, "system",
+    `Adversarial review spawned for ${taskId}`);
+  logFeedEvent(cwd, "adversarial-reviewer", "message", taskId, `Adversarial review started for ${taskTitle}`);
+
+  // Spawn asynchronously — do not await
+  const reviewModel = resolveModel(config.models?.reviewer);
+  spawnAgents(
+    [{
+      agent: "adversarial-reviewer",
+      task: reviewPrompt,
+      taskId: `review-${taskId}`,
+      modelOverride: reviewModel,
+    }],
+    cwd,
+    { messengerDirs: { registry: dirs.registry, inbox: dirs.inbox } },
+  ).then((results) => {
+    const reviewResult = results[0];
+    if (!reviewResult) return;
+
+    const output = reviewResult.output ?? "";
+    const isRejected = /## Verdict:\s*REJECT/i.test(output);
+
+    store.appendTaskProgress(cwd, taskId, "adversarial-reviewer",
+      isRejected
+        ? `❌ Adversarial review REJECTED: see review output for details`
+        : `✅ Adversarial review APPROVED`);
+    logFeedEvent(cwd, "adversarial-reviewer", isRejected ? "task.reset" : "task.done",
+      taskId, isRejected ? "Adversarial review: REJECTED" : "Adversarial review: APPROVED");
+
+    if (isRejected) {
+      // Extract issues from output for feedback
+      const issueMatches = output.match(/### Issue \d+:.*?(?=### Issue \d+:|## Summary|<\/adversarial_verdict>)/gs);
+      const issues = issueMatches
+        ? issueMatches.map(m => m.trim()).slice(0, 5)
+        : ["See full adversarial review output for details"];
+
+      store.updateTask(cwd, taskId, {
+        status: "todo",
+        assigned_to: undefined,
+        last_review: {
+          verdict: "NEEDS_WORK",
+          summary: "Adversarial review rejected the completion",
+          issues,
+          suggestions: [],
+          reviewed_at: new Date().toISOString(),
+        },
+      });
+      store.appendTaskProgress(cwd, taskId, "system",
+        `Task reset to todo after adversarial review rejection`);
+    }
+  }).catch((err) => {
+    store.appendTaskProgress(cwd, taskId, "system",
+      `Adversarial review failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
+  });
 }
 
 export async function execute(
@@ -258,6 +347,11 @@ export async function execute(
           createCheckpoint(cwd, taskId, "post", `post: ${task.title}`);
         }).catch(() => {});
         succeeded.push(taskId);
+
+        // Post-completion adversarial review (async/non-blocking)
+        if (config.review?.autoAdversarial !== false && task) {
+          spawnAdversarialReview(taskId, task.title, task.summary, task.base_commit, cwd, config, dirs);
+        }
       } else if (task?.status === "blocked") {
         blocked.push(taskId);
       } else if (task?.status === "in_progress") {
@@ -272,6 +366,10 @@ export async function execute(
       if (r.wasGracefullyShutdown) {
         if (task?.status === "done") {
           succeeded.push(taskId);
+          // Post-completion adversarial review (async/non-blocking)
+          if (config.review?.autoAdversarial !== false && task) {
+            spawnAdversarialReview(taskId, task.title, task.summary, task.base_commit, cwd, config, dirs);
+          }
         } else if (task?.status === "blocked") {
           blocked.push(taskId);
         } else if (task?.status === "in_progress") {
@@ -295,6 +393,17 @@ export async function execute(
   }
 
   syncCompletedCount(cwd, crewNamespace);
+
+  // Clear heartbeats for completed/failed/blocked tasks
+  for (const taskId of [...succeeded, ...failed, ...blocked]) {
+    const task = store.getTask(cwd, taskId);
+    if (task?.assigned_to) {
+      clearHeartbeat(cwd, task.assigned_to, taskId);
+    }
+  }
+
+  // Check for stale agent heartbeats
+  checkStaleHeartbeats(cwd);
 
   // Save current wave number BEFORE addWaveResult increments it
   const currentWave = sharedAutonomous ? autonomousState.waveNumber : 1;
