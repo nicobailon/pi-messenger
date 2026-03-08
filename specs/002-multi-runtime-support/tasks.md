@@ -128,6 +128,6 @@ Note: touches lobby.ts lines 170-200 (close handler) — different section from 
 
 ## Post-Implementation
 
-- [ ] **P1** Update README or docs with multi-runtime configuration guide
-- [ ] **P2** Document CLI usage for external agents
+- [x] **P1** Update README or docs with multi-runtime configuration guide
+- [x] **P2** Document CLI usage for external agents
 - [ ] **P3** Close bead pi-messenger-2
