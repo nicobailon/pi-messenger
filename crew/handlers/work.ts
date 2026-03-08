@@ -83,7 +83,7 @@ export async function execute(
   syncCompletedCount(cwd);
 
   // Get ready tasks — auto-block any that exceeded max attempts
-  const allReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
+  const allReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
   const readyTasks: typeof allReady = [];
   for (const task of allReady) {
     if (task.attempt_count >= config.work.maxAttemptsPerTask) {
@@ -100,7 +100,7 @@ export async function execute(
   }
 
   if (readyTasks.length === 0) {
-    const tasks = store.getTasks(cwd);
+    const tasks = store.getTasks(cwd, crewNamespace);
     const inProgress = tasks.filter(t => t.status === "in_progress");
     const blocked = tasks.filter(t => t.status === "blocked");
     const done = tasks.filter(t => t.status === "done");
@@ -313,7 +313,7 @@ export async function execute(
       stopAutonomous("manual");
       appendEntry("crew-state", autonomousState);
     } else {
-      const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
+      const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
       const allTasks = store.getTasks(cwd);
       const allDone = allTasks.every(t => t.status === "done");
       const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");

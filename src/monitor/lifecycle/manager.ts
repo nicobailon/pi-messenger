@@ -128,6 +128,27 @@ export class SessionLifecycleManager {
   }
 
   /**
+   * Escalate a session to the error state for operator review.
+   * Transitions active → error via the FSM and emits a "session.error" event.
+   */
+  escalate(sessionId: string, reason?: string): void {
+    this.transition(sessionId, "error");
+
+    this.emitter.emit({
+      id: randomUUID(),
+      type: "session.error",
+      sessionId,
+      timestamp: Date.now(),
+      sequence: this.nextSequence(sessionId),
+      payload: {
+        type: "session.error",
+        message: reason ?? "Session escalated for operator review",
+        fatal: false,
+      },
+    });
+  }
+
+  /**
    * Get the current status of a session.
    * Returns undefined if the session does not exist.
    */

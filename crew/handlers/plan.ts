@@ -270,7 +270,7 @@ export async function execute(
 
   const existingPlan = store.getPlan(cwd);
   if (existingPlan) {
-    const existingTasks = store.getTasks(cwd);
+    const existingTasks = store.getTasks(cwd, crewNamespace);
     const planningActive = isPlanningActiveForNamespace();
 
     if (planningActive) {
@@ -504,7 +504,7 @@ export async function execute(
 
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i];
-    const created = store.createTask(cwd, task.title, task.description);
+    const created = store.createTask(cwd, task.title, task.description, undefined, crewNamespace);
     createdTasks.push({ id: created.id, title: task.title, dependsOn: task.dependsOn });
     titleToId.set(task.title.toLowerCase(), created.id);
     titleToId.set(`task ${i + 1}`, created.id);

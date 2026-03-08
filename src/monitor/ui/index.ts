@@ -14,3 +14,4 @@ export {
   type SessionGroup,
 } from "./render.js";
 export * from "./inspector.js";
+export { SessionDetailView, renderSessionDetailView, stripDetailAnsi } from "./session-detail.js";

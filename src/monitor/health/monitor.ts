@@ -36,6 +36,8 @@ export class SessionHealthMonitor {
 
   /** Track last event timestamp per session (sessionId → epoch ms) */
   private lastEventAt: Map<string, number> = new Map();
+  /** Track last emitted alert status per session to suppress duplicate alerts */
+  private lastAlertStatus: Map<string, HealthStatus> = new Map();
 
   constructor(
     store: SessionStore,
@@ -112,13 +114,20 @@ export class SessionHealthMonitor {
     }
 
     if (status !== "healthy") {
-      const alert: HealthAlert = {
-        sessionId,
-        status,
-        reason,
-        detectedAt: now,
-      };
-      this.emitAlert(alert);
+      // Deduplicate: only emit when the alert status changes for this session
+      if (this.lastAlertStatus.get(sessionId) !== status) {
+        this.lastAlertStatus.set(sessionId, status);
+        const alert: HealthAlert = {
+          sessionId,
+          status,
+          reason,
+          detectedAt: now,
+        };
+        this.emitAlert(alert);
+      }
+    } else {
+      // Reset tracking when session recovers to healthy
+      this.lastAlertStatus.delete(sessionId);
     }
 
     return status;

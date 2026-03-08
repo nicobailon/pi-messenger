@@ -163,13 +163,10 @@ export class OperatorCommandHandler {
       }
 
       case "escalate": {
+        // Route through the lifecycle FSM so the active→error transition is
+        // validated and a session.error event is emitted.
+        this.lifecycle.escalate(sessionId, command.reason);
         const store = this.lifecycle.getStore();
-        const state = store.get(sessionId);
-        if (!state) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
-        // Escalate marks the session in an error state for operator review
-        store.update(sessionId, { status: "error" });
         return store.get(sessionId);
       }
 

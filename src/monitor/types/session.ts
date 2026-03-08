@@ -36,18 +36,30 @@ export const SessionMetricsSchema = z.object({
 });
 export type SessionMetrics = z.infer<typeof SessionMetricsSchema>;
 
-export const SessionEventSchema = z.object({
+/**
+ * SessionHistoryEntry — a lightweight session-history record (type + timestamp + optional data).
+ * This is the simple event format stored on SessionState.events.
+ *
+ * Note: For the rich stream-event type used by SessionEventEmitter, see
+ * src/monitor/events/types.ts which exports its own SessionEvent / SessionEventSchema.
+ * Prefer importing from the correct module to avoid name collisions.
+ */
+export const SessionHistoryEntrySchema = z.object({
   type: z.string(),
   timestamp: z.string().datetime(),
   data: z.unknown().optional(),
 });
-export type SessionEvent = z.infer<typeof SessionEventSchema>;
+export type SessionHistoryEntry = z.infer<typeof SessionHistoryEntrySchema>;
+
+// Backward-compat aliases (use SessionHistoryEntry / SessionHistoryEntrySchema for new code)
+export const SessionEventSchema = SessionHistoryEntrySchema;
+export type SessionEvent = SessionHistoryEntry;
 
 export const SessionStateSchema = z.object({
   status: SessionStatusSchema,
   metadata: SessionMetadataSchema,
   metrics: SessionMetricsSchema,
-  events: z.array(SessionEventSchema),
+  events: z.array(SessionHistoryEntrySchema),
 });
 export type SessionState = z.infer<typeof SessionStateSchema>;
 
