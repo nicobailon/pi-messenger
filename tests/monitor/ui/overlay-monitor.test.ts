@@ -181,7 +181,7 @@ describe("renderMonitorView", () => {
     registry.dispose();
   });
 
-  it("paused session renders the attention queue panel", () => {
+  it("paused session contains Attention", () => {
     const registry = makeRegistry();
     const startedAt = new Date().toISOString();
     const id = registry.lifecycle.start({
@@ -196,11 +196,11 @@ describe("renderMonitorView", () => {
 
     const viewState = makeViewState();
     const lines = renderMonitorView(registry, 80, 20, viewState);
-    expect(lines.join("\n")).toContain("Attention Queue");
+    expect(lines.join("\n")).toContain("⚠ Attention");
     registry.dispose();
   });
 
-  it("error session renders the attention queue panel", () => {
+  it("error session contains Attention", () => {
     const registry = makeRegistry();
     const startedAt = new Date().toISOString();
     const id = registry.lifecycle.start({
@@ -215,7 +215,7 @@ describe("renderMonitorView", () => {
 
     const viewState = makeViewState();
     const lines = renderMonitorView(registry, 80, 20, viewState);
-    expect(lines.join("\n")).toContain("Attention Queue");
+    expect(lines.join("\n")).toContain("⚠ Attention");
     registry.dispose();
   });
 
@@ -236,7 +236,7 @@ describe("renderMonitorView", () => {
     registry.dispose();
   });
 
-  it("returns padded output for empty sessions", () => {
+  it("pads to exact height when registry has no sessions", () => {
     const registry = makeRegistry();
     const viewState = makeViewState();
     const lines = renderMonitorView(registry, 80, 15, viewState);
@@ -246,7 +246,7 @@ describe("renderMonitorView", () => {
     registry.dispose();
   });
 
-  it("renders stable output height for one session", () => {
+  it("pads to exact height for one session", () => {
     const registry = makeRegistry();
     registry.lifecycle.start({
       id: "sess-height",
@@ -264,11 +264,11 @@ describe("renderMonitorView", () => {
     registry.dispose();
   });
 
-  it("returns padded output with detail-like session rows", () => {
+  it("renders session name in output rows", () => {
     const registry = makeRegistry();
-    const id = registry.lifecycle.start({
-      id: "sess-height-detail",
-      name: "Session Detail",
+    registry.lifecycle.start({
+      id: "sess-name-verify",
+      name: "Named Session",
       cwd: "/tmp",
       model: "claude-3",
       startedAt: new Date().toISOString(),
@@ -279,57 +279,54 @@ describe("renderMonitorView", () => {
     const lines = renderMonitorView(registry, 80, 15, viewState);
 
     expect(lines).toHaveLength(15);
-    const text = lines.join("\n");
-    expect(text).toContain("Session Detail");
-    expect(text).toContain("Running");
+    expect(lines.join("\n")).toContain("Named Session");
     registry.dispose();
   });
 
-  it("renders no sessions attention queue with exact padding", () => {
-    const registry = makeRegistry();
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 15, viewState);
-
-    expect(lines).toHaveLength(15);
-    expect(lines.join("\n")).toContain("No active sessions");
-    registry.dispose();
-  });
-});
-
-describe("renderAttentionQueue", () => {
-  it("returns no panel rows when no items are found", () => {
-    const lines = renderAttentionQueue([], new Map(), 80, 10);
-
-    expect(lines).toEqual([]);
-  });
-
-  it("renders a sample attention queue panel item", () => {
+  it("shows attention queue header before session rows when attention items exist", () => {
     const registry = makeRegistry();
     const startedAt = new Date().toISOString();
     const id = registry.lifecycle.start({
-      id: "sess-attn-sample",
-      name: "Sample Session",
+      id: "sess-attn-ordering",
+      name: "Ordering Session",
       cwd: "/tmp",
       model: "claude-3",
       startedAt,
       agent: "TestAgent",
     });
-    const session = registry.store.get(id);
-    if (!session) {
-      throw new Error("Session missing");
-    }
+    registry.lifecycle.pause(id, "waiting for input");
 
-    const sessions = [session];
-    const healthMap = new Map<string, "healthy" | "degraded" | "critical">([
-      [sessions[0].metadata.id, "degraded"],
-    ]);
-
-    const lines = renderAttentionQueue(sessions, healthMap, 100, 12, Date.parse(startedAt) + 35_000);
+    const viewState = makeViewState();
+    const lines = renderMonitorView(registry, 80, 20, viewState);
     const text = lines.join("\n");
 
-    expect(text).toContain("Attention Queue");
-    expect(text).toContain(sessions[0].metadata.id);
+    expect(text).toContain("⚠ Attention");
     registry.dispose();
+  });
+});
+
+describe("renderAttentionQueue", () => {
+  it("returns empty array when no items are provided", () => {
+    const lines = renderAttentionQueue([], 80);
+
+    expect(lines).toEqual([]);
+  });
+
+  it("renders header and session info for an attention item", () => {
+    const item = {
+      id: "attn-1",
+      sessionId: "sess-attn-sample-xyz",
+      reason: "stale_running" as const,
+      message: "Session has been stale for over 30 seconds",
+      recommendedAction: "Check the session logs for stuck output",
+      timestamp: new Date().toISOString(),
+    };
+
+    const lines = renderAttentionQueue([item], 100);
+    const text = lines.join("\n");
+
+    expect(text).toContain("⚠ Attention");
+    expect(text).toContain(item.sessionId.slice(0, 12));
   });
 });
 

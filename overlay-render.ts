@@ -47,7 +47,6 @@ import type { MonitorRegistry } from "./src/monitor/registry.js";
 import { renderGroupedSessions } from "./src/monitor/ui/render.js";
 import { renderSessionDetailView } from "./src/monitor/ui/session-detail.js";
 import { deriveAttentionItems } from "./src/monitor/attention/derivation.js";
-import { AttentionQueuePanel } from "./src/monitor/ui/attention.js";
 import type { AttentionItem } from "./src/monitor/types/attention.js";
 import type { HealthStatus } from "./src/monitor/health/types.js";
 
@@ -848,67 +847,92 @@ function renderTaskLine(theme: Theme, task: Task, isSelected: boolean, width: nu
 }
 
 
-const ANSI_DIM = "\x1b[2m";
-const ANSI_YELLOW = "\x1b[33m";
-const ANSI_RED = "\x1b[31m";
-const ANSI_RESET = "\x1b[0m";
-const ANSI_BOLD = "\x1b[1m";
-const DEFAULT_ATTENTION_PANEL_MAX_HEIGHT = 12;
+// ─── Attention queue helpers ──────────────────────────────────────────────────
 
+const ANSI_YELLOW = "\x1b[33m";
+const ANSI_BOLD_ATTN = "\x1b[1m";
+const ANSI_DIM_ATTN = "\x1b[2m";
+const ANSI_RESET_ATTN = "\x1b[0m";
+
+/**
+ * Build a health status map from sessions using lightweight heuristics.
+ * Pure function — no side effects, no external calls.
+ */
 function buildHealthMapFromSessions(
-  registry: MonitorRegistry | undefined,
-  sessions: ReturnType<MonitorRegistry["store"]["list"]>,
+  sessions: Array<{
+    status: string;
+    metadata: { id: string; startedAt: string };
+    events: Array<{ timestamp: string }>;
+    metrics: { eventCount: number; errorCount: number };
+  }>,
+  now: number,
 ): Map<string, HealthStatus> {
   const map = new Map<string, HealthStatus>();
-
-  for (const session of sessions) {
-    if (!registry) {
-      map.set(session.metadata.id, "healthy");
+  for (const s of sessions) {
+    if (s.status !== "active") {
+      map.set(s.metadata.id, "healthy");
       continue;
     }
-
-    const snapshot = registry.healthMonitor.getSessionHealth(session.metadata.id);
-    const health = snapshot.state === "stuck"
-      ? "critical"
-      : snapshot.state === "degraded"
-        ? "degraded"
-        : "healthy";
-    map.set(session.metadata.id, health);
+    let lastTs = Date.parse(s.metadata.startedAt);
+    for (const e of s.events) {
+      const t = Date.parse(e.timestamp);
+      if (Number.isFinite(t) && t > lastTs) lastTs = t;
+    }
+    const ageMs = Math.max(0, now - lastTs);
+    const errorRate =
+      s.metrics.eventCount > 0 ? s.metrics.errorCount / s.metrics.eventCount : 0;
+    if (ageMs >= 120_000) {
+      map.set(s.metadata.id, "critical");
+    } else if (ageMs >= 30_000 || errorRate >= 0.5) {
+      map.set(s.metadata.id, "degraded");
+    } else {
+      map.set(s.metadata.id, "healthy");
+    }
   }
-
   return map;
 }
 
 function attentionReasonLabel(reason: AttentionItem["reason"]): string {
-  return `${ANSI_BOLD}${ANSI_YELLOW}⚠ Attention${ANSI_RESET}`;
-}
-
-export function renderAttentionQueue(
-  sessions: ReturnType<MonitorRegistry["store"]["list"]>,
-  healthMap: Map<string, HealthStatus>,
-  width: number,
-  height: number,
-  nowMs?: number,
-  attentionPanel?: AttentionQueuePanel,
-): string[] {
-  const items = deriveAttentionItems(sessions, healthMap, new Map(), nowMs);
-  if (items.length === 0) {
-    return [];
+  switch (reason) {
+    case "waiting_on_human": return "waiting";
+    case "stuck": return "stuck";
+    case "degraded": return "degraded";
+    case "high_error_rate": return "high errors";
+    case "repeated_retries": return "repeated retries";
+    case "failed_recoverable": return "failed";
+    case "stale_running": return "stale";
+    default: return String(reason);
   }
-
-  const panel = attentionPanel ?? new AttentionQueuePanel({
-    maxHeight: Math.min(height, DEFAULT_ATTENTION_PANEL_MAX_HEIGHT),
-  });
-  panel.setItems(items);
-  return panel.render(width).slice(0, height);
 }
 
-function renderMonitorSessionRows(
-  sessions: ReturnType<MonitorRegistry["store"]["list"]>,
-  selectedIndex: number,
-  width: number,
-): string[] {
-  return renderGroupedSessions(sessions, selectedIndex, width);
+/**
+ * Render the attention queue section as an array of lines.
+ * Shown above the session list when sessions need operator attention.
+ */
+export function renderAttentionQueue(items: AttentionItem[], width: number): string[] {
+  if (items.length === 0) return [];
+  const lines: string[] = [];
+  lines.push(`${ANSI_BOLD_ATTN}${ANSI_YELLOW}⚠ Attention Queue (${items.length})${ANSI_RESET_ATTN}`);
+  for (const item of items) {
+    const sessionId = item.sessionId.slice(0, 12);
+    const label = attentionReasonLabel(item.reason);
+    const maxMsg = Math.max(10, width - sessionId.length - label.length - 6);
+    const msg =
+      item.message.length > maxMsg
+        ? item.message.slice(0, maxMsg - 1) + "…"
+        : item.message;
+    lines.push(
+      `  ${sessionId}  ${ANSI_YELLOW}${label}${ANSI_RESET_ATTN}: ${msg}`,
+    );
+    const maxAction = Math.max(10, width - 6);
+    const action =
+      item.recommendedAction.length > maxAction
+        ? item.recommendedAction.slice(0, maxAction - 1) + "…"
+        : item.recommendedAction;
+    lines.push(`  ${ANSI_DIM_ATTN}→ ${action}${ANSI_RESET_ATTN}`);
+  }
+  lines.push("");
+  return lines;
 }
 
 export function renderMonitorView(
@@ -916,41 +940,36 @@ export function renderMonitorView(
   width: number,
   height: number,
   viewState: CrewViewState,
-  attentionPanel?: AttentionQueuePanel,
 ): string[] {
   if (!registry) {
     const lines: string[] = ["  No monitor registry available."];
-    const visible = lines.slice(0, height);
-    while (visible.length < height) visible.push("");
-    return visible;
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
   }
 
   const sessions = registry.store.list();
   if (sessions.length === 0) {
     const lines: string[] = ["  No active sessions."];
-    const visible = lines.slice(0, height);
-    while (visible.length < height) visible.push("");
-    return visible;
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
   }
 
   const clampedIndex = Math.max(0, Math.min(viewState.monitorSelectedIndex, sessions.length - 1));
   viewState.monitorSelectedIndex = clampedIndex;
 
-  const healthMap = buildHealthMapFromSessions(registry, sessions);
-  const attentionLines = renderAttentionQueue(
-    sessions,
-    healthMap,
-    width,
-    Math.min(height, DEFAULT_ATTENTION_PANEL_MAX_HEIGHT),
-    undefined,
-    attentionPanel,
-  );
-  const allLines = [...attentionLines, ...renderMonitorSessionRows(sessions, clampedIndex, width)];
+  const now = Date.now();
+  const healthMap = buildHealthMapFromSessions(sessions, now);
+  const attentionItems = deriveAttentionItems(sessions, healthMap, new Map());
+  const attentionLines = renderAttentionQueue(attentionItems, width);
+
+  const sessionLines = renderGroupedSessions(sessions, clampedIndex, width);
+  const allLines = [...attentionLines, ...sessionLines];
 
   const visible = allLines.slice(0, height);
   while (visible.length < height) visible.push("");
   return visible;
 }
+
 
 export function renderMonitorDetailView(
   registry: MonitorRegistry | undefined,

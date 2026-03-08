@@ -18,7 +18,7 @@ import {
 import * as crewStore from "./crew/store.js";
 import { adjustConcurrency, autonomousState, isAutonomousForCwd, isPlanningForCwd, planningState } from "./crew/state.js";
 import { loadCrewConfig, cycleCoordinationLevel, setCoordinationOverride } from "./crew/utils/config.js";
-import { readFeedEvents, type FeedEvent, type FeedEventType } from "./feed.js";
+import { readFeedEvents, logFeedEvent, type FeedEvent, type FeedEventType } from "./feed.js";
 import type { Task } from "./crew/types.js";
 import {
   renderStatusBar,
@@ -108,10 +108,11 @@ export class MessengerOverlay implements Component, Focusable {
 
       this.attentionPanel = new AttentionQueuePanel();
       this.attentionPanel.onSelect((item) => {
-        const sessions = registry.store.list();
-        const index = sessions.findIndex((session) => session.metadata.id === item.sessionId);
-        if (index >= 0) {
-          this.crewViewState.monitorSelectedIndex = index;
+        if (!this.registry) return;
+        const sessions = this.registry.store.list();
+        const idx = sessions.findIndex((s) => s.metadata.id === item.sessionId);
+        if (idx >= 0) {
+          this.crewViewState.monitorSelectedIndex = idx;
           this.crewViewState.mode = "monitor-detail";
           this.crewViewState.monitorDetailScroll = 0;
           this.tui.requestRender();
@@ -480,7 +481,7 @@ export class MessengerOverlay implements Component, Focusable {
       if (this.crewViewState.mode === "monitor") {
         if (this.attentionPanel && this.attentionPanel.getSelectedItem()) {
           this.attentionPanel.handleInput("\r");
-          return true;
+          return;
         }
         this.crewViewState.mode = "monitor-detail";
         this.crewViewState.monitorDetailScroll = 0;
@@ -709,7 +710,7 @@ export class MessengerOverlay implements Component, Focusable {
         const sessions = this.registry.store.list();
         this.attentionPanel.setItems(deriveAttentionItems(sessions, new Map(), new Map()));
       }
-      contentLines = renderMonitorView(this.registry, sectionW, contentHeight, this.crewViewState, this.attentionPanel);
+      contentLines = renderMonitorView(this.registry, sectionW, contentHeight, this.crewViewState);
     } else if (this.crewViewState.mode === "detail" && selectedTask) {
       contentLines = renderDetailView(this.cwd, selectedTask, sectionW, contentHeight, this.crewViewState);
     } else {
