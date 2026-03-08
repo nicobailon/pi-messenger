@@ -44,12 +44,12 @@ import { listCheckpoints, getCheckpointDiff } from "./crew/utils/checkpoint.js";
 import { getLobbyWorkerCount } from "./crew/lobby.js";
 import type { CrewViewState } from "./overlay-actions.js";
 import type { MonitorRegistry } from "./src/monitor/registry.js";
-import { deriveAttentionItems } from "./src/monitor/attention/derivation.js";
-import type { AttentionItem } from "./src/monitor/types/attention.js";
-import type { HealthStatus } from "./src/monitor/health/types.js";
-import type { SessionState } from "./src/monitor/types/session.js";
 import { renderGroupedSessions } from "./src/monitor/ui/render.js";
 import { renderSessionDetailView } from "./src/monitor/ui/session-detail.js";
+import { deriveAttentionItems } from "./src/monitor/attention/derivation.js";
+import { AttentionQueuePanel } from "./src/monitor/ui/attention.js";
+import type { AttentionItem } from "./src/monitor/types/attention.js";
+import type { HealthStatus } from "./src/monitor/health/types.js";
 
 
 const STATUS_ICONS: Record<string, string> = { done: "✓", in_progress: "●", todo: "○", blocked: "✗" };
@@ -848,75 +848,63 @@ function renderTaskLine(theme: Theme, task: Task, isSelected: boolean, width: nu
 }
 
 
-function buildHealthMapFromSessions(sessions: SessionState[]): Map<string, HealthStatus> {
-  const now = Date.now();
+const ANSI_DIM = "\x1b[2m";
+const ANSI_YELLOW = "\x1b[33m";
+const ANSI_RED = "\x1b[31m";
+const ANSI_RESET = "\x1b[0m";
+const ANSI_BOLD = "\x1b[1m";
+const DEFAULT_ATTENTION_PANEL_MAX_HEIGHT = 12;
+
+function buildHealthMapFromSessions(
+  registry: MonitorRegistry | undefined,
+  sessions: ReturnType<MonitorRegistry["store"]["list"]>,
+): Map<string, HealthStatus> {
   const map = new Map<string, HealthStatus>();
 
   for (const session of sessions) {
-    if (session.status !== "active") {
+    if (!registry) {
       map.set(session.metadata.id, "healthy");
       continue;
     }
 
-    const timestamps = session.events
-      .map((event) => Date.parse(event.timestamp))
-      .filter((timestamp) => Number.isFinite(timestamp));
-    const latest = timestamps.length > 0
-      ? Math.max(Date.parse(session.metadata.startedAt), ...timestamps)
-      : Date.parse(session.metadata.startedAt);
-
-    const ageMs = Math.max(0, now - latest);
-    const errorRate = session.metrics.eventCount > 0
-      ? session.metrics.errorCount / session.metrics.eventCount
-      : 0;
-
-    let health: HealthStatus = "healthy";
-    if (ageMs >= 120_000) {
-      health = "critical";
-    } else if (ageMs >= 30_000 || errorRate >= 0.5) {
-      health = "degraded";
-    }
-
+    const snapshot = registry.healthMonitor.getSessionHealth(session.metadata.id);
+    const health = snapshot.state === "stuck"
+      ? "critical"
+      : snapshot.state === "degraded"
+        ? "degraded"
+        : "healthy";
     map.set(session.metadata.id, health);
   }
 
   return map;
 }
 
-function attentionReasonLabel(_reason: AttentionItem["reason"]): string {
-  return "⚠ Attention";
+function attentionReasonLabel(reason: AttentionItem["reason"]): string {
+  return `${ANSI_BOLD}${ANSI_YELLOW}⚠ Attention${ANSI_RESET}`;
 }
 
 export function renderAttentionQueue(
-  sessions: SessionState[],
+  sessions: ReturnType<MonitorRegistry["store"]["list"]>,
   healthMap: Map<string, HealthStatus>,
-  metricsMap: Map<string, unknown>,
   width: number,
   height: number,
   nowMs?: number,
+  attentionPanel?: AttentionQueuePanel,
 ): string[] {
-  const items = deriveAttentionItems(sessions, healthMap, metricsMap, nowMs);
+  const items = deriveAttentionItems(sessions, healthMap, new Map(), nowMs);
   if (items.length === 0) {
-    const lines: string[] = [truncateToWidth("  No sessions require attention", width)];
-    const visible = lines.slice(0, height);
-    while (visible.length < height) visible.push("");
-    return visible;
+    return [];
   }
 
-  const lines: string[] = [];
-  for (const item of items) {
-    lines.push(truncateToWidth(`  ${attentionReasonLabel(item.reason)} ${item.sessionId}`, width));
-    lines.push(truncateToWidth(`    ${item.message}`, width));
-    lines.push(truncateToWidth(`    Next: ${item.recommendedAction}`, width));
-  }
-
-  const visible = lines.slice(0, height);
-  while (visible.length < height) visible.push("");
-  return visible;
+  const panel = attentionPanel ?? new AttentionQueuePanel({
+    maxHeight: Math.min(height, DEFAULT_ATTENTION_PANEL_MAX_HEIGHT),
+  });
+  panel.setItems(items);
+  return panel.render(width).slice(0, height);
 }
 
 function renderMonitorSessionRows(
-  sessions: SessionState[],
+  sessions: ReturnType<MonitorRegistry["store"]["list"]>,
   selectedIndex: number,
   width: number,
 ): string[] {
@@ -928,6 +916,7 @@ export function renderMonitorView(
   width: number,
   height: number,
   viewState: CrewViewState,
+  attentionPanel?: AttentionQueuePanel,
 ): string[] {
   if (!registry) {
     const lines: string[] = ["  No monitor registry available."];
@@ -947,8 +936,15 @@ export function renderMonitorView(
   const clampedIndex = Math.max(0, Math.min(viewState.monitorSelectedIndex, sessions.length - 1));
   viewState.monitorSelectedIndex = clampedIndex;
 
-  const healthMap = buildHealthMapFromSessions(sessions);
-  const attentionLines = renderAttentionQueue(sessions, healthMap, new Map(), width, Math.min(height, 12));
+  const healthMap = buildHealthMapFromSessions(registry, sessions);
+  const attentionLines = renderAttentionQueue(
+    sessions,
+    healthMap,
+    width,
+    Math.min(height, DEFAULT_ATTENTION_PANEL_MAX_HEIGHT),
+    undefined,
+    attentionPanel,
+  );
   const allLines = [...attentionLines, ...renderMonitorSessionRows(sessions, clampedIndex, width)];
 
   const visible = allLines.slice(0, height);
@@ -976,7 +972,15 @@ export function renderMonitorDetailView(
     return lines.slice(0, height);
   }
 
-  return renderSessionDetailView(session, "healthy", width, height, Date.now());
+  const snapshot = registry.healthMonitor.getSessionHealth(session.metadata.id);
+  const health = snapshot.state === "stuck"
+    ? "critical"
+    : snapshot.state === "degraded"
+      ? "degraded"
+      : "healthy";
+  const alert = registry.healthMonitor.getAlert(session.metadata.id);
+
+  return renderSessionDetailView(session, health, width, height, Date.now(), alert);
 }
 
 export function navigateTask(viewState: CrewViewState, direction: 1 | -1, taskCount: number): void {

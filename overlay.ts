@@ -478,14 +478,13 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (matchesKey(data, "enter")) {
       if (this.crewViewState.mode === "monitor") {
-        const selected = this.attentionPanel?.getSelectedItem();
-        if (selected) {
-          this.attentionPanel?.handleInput("\r");
-        } else {
-          this.crewViewState.mode = "monitor-detail";
-          this.crewViewState.monitorDetailScroll = 0;
-          this.tui.requestRender();
+        if (this.attentionPanel && this.attentionPanel.getSelectedItem()) {
+          this.attentionPanel.handleInput("\r");
+          return true;
         }
+        this.crewViewState.mode = "monitor-detail";
+        this.crewViewState.monitorDetailScroll = 0;
+        this.tui.requestRender();
       } else if (task && this.crewViewState.mode !== "detail") {
         this.crewViewState.mode = "detail";
         this.crewViewState.detailScroll = 0;
@@ -710,7 +709,7 @@ export class MessengerOverlay implements Component, Focusable {
         const sessions = this.registry.store.list();
         this.attentionPanel.setItems(deriveAttentionItems(sessions, new Map(), new Map()));
       }
-      contentLines = renderMonitorView(this.registry, sectionW, contentHeight, this.crewViewState);
+      contentLines = renderMonitorView(this.registry, sectionW, contentHeight, this.crewViewState, this.attentionPanel);
     } else if (this.crewViewState.mode === "detail" && selectedTask) {
       contentLines = renderDetailView(this.cwd, selectedTask, sectionW, contentHeight, this.crewViewState);
     } else {
