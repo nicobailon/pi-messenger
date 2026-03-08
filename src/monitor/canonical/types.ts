@@ -11,6 +11,18 @@
  *  - Input types describe what pi-messenger runtime data looks like before mapping
  *  - Output types (CanonicalSession, SessionSections, AttentionView) are pure
  *    data — no rendering dependencies
+ *
+ * State taxonomy:
+ *  - Lifecycle state  → WHERE a session is in its execution arc
+ *                       (queued → starting → running → waiting → completed/failed/canceled)
+ *  - Health state     → HOW WELL a live/recent session is performing
+ *                       (active | idle | waiting | degraded | stuck | offline)
+ *  - Task state       → STATUS of the associated task in the task scheduler
+ *                       (pending | running | done | failed | canceled)
+ *  - Runtime status   → OS/process-level view (spawning | live | draining | terminated)
+ *
+ * These four dimensions are orthogonal: lifecycle and health are canonical outputs;
+ * task state and runtime status are informational inputs only.
  */
 
 import { z } from "zod";
@@ -20,15 +32,21 @@ import { z } from "zod";
 /**
  * Canonical session lifecycle state.
  *
- * | State     | Description                                              |
- * |-----------|----------------------------------------------------------|
- * | queued    | Session created but not yet started (pending activation) |
- * | starting  | Session is initialising (spawning process, loading tools)|
- * | running   | Session is actively executing work                       |
- * | waiting   | Session is suspended, awaiting external input            |
- * | completed | Session finished normally                                |
- * | failed    | Session terminated due to an unrecoverable error         |
- * | canceled  | Session was deliberately stopped before completion       |
+ * Represents WHERE a session is in its execution arc. Derived deterministically
+ * from `RuntimeSessionInput.status` by `mapSessionLifecycle`.
+ *
+ * | State     | Description                                              | Source status    |
+ * |-----------|----------------------------------------------------------|------------------|
+ * | queued    | Session created but not yet started (pending activation) | idle             |
+ * | starting  | Session is initialising (spawning process, loading tools)| starting         |
+ * | running   | Session is actively executing work                       | active           |
+ * | waiting   | Session is suspended, awaiting external input            | paused           |
+ * | completed | Session finished normally                                | ended            |
+ * | failed    | Session terminated due to an unrecoverable error         | error            |
+ * | canceled  | Session was deliberately stopped before completion       | canceled         |
+ *
+ * Precedence note: lifecycle is always derived solely from `status` — no other
+ * input field affects it.
  */
 export const CanonicalLifecycleStateSchema = z.enum([
   "queued",
@@ -46,14 +64,29 @@ export type CanonicalLifecycleState = z.infer<typeof CanonicalLifecycleStateSche
 /**
  * Canonical health state for a session or operator.
  *
- * | State    | Description                                               |
- * |----------|-----------------------------------------------------------|
- * | active   | Operating normally with recent activity                   |
- * | idle     | Running but no recent work (normal for queued sessions)   |
- * | waiting  | Suspended and waiting for input (mirrors lifecycle)       |
- * | degraded | Showing signs of staleness — reduced throughput           |
- * | stuck    | No progress detected for an extended period               |
- * | offline  | Session has ended or is unreachable                       |
+ * Represents HOW WELL a session is performing. Derived via a three-level
+ * precedence chain in `normalizeSession`:
+ *  1. Explicit `RuntimeHealthInput` parameter (direct mapping from HealthStatus)
+ *  2. `RuntimeSessionInput.healthStatus` field (inline health shorthand)
+ *  3. Inference from lifecycle via `inferHealthFromLifecycle` (default fallback)
+ *
+ * Direct-mapping states (from HealthStatus):
+ *
+ * | State    | Description                                               | Source health |
+ * |----------|-----------------------------------------------------------|---------------|
+ * | active   | Operating normally with recent activity                   | healthy       |
+ * | degraded | Showing signs of staleness — reduced throughput           | degraded      |
+ * | stuck    | No progress detected for an extended period               | critical      |
+ *
+ * Inference-only states (from lifecycle when no health data provided):
+ *
+ * | State    | Description                                               | Inferred from              |
+ * |----------|-----------------------------------------------------------|----------------------------|
+ * | idle     | Running but no recent work (normal for queued sessions)   | queued or starting         |
+ * | waiting  | Suspended and waiting for input (mirrors lifecycle)       | waiting                    |
+ * | offline  | Session has ended or is unreachable                       | completed, canceled, failed|
+ *
+ * Every live/runtime shape maps to exactly one health state. There are no gaps.
  */
 export const CanonicalHealthStateSchema = z.enum([
   "active",
@@ -69,6 +102,13 @@ export type CanonicalHealthState = z.infer<typeof CanonicalHealthStateSchema>;
 
 /**
  * Overall canonical monitor state across all sessions.
+ *
+ * Derived by `deriveMonitorState` using health-first priority cascade:
+ *  1. blocked          — any session health === "stuck"
+ *  2. attention_needed — any session health === "degraded" (no stuck)
+ *  3. recovering       — all sessions terminal, some failed
+ *  4. completed        — all sessions terminal, none failed
+ *  5. healthy          — default
  *
  * | State           | Description                                         |
  * |-----------------|-----------------------------------------------------|
@@ -90,21 +130,79 @@ export type CanonicalMonitorState = z.infer<typeof CanonicalMonitorStateSchema>;
 // ─── Input types for runtime mapping ─────────────────────────────────────────
 
 /**
- * Minimal runtime session data needed for lifecycle mapping.
+ * Runtime session data needed for lifecycle and health mapping.
  *
- * Accepts the legacy `SessionStatus` values from pi-messenger
- * (`idle | active | paused | ended | error`) and optional timing/counters
- * that future mappings may use for richer derivation.
+ * Accepts the full pi-messenger session status vocabulary — legacy five-state
+ * (`idle | active | paused | ended | error`) plus the two richer signals
+ * (`starting | canceled`) that carry process-level lifecycle semantics.
+ *
+ * Field precedence for health derivation in `normalizeSession`:
+ *  1. `RuntimeHealthInput` parameter (explicit, highest priority)
+ *  2. `healthStatus` field on this object (inline shorthand)
+ *  3. Inference from `lifecycle` via `inferHealthFromLifecycle` (default fallback)
+ *
+ * Field precedence note: `status` → `lifecycle` is always deterministic.
+ * `taskState` and `runtimeStatus` are carried through for logging/debugging
+ * but do NOT affect lifecycle or health mapping — those derive solely from
+ * `status` and the health sources above.
  */
 export interface RuntimeSessionInput {
   /** Session identifier (matches SessionMetadata.id) */
   id: string;
   /**
-   * Legacy status from pi-messenger `SessionStatus`.
-   * Typed as string literal union to mirror SessionStatus without a hard
-   * import cycle; mapSessionLifecycle validates exhaustively at the switch level.
+   * Session status driving lifecycle mapping.
+   *
+   * Legacy values (pi-messenger SessionStatus):
+   *   idle    → queued    | active  → running   | paused → waiting
+   *   ended   → completed | error   → failed
+   *
+   * Extended values (richer runtime signals):
+   *   starting → starting  (process is initialising before active work)
+   *   canceled → canceled  (explicit operator cancellation before completion)
+   *
+   * Typed as string literal union (not imported from SessionStatus) to avoid
+   * import cycles; mapSessionLifecycle enforces exhaustiveness at the switch.
    */
-  status: "idle" | "active" | "paused" | "ended" | "error";
+  status:
+    | "idle"
+    | "active"
+    | "paused"
+    | "ended"
+    | "error"
+    | "starting"
+    | "canceled";
+  /**
+   * Task-level state carried from the task scheduler.
+   * Informational only — does NOT influence lifecycle or health mapping.
+   * Useful for cross-referencing task graph state with session state.
+   * Distinct from `lifecycle`: a session can be `running` while its task is `pending`.
+   */
+  taskState?: "pending" | "running" | "done" | "failed" | "canceled";
+  /**
+   * Process-level runtime status (OS / subprocess view).
+   * Informational only — distinct from session lifecycle and task state.
+   * Useful for debugging spawn failures or drain timing.
+   */
+  runtimeStatus?: "spawning" | "live" | "draining" | "terminated";
+  /**
+   * Process flag: session is in the initialisation phase.
+   * Correlates with `status: "starting"`. Informational only.
+   */
+  isStarting?: boolean;
+  /**
+   * Process flag: session was explicitly canceled by the operator.
+   * Correlates with `status: "canceled"`. Informational only.
+   */
+  isCanceled?: boolean;
+  /**
+   * Inline health shorthand — the legacy HealthStatus value for this session.
+   *
+   * Used when the caller has health data co-located with session data and does
+   * not want to build a separate `RuntimeHealthInput` map.
+   *
+   * Precedence: explicit `RuntimeHealthInput` parameter > `healthStatus` > inference.
+   */
+  healthStatus?: "healthy" | "degraded" | "critical";
   /** Epoch ms when the session started (optional for queued sessions) */
   startedAt?: number;
   /** Epoch ms of last recorded activity (for staleness / stuck detection) */
@@ -118,6 +216,9 @@ export interface RuntimeSessionInput {
  *
  * Accepts the legacy `HealthStatus` values from the health monitor
  * (`healthy | degraded | critical`).
+ *
+ * When provided to `normalizeSession`, this takes the highest precedence
+ * over `RuntimeSessionInput.healthStatus` and lifecycle inference.
  */
 export interface RuntimeHealthInput {
   /** Session identifier */
@@ -154,7 +255,17 @@ export interface CanonicalSession {
  * Grouped session sections for overview display.
  *
  * Derived deterministically from `CanonicalSession.lifecycle`.
+ * Health state does NOT affect section placement.
  * Each array is a stable, ordered subset of the input list.
+ *
+ * Grouping rules:
+ *  - running:   lifecycle === "running" | "starting"
+ *  - queued:    lifecycle === "queued"
+ *  - completed: lifecycle === "completed" | "canceled"
+ *  - failed:    lifecycle === "failed"
+ *
+ * Sessions with lifecycle === "waiting" are excluded from all sections;
+ * they appear in the AttentionView instead.
  */
 export interface SessionSections {
   /** Sessions that are actively executing (lifecycle: running | starting) */
@@ -173,7 +284,12 @@ export interface SessionSections {
  * Filtered sessions needing operator attention.
  *
  * Derived deterministically from `CanonicalSession.health`.
- * `needingAttention` is the ordered union of `degraded` then `stuck`.
+ * Lifecycle state does NOT affect attention placement.
+ * `needingAttention` is the ordered union of `degraded` then `stuck`
+ * (degraded always precedes stuck for stable display ordering).
+ *
+ * Included health states: degraded, stuck
+ * Excluded health states: active, idle, waiting, offline
  */
 export interface AttentionView {
   /** Sessions with degraded health (stale / reduced throughput) */
