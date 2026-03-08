@@ -13,7 +13,35 @@ import { randomUUID } from "node:crypto";
 import type { SessionEventEmitter } from "../events/emitter.js";
 import type { SessionStore } from "../store/session-store.js";
 import type { SessionMetricsAggregator } from "../metrics/aggregator.js";
-import type { HealthStatus, HealthThresholds, HealthAlert, AlertHandler } from "./types.js";
+import type {
+  HealthStatus,
+  HealthThresholds,
+  HealthAlert,
+  AlertHandler,
+  InferredSessionState,
+  HealthExplanation,
+  HealthSignalSnapshot,
+  SessionHealthSnapshot,
+} from "./types.js";
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface SignalHistory {
+  lastHeartbeatAt: number;
+  lastOutputAt: number;
+  lastToolActivityAt: number;
+  waitingReason?: string;
+  waitingAt?: number;
+  waiting: boolean;
+  retryCount: number;
+  lastEventType?: string;
+}
+
+interface TrackedState {
+  state: InferredSessionState;
+  repeatCount: number;
+  historyCount: number;
+}
 
 // ─── Default Thresholds ──────────────────────────────────────────────────────
 
@@ -22,6 +50,9 @@ const DEFAULT_THRESHOLDS: HealthThresholds = {
   stuckAfterMs: 120_000,
   errorRateThreshold: 0.5,
 };
+
+const DEFAULT_DEGRADED_RECOVERY = "Check whether the worker is blocked on a slow tool or loop.";
+const DEFAULT_STUCK_RECOVERY = "Inspect the worker and retry if it is no longer making progress.";
 
 // ─── SessionHealthMonitor ─────────────────────────────────────────────────────
 
@@ -34,10 +65,14 @@ export class SessionHealthMonitor {
   private alertHandlers: Set<AlertHandler> = new Set();
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
 
-  /** Track last event timestamp per session (sessionId → epoch ms) */
-  private lastEventAt: Map<string, number> = new Map();
-  /** Track last emitted alert status per session to suppress duplicate alerts */
+  /** Track signal timestamps per session (sessionId → signal history) */
+  private signalHistory: Map<string, SignalHistory> = new Map();
+  /** Track deduped alert status per session to suppress duplicate alerts */
   private lastAlertStatus: Map<string, HealthStatus> = new Map();
+  /** Track current deduped non-healthy state state/repeat/history counts */
+  private trackedSessionState: Map<string, TrackedState> = new Map();
+  /** Track latest current alert for retrieval */
+  private currentAlerts: Map<string, HealthAlert> = new Map();
 
   constructor(
     store: SessionStore,
@@ -48,13 +83,60 @@ export class SessionHealthMonitor {
     this.emitter = emitter;
     this.aggregator = aggregator;
 
-    // Track last event timestamps via emitter subscription.
+    // Track stream signals via emitter subscription.
     // Exclude health.alert events (emitted by this monitor) so they don't
-    // reset the idle timer and prevent correct degraded→critical escalation.
+    // reset idle timers and pollute signal states.
     this.emitter.subscribe((event) => {
-      if (event.type !== "health.alert") {
-        this.lastEventAt.set(event.sessionId, event.timestamp);
+      if (event.type === "health.alert") {
+        return;
       }
+
+      const sessionId = event.sessionId;
+      const payload = event.payload as Record<string, unknown>;
+      const history = this.signalHistory.get(sessionId) ?? {
+        lastHeartbeatAt: event.timestamp,
+        lastOutputAt: event.timestamp,
+        lastToolActivityAt: event.timestamp,
+        waiting: false,
+        waitingReason: undefined,
+        waitingAt: undefined,
+        retryCount: 0,
+      };
+
+      history.lastHeartbeatAt = event.timestamp;
+      history.lastEventType = event.type;
+
+      if (event.type === "agent.waiting") {
+        history.waiting = true;
+        history.waitingAt = event.timestamp;
+        history.waitingReason = payload && typeof payload.reason === "string" ? payload.reason : undefined;
+      } else {
+        // Any non-waiting event indicates explicit activity and clears implicit waiting.
+        history.waiting = false;
+        history.waitingReason = undefined;
+        history.waitingAt = undefined;
+      }
+
+      if (event.type === "execution.output") {
+        history.lastOutputAt = event.timestamp;
+      }
+
+      if (event.type === "tool.call" || event.type === "tool.result") {
+        history.lastToolActivityAt = event.timestamp;
+
+        if (event.type === "tool.result") {
+          const success = (payload && payload.success === true) || false;
+          if (!success) {
+            history.retryCount += 1;
+          }
+        }
+      }
+
+      if (event.type === "session.error") {
+        history.retryCount += 1;
+      }
+
+      this.signalHistory.set(sessionId, history);
     });
   }
 
@@ -90,51 +172,93 @@ export class SessionHealthMonitor {
    * Returns the HealthStatus for the session.
    */
   checkHealth(sessionId: string): HealthStatus {
-    const session = this.store.get(sessionId);
-    if (!session) return "healthy";
-
-    // Only check active sessions
-    if (session.status !== "active") return "healthy";
-
-    const now = Date.now();
-    const lastEvent = this.lastEventAt.get(sessionId) ?? 0;
-    const idleMs = now - lastEvent;
-
-    let status: HealthStatus = "healthy";
-    let reason = "";
-
-    if (idleMs >= this.thresholds.stuckAfterMs) {
-      status = "critical";
-      reason = `Session has been stuck for ${Math.round(idleMs / 1000)}s (threshold: ${this.thresholds.stuckAfterMs / 1000}s)`;
-    } else if (idleMs >= this.thresholds.staleAfterMs) {
-      status = "degraded";
-      reason = `Session has been stale for ${Math.round(idleMs / 1000)}s (threshold: ${this.thresholds.staleAfterMs / 1000}s)`;
-    } else if (this.aggregator) {
-      const errorRate = this.aggregator.getErrorRate(sessionId);
-      if (errorRate > this.thresholds.errorRateThreshold) {
-        status = "degraded";
-        reason = `Session error rate ${(errorRate * 100).toFixed(1)}% exceeds threshold ${(this.thresholds.errorRateThreshold * 100).toFixed(1)}%`;
-      }
-    }
+    const snapshot = this.getSessionHealth(sessionId, true);
+    const status = this.toLegacyStatus(snapshot.state);
 
     if (status !== "healthy") {
-      // Deduplicate: only emit when the alert status changes for this session
-      if (this.lastAlertStatus.get(sessionId) !== status) {
+      const existing = this.currentAlerts.get(sessionId);
+      const alert: HealthAlert = {
+        sessionId,
+        status,
+        reason: snapshot.summary,
+        detectedAt: Date.now(),
+        explanation: this.toExplanation(snapshot),
+      };
+
+      if (existing) {
+        // Existing unhealthy state.
+        existing.reason = snapshot.summary;
+        existing.explanation = alert.explanation;
+
+        if (this.lastAlertStatus.get(sessionId) !== status) {
+          this.lastAlertStatus.set(sessionId, status);
+          const emitted = { ...alert };
+          this.currentAlerts.set(sessionId, emitted);
+          this.emitAlert(emitted);
+        }
+      } else {
         this.lastAlertStatus.set(sessionId, status);
-        const alert: HealthAlert = {
-          sessionId,
-          status,
-          reason,
-          detectedAt: now,
-        };
+        this.currentAlerts.set(sessionId, alert);
         this.emitAlert(alert);
       }
     } else {
-      // Reset tracking when session recovers to healthy
       this.lastAlertStatus.delete(sessionId);
+      this.currentAlerts.delete(sessionId);
     }
 
     return status;
+  }
+
+  /**
+   * Get the current inferred health snapshot for a session.
+   */
+  getSessionHealth(sessionId: string, trackState = false): SessionHealthSnapshot {
+    const session = this.store.get(sessionId);
+    if (!session) {
+      const now = Date.now();
+      return {
+        sessionId,
+        state: "healthy",
+        summary: "No session data available",
+        actionable: false,
+        recommendedAction: "Create or restore the session before health evaluation.",
+        repeatCount: 0,
+        historyCount: 0,
+        signals: {
+          idleMs: 0,
+          lastHeartbeatAt: now,
+          lastOutputAt: now,
+          lastToolActivityAt: now,
+          retryCount: 0,
+          waiting: false,
+          errorRate: 0,
+        },
+      };
+    }
+
+    const signals = this.readSignals(session, sessionId);
+    const now = Date.now();
+    const state = this.inferState(session, signals, now);
+
+    const tracked = this.trackedSessionState.get(sessionId) ?? {
+      state: "healthy",
+      repeatCount: 0,
+      historyCount: 0,
+    };
+
+    const updated = this.adjustStateCounts(tracked, state);
+    this.trackedSessionState.set(sessionId, updated);
+
+    const snapshot = this.buildSnapshot(session, state, signals, now, updated.repeatCount, updated.historyCount);
+
+    return snapshot;
+  }
+
+  /**
+   * Return the latest emitted health alert for a session, if any.
+   */
+  getAlert(sessionId: string): HealthAlert | undefined {
+    return this.currentAlerts.get(sessionId);
   }
 
   /**
@@ -163,6 +287,195 @@ export class SessionHealthMonitor {
     for (const session of activeSessions) {
       this.checkHealth(session.metadata.id);
     }
+  }
+
+  private isWaitingState(sessionStatus: string, signals: SignalHistory): boolean {
+    if (sessionStatus === "paused") return true;
+    return signals.waiting && sessionStatus === "active";
+  }
+
+  private inferState(
+    session: { status: string; metadata: { startedAt: string } },
+    signals: SignalHistory,
+    now: number,
+  ): InferredSessionState {
+    if (session.status === "idle") {
+      return "idle";
+    }
+
+    if (session.status === "paused") {
+      return "waiting";
+    }
+
+    if (session.status !== "active") {
+      return "healthy";
+    }
+
+    if (this.isWaitingState(session.status, signals)) {
+      return "waiting";
+    }
+
+    const idleMs = Math.max(0, now - signals.lastHeartbeatAt);
+    const errorRate = this.aggregator?.getErrorRate(session.metadata.id) ?? 0;
+
+    if (idleMs >= this.thresholds.stuckAfterMs) {
+      return "stuck";
+    }
+
+    if (idleMs >= this.thresholds.staleAfterMs) {
+      return "degraded";
+    }
+
+    if (errorRate > this.thresholds.errorRateThreshold) {
+      return "degraded";
+    }
+
+    return "healthy";
+  }
+
+  private adjustStateCounts(previous: TrackedState, nextState: InferredSessionState): TrackedState {
+    const previousUnhealthy = this.isUnhealthyState(previous.state);
+    const nextUnhealthy = this.isUnhealthyState(nextState);
+
+    if (nextState === previous.state) {
+      return {
+        state: nextState,
+        repeatCount: previous.repeatCount + 1,
+        historyCount: previous.historyCount,
+      };
+    }
+
+    if (nextUnhealthy) {
+      if (previousUnhealthy) {
+        return {
+          state: nextState,
+          repeatCount: 1,
+          historyCount: previous.historyCount + 1,
+        };
+      }
+
+      return {
+        state: nextState,
+        repeatCount: 1,
+        historyCount: 1,
+      };
+    }
+
+    if (previousUnhealthy) {
+      return {
+        state: nextState,
+        repeatCount: 1,
+        historyCount: previous.historyCount,
+      };
+    }
+
+    return {
+      state: nextState,
+      repeatCount: previous.state === nextState ? previous.repeatCount + 1 : 1,
+      historyCount: 0,
+    };
+  }
+
+  private isUnhealthyState(state: InferredSessionState): boolean {
+    return state === "degraded" || state === "stuck";
+  }
+
+  private toLegacyStatus(state: InferredSessionState): HealthStatus {
+    if (state === "stuck") return "critical";
+    if (state === "degraded") return "degraded";
+    return "healthy";
+  }
+
+  private buildSnapshot(
+    session: { metadata: { id: string; startedAt: string } },
+    state: InferredSessionState,
+    signals: SignalHistory,
+    now: number,
+    repeatCount: number,
+    historyCount: number,
+  ): SessionHealthSnapshot {
+    const ageMs = Math.max(0, now - signals.lastHeartbeatAt);
+    const errorRate = this.aggregator?.getErrorRate(session.metadata.id) ?? 0;
+    let summary = "Session is healthy";
+    let actionable = false;
+    let recommendedAction = "Session is operating normally.";
+
+    if (state === "waiting") {
+      summary = signals.waitingReason
+        ? `Session is waiting: ${signals.waitingReason}`
+        : "Session is waiting for operator action";
+    } else if (state === "idle") {
+      summary = "Session is idle";
+    } else if (state === "stuck") {
+      actionable = true;
+      summary = `Session has been stuck for ${Math.round(ageMs / 1000)}s with no progress.`;
+      recommendedAction = DEFAULT_STUCK_RECOVERY;
+    } else if (state === "degraded") {
+      actionable = true;
+      if (errorRate > this.thresholds.errorRateThreshold) {
+        summary = `Session error rate ${(errorRate * 100).toFixed(1)}% exceeds threshold ${(this.thresholds.errorRateThreshold * 100).toFixed(1)}%`;
+      } else {
+        summary = `Session has been stale for ${Math.round(ageMs / 1000)}s with no recent output.`;
+      }
+      recommendedAction = DEFAULT_DEGRADED_RECOVERY;
+    }
+
+    const healthSignals: HealthSignalSnapshot = {
+      idleMs: ageMs,
+      lastHeartbeatAt: signals.lastHeartbeatAt,
+      lastOutputAt: signals.lastOutputAt,
+      lastToolActivityAt: signals.lastToolActivityAt,
+      retryCount: signals.retryCount,
+      waiting: signals.waiting,
+      errorRate,
+    };
+
+    return {
+      sessionId: session.metadata.id,
+      state,
+      summary,
+      actionable,
+      recommendedAction,
+      repeatCount,
+      historyCount,
+      signals: healthSignals,
+    };
+  }
+
+  private toExplanation(snapshot: SessionHealthSnapshot): HealthExplanation {
+    return {
+      state: snapshot.state,
+      summary: snapshot.summary,
+      actionable: snapshot.actionable,
+      recommendedAction: snapshot.recommendedAction,
+      repeatCount: snapshot.repeatCount,
+      historyCount: snapshot.historyCount,
+      signals: snapshot.signals,
+    };
+  }
+
+  private readSignals(session: { status: string; metadata: { startedAt: string } }, sessionId: string): SignalHistory {
+    const existing = this.signalHistory.get(sessionId);
+    const startedAt = Date.parse(session.metadata.startedAt);
+
+    if (existing) {
+      return {
+        ...existing,
+        lastHeartbeatAt: existing.lastHeartbeatAt || startedAt,
+        lastOutputAt: existing.lastOutputAt || startedAt,
+        lastToolActivityAt: existing.lastToolActivityAt || startedAt,
+      };
+    }
+
+    return {
+      lastHeartbeatAt: startedAt,
+      lastOutputAt: startedAt,
+      lastToolActivityAt: startedAt,
+      waiting: false,
+      waitingReason: undefined,
+      waitingAt: undefined,
+      retryCount: 0,
+    };
   }
 
   private emitAlert(alert: HealthAlert): void {
