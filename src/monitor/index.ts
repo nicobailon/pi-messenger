@@ -66,7 +66,6 @@ export {
 
 // UI rendering components — export selectively to avoid re-exporting HealthStatus
 // (already exported by health/index.js above).
-export { SessionMonitorPanel, type SessionMonitorPanelOptions } from "./ui/panel.js";
 export { AttentionQueuePanel, type AttentionQueuePanelOptions } from "./ui/attention.js";
 export {
   renderSessionRow,

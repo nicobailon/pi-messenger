@@ -1,4 +1,3 @@
-export { SessionMonitorPanel, type SessionMonitorPanelOptions } from "./panel.js";
 export {
   renderSessionRow,
   renderStatusBadge,

@@ -11,8 +11,7 @@
  * 7. Failed and queued rows show concise reason summaries when available
  */
 
-import { describe, it, expect, vi } from "vitest";
-import { SessionMonitorPanel } from "../../../src/monitor/ui/panel.js";
+import { describe, it, expect } from "vitest";
 import {
   renderGroupedSessions,
   groupSessionsByLifecycle,
@@ -221,83 +220,6 @@ describe("renderGroupedSessions", () => {
     // Both should be different because selection changes content
     expect(lines0.some((l) => l.includes(">"))).toBe(true);
     expect(lines1.some((l) => l.includes(">"))).toBe(true);
-  });
-});
-
-// ─── SessionMonitorPanel with grouped sections ────────────────────────────────
-
-describe("SessionMonitorPanel with grouped sections", () => {
-  it("renders grouped sections when sessions are set", () => {
-    const panel = new SessionMonitorPanel();
-    const sessions = [
-      makeSession({ status: "active", metadata: makeMetadata({ name: "Active" }) }),
-      makeSession({ status: "ended", metadata: makeMetadata({ name: "Ended" }) }),
-    ];
-
-    panel.setSessions(sessions);
-    const output = panel.render(100);
-    const text = output.join("\n");
-
-    expect(text).toContain("Running");
-    expect(text).toContain("Completed");
-    expect(text).toContain("Active");
-    expect(text).toContain("Ended");
-  });
-
-  it("supports navigation across all sessions regardless of section", () => {
-    const panel = new SessionMonitorPanel();
-    const s1 = makeSession({
-      status: "active",
-      metadata: makeMetadata({ name: "S1" }),
-    });
-    const s2 = makeSession({
-      status: "paused",
-      metadata: makeMetadata({ name: "S2" }),
-    });
-    const s3 = makeSession({
-      status: "ended",
-      metadata: makeMetadata({ name: "S3" }),
-    });
-
-    panel.setSessions([s1, s2, s3]);
-
-    // Start at index 0
-    expect(panel.getSelectedSession()?.metadata.name).toBe("S1");
-
-    // Navigate down across sections
-    panel.handleInput("down");
-    expect(panel.getSelectedSession()?.metadata.name).toBe("S2");
-
-    panel.handleInput("down");
-    expect(panel.getSelectedSession()?.metadata.name).toBe("S3");
-  });
-
-  it("supports Enter key to open detail view via callback", () => {
-    const panel = new SessionMonitorPanel();
-    const session = makeSession({ status: "active" });
-    panel.setSessions([session]);
-
-    let selectedSession: SessionState | null = null;
-    const onSelect = vi.fn((sess: SessionState) => {
-      selectedSession = sess;
-    });
-
-    panel.onSelect(onSelect);
-    panel.handleInput("enter");
-
-    expect(onSelect).toHaveBeenCalled();
-    expect(selectedSession).toEqual(session);
-  });
-
-  it("Enter does nothing if no session is selected", () => {
-    const panel = new SessionMonitorPanel();
-    panel.setSessions([]);
-
-    const onSelect = vi.fn();
-    panel.onSelect(onSelect);
-    panel.handleInput("enter");
-
-    expect(onSelect).not.toHaveBeenCalled();
   });
 });
 
