@@ -494,6 +494,7 @@ export function renderLegend(
   viewState: CrewViewState,
   task: Task | null,
   scrollLocked?: boolean,
+  registry?: MonitorRegistry,
 ): string {
   // Scroll lock indicator prefix
   const scrollPrefix = scrollLocked ? theme.fg("warning", "📌 PINNED ") : "";
@@ -523,6 +524,23 @@ export function renderLegend(
       return truncateToWidth(appendUniversalHints(viewState.notification.message), width);
     }
     viewState.notification = null;
+  }
+
+  if (viewState.mode === "monitor-detail") {
+    if (viewState.confirmAction?.type === "end-session") {
+      const text = renderConfirmBar(viewState.confirmAction.taskId, viewState.confirmAction.label, "end-session");
+      return truncateToWidth(theme.fg("warning", appendUniversalHints(text)), width);
+    }
+    const hints: string[] = [];
+    const sessions = registry?.store.list() ?? [];
+    const session = sessions[viewState.monitorSelectedIndex];
+    if (session) {
+      if (session.status === "active") hints.push("p:Pause");
+      else if (session.status === "paused") hints.push("p:Resume");
+      if (session.status !== "ended" && session.status !== "error") hints.push("e:End");
+    }
+    hints.push("i:Inspect", "↑↓:Scroll", "Esc:Back");
+    return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(hints.join("  "))), width);
   }
 
   if (viewState.mode === "detail" && task) {
@@ -779,8 +797,9 @@ function renderListStatusBar(cwd: string, task: Task): string {
   return hints.join("  ");
 }
 
-function renderConfirmBar(taskId: string, label: string, type: "reset" | "cascade-reset" | "delete" | "cancel-planning"): string {
+function renderConfirmBar(taskId: string, label: string, type: "reset" | "cascade-reset" | "delete" | "cancel-planning" | "end-session"): string {
   if (type === "cancel-planning") return "⚠ Cancel planning? [y] Confirm  [n] Cancel";
+  if (type === "end-session") return `⚠ End session "${label}"? [y] Confirm  [n] Cancel`;
   if (type === "reset") return `⚠ Reset ${taskId} \"${label}\"? [y] Confirm  [n] Cancel`;
   if (type === "cascade-reset") return `⚠ Cascade reset ${taskId} and dependents? [y] Confirm  [n] Cancel`;
   return `⚠ Delete ${taskId} \"${label}\"? [y] Confirm  [n] Cancel`;

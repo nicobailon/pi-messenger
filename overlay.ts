@@ -40,6 +40,7 @@ import {
   handleMessageInput,
   handleRevisePromptInput,
   handleCrewKeyBinding,
+  handleMonitorDetailKeyBinding,
   setNotification,
   type CrewViewState,
 } from "./overlay-actions.js";
@@ -249,7 +250,7 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     if (this.crewViewState.confirmAction) {
-      handleConfirmInput(data, this.crewViewState, this.cwd, this.state.agentName, this.tui);
+      handleConfirmInput(data, this.crewViewState, this.cwd, this.state.agentName, this.tui, this.registry);
       return;
     }
 
@@ -470,6 +471,11 @@ export class MessengerOverlay implements Component, Focusable {
         this.tui.requestRender();
         return;
       }
+    }
+
+    if (this.crewViewState.mode === "monitor-detail") {
+      handleMonitorDetailKeyBinding(data, this.crewViewState, this.registry, this.tui);
+      return;
     }
 
     if (task) {
@@ -740,7 +746,7 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     lines.push(border("├" + "─".repeat(innerW) + "┤"));
-    lines.push(row(renderLegend(this.theme, this.cwd, sectionW, this.crewViewState, selectedTask, this.crewViewState.scrollLocked)));
+    lines.push(row(renderLegend(this.theme, this.cwd, sectionW, this.crewViewState, selectedTask, this.crewViewState.scrollLocked, this.registry)));
     lines.push(border("╰" + "─".repeat(innerW) + "╯"));
 
     if (allEvents.length > 0) {
