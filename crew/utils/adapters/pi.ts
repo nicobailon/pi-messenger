@@ -6,7 +6,7 @@
  * agents.ts and lobby.ts into a single reusable adapter.
  */
 
-import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../../agents.js";
+import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../model.js";
 import { parseJsonlLine, type PiEvent } from "../progress.js";
 import type {
   RuntimeAdapter,

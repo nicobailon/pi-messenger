@@ -15,10 +15,12 @@ import { truncateOutput } from "./utils/truncate.js";
 import {
   createProgress,
   parseJsonlLine,
-  updateProgress,
+  updateProgressFromEvent,
   getFinalOutput,
   type PiEvent,
 } from "./utils/progress.js";
+import { buildRuntimeSpawn } from "./runtime-spawn.js";
+import { resolveRuntime } from "./utils/adapters/index.js";
 import {
   getArtifactPaths,
   ensureArtifactsDir,
@@ -32,11 +34,19 @@ import { autonomousState, waitForConcurrencyChange } from "./state.js";
 import { registerWorker, unregisterWorker, killAll } from "./registry.js";
 import type { AgentTask, AgentResult } from "./types.js";
 import { generateMemorableName } from "../lib.js";
+import {
+  pushModelArgs,
+  resolveModel,
+  resolveThinking,
+  modelHasThinkingSuffix,
+} from "./utils/model.js";
+
+// Re-export for backward compatibility (tests, lobby.ts, collab.ts import from here)
+export { pushModelArgs, resolveModel, resolveThinking, modelHasThinkingSuffix };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const EXTENSION_DIR = path.resolve(__dirname, "..");
-const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
 export interface SpawnOptions {
   onProgress?: (results: AgentResult[]) => void;
@@ -47,42 +57,6 @@ export interface SpawnOptions {
 
 export function shutdownAllWorkers(): void {
   killAll();
-}
-
-export function resolveModel(
-  taskModel?: string,
-  paramModel?: string,
-  configModel?: string,
-  agentModel?: string,
-): string | undefined {
-  return taskModel ?? paramModel ?? configModel ?? agentModel;
-}
-
-export function pushModelArgs(args: string[], model: string): void {
-  const slashIdx = model.indexOf("/");
-  if (slashIdx !== -1) {
-    args.push("--provider", model.substring(0, slashIdx), "--model", model.substring(slashIdx + 1));
-  } else {
-    args.push("--model", model);
-  }
-}
-
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
-
-export function resolveThinking(
-  configThinking?: string,
-  agentThinking?: string,
-): string | undefined {
-  const resolved = configThinking ?? agentThinking;
-  if (!resolved || resolved === "off") return undefined;
-  return resolved;
-}
-
-export function modelHasThinkingSuffix(model: string | undefined): boolean {
-  if (!model) return false;
-  const colonIdx = model.lastIndexOf(":");
-  if (colonIdx === -1) return false;
-  return THINKING_LEVELS.has(model.substring(colonIdx + 1));
 }
 
 export function raceTimeout(promise: Promise<void>, ms: number): Promise<boolean> {
@@ -201,63 +175,50 @@ async function runAgent(
   }
 
   return new Promise((resolve) => {
-    // Build args for pi command
-    const args = ["--mode", "json", "--no-session", "-p"];
+    // Build spawn args via runtime adapter (V1.6 — unified spawn engine)
+    const runtime = resolveRuntime(config, role);
     const model = task.modelOverride ?? config.models?.[role] ?? agentConfig?.model;
-    if (model) pushModelArgs(args, model);
-
     const thinking = resolveThinking(
       config.thinking?.[role],
       agentConfig?.thinking,
     );
-    if (thinking && !modelHasThinkingSuffix(model)) {
-      args.push("--thinking", thinking);
-    }
-
-    if (agentConfig?.tools?.length) {
-      const builtinTools: string[] = [];
-      const extensionPaths: string[] = [];
-      for (const tool of agentConfig.tools) {
-        if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
-          extensionPaths.push(tool);
-        } else if (BUILTIN_TOOLS.has(tool)) {
-          builtinTools.push(tool);
-        }
-      }
-
-      if (builtinTools.length > 0) {
-        args.push("--tools", builtinTools.join(","));
-      }
-      for (const extensionPath of extensionPaths) {
-        args.push("--extension", extensionPath);
-      }
-    }
-
-    // Pass extension so workers can use pi_messenger
-    args.push("--extension", EXTENSION_DIR);
 
     let promptTmpDir: string | null = null;
+    let systemPromptPath: string | undefined;
     if (agentConfig?.systemPrompt) {
       promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-agent-"));
-      const promptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.md`);
-      fs.writeFileSync(promptPath, agentConfig.systemPrompt, { mode: 0o600 });
-      args.push("--append-system-prompt", promptPath);
+      systemPromptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.md`);
+      fs.writeFileSync(systemPromptPath, agentConfig.systemPrompt, { mode: 0o600 });
     }
 
-    args.push(task.task);
+    const spawnResult = buildRuntimeSpawn(
+      runtime,
+      { prompt: task.task, systemPromptPath },
+      {
+        model,
+        thinking,
+        tools: agentConfig?.tools,
+        extensionDir: EXTENSION_DIR,
+      },
+      (() => {
+        const envOverrides = config.work.env ?? {};
+        const workerFlag = role === "worker"
+          ? { PI_CREW_WORKER: "1", PI_AGENT_NAME: workerName }
+          : {};
+        return { ...process.env as Record<string, string>, ...envOverrides, ...workerFlag };
+      })(),
+    );
 
-    const envOverrides = config.work.env ?? {};
-    const workerFlag = role === "worker"
-      ? { PI_CREW_WORKER: "1", PI_AGENT_NAME: workerName }
-      : {};
-    const env = Object.keys(envOverrides).length > 0 || role === "worker"
-      ? { ...process.env, ...envOverrides, ...workerFlag }
-      : undefined;
+    // R5 compliance: log warnings for unsupported features
+    for (const warning of spawnResult.warnings) {
+      // Will be wired to logFeedEvent when feed is available in this context
+      console.warn(`[crew] ${warning}`);
+    }
 
-    const proc = spawn("pi", args, {
+    const proc = spawn(spawnResult.command, spawnResult.args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      ...(env ? { env } : {}),
+      env: spawnResult.env,
     });
     if (task.taskId) {
       registerWorker({ type: "worker", proc, name: workerName, cwd, taskId: task.taskId });
@@ -275,26 +236,31 @@ async function runAgent(
         jsonlBuffer = lines.pop() ?? "";
 
         for (const line of lines) {
-          const event = parseJsonlLine(line);
-          if (event) {
-            events.push(event);
-            updateProgress(progress, event, startTime);
-            if (artifactPaths) {
-              try { appendJsonl(artifactPaths.jsonlPath, line); }
-              catch { artifactPaths = undefined; }
-            }
-            if (task.taskId) {
-              updateLiveWorker(cwd, task.taskId, {
-                taskId: task.taskId,
-                agent: task.agent,
-                name: workerName,
-                progress: {
-                  ...progress,
-                  recentTools: progress.recentTools.map(tool => ({ ...tool })),
-                },
-                startedAt: startTime,
-              });
-            }
+          // Store raw events for getFinalOutput (pi-specific, needed for output extraction)
+          const rawEvent = parseJsonlLine(line);
+          if (rawEvent) events.push(rawEvent);
+
+          // Use adapter for normalized progress tracking
+          const progressEvent = spawnResult.adapter.parseProgressEvent(line);
+          if (progressEvent) {
+            updateProgressFromEvent(progress, progressEvent, startTime);
+          }
+
+          if (rawEvent && artifactPaths) {
+            try { appendJsonl(artifactPaths.jsonlPath, line); }
+            catch { artifactPaths = undefined; }
+          }
+          if ((rawEvent || progressEvent) && task.taskId) {
+            updateLiveWorker(cwd, task.taskId, {
+              taskId: task.taskId,
+              agent: task.agent,
+              name: workerName,
+              progress: {
+                ...progress,
+                recentTools: progress.recentTools.map(tool => ({ ...tool })),
+              },
+              startedAt: startTime,
+            });
           }
         }
       } catch {}

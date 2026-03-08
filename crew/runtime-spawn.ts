@@ -25,11 +25,17 @@ export interface RuntimeSpawnArgs {
  * Build everything needed to spawn a worker for any supported runtime.
  * Both agents.ts and lobby.ts call this instead of hardcoding pi args.
  */
+export interface BuildRuntimeSpawnOptions {
+  /** Skip the `which` check for the runtime command (useful in tests) */
+  skipCommandCheck?: boolean;
+}
+
 export function buildRuntimeSpawn(
   runtime: string,
   task: SpawnTask,
   config: AdapterConfig,
   baseEnv: Record<string, string>,
+  options?: BuildRuntimeSpawnOptions,
 ): RuntimeSpawnArgs {
   if (!RUNTIME_ALLOWLIST.has(runtime)) {
     throw new Error(`Unknown runtime "${runtime}". Allowed: ${[...RUNTIME_ALLOWLIST].join(", ")}`);
@@ -37,7 +43,11 @@ export function buildRuntimeSpawn(
 
   const adapter = getAdapter(runtime);
   const command = adapter.getCommand();
-  validateCommandAvailable(command);
+  // Skip validation for "pi" — pi-messenger is always loaded from within pi.
+  // Non-pi runtimes get validated to fail fast with install instructions.
+  if (runtime !== "pi" && !options?.skipCommandCheck) {
+    validateCommandAvailable(command);
+  }
 
   // R5 compliance: build explicit warnings for unsupported features
   const warnings: string[] = [];

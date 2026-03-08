@@ -13,14 +13,15 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { generateMemorableName } from "../lib.js";
-import { resolveThinking, modelHasThinkingSuffix, pushModelArgs } from "./agents.js";
+import { resolveThinking } from "./utils/model.js";
 import { discoverCrewAgents } from "./utils/discover.js";
 import { loadCrewConfig, type CrewConfig } from "./utils/config.js";
 import {
   createProgress,
-  parseJsonlLine,
-  updateProgress,
+  updateProgressFromEvent,
 } from "./utils/progress.js";
+import { buildRuntimeSpawn } from "./runtime-spawn.js";
+import { resolveRuntime } from "./utils/adapters/index.js";
 import { updateLiveWorker, removeLiveWorker } from "./live-progress.js";
 import * as store from "./store.js";
 import { logFeedEvent } from "../feed.js";
@@ -36,8 +37,6 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const EXTENSION_DIR = path.resolve(__dirname, "..");
-const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
-
 export const LOBBY_TOKEN_BUDGETS: Record<string, number> = {
   none: 10_000,
   minimal: 20_000,
@@ -68,51 +67,43 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   }
   const prompt = promptOverride ?? buildLobbyPrompt(cwd, config);
 
-  const args = ["--mode", "json", "--no-session", "-p"];
+  // Build spawn args via runtime adapter (V1.7 — unified spawn engine)
+  const runtime = resolveRuntime(config, "worker");
   const model = config.models?.worker ?? workerConfig.model;
-  if (model) pushModelArgs(args, model);
-
   const thinking = resolveThinking(
     config.thinking?.worker,
     workerConfig.thinking,
   );
-  if (thinking && !modelHasThinkingSuffix(model)) {
-    args.push("--thinking", thinking);
-  }
-
-  if (workerConfig.tools?.length) {
-    const builtinTools: string[] = [];
-    const extensionPaths: string[] = [];
-    for (const tool of workerConfig.tools) {
-      if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
-        extensionPaths.push(tool);
-      } else if (BUILTIN_TOOLS.has(tool)) {
-        builtinTools.push(tool);
-      }
-    }
-    if (builtinTools.length > 0) args.push("--tools", builtinTools.join(","));
-    for (const ext of extensionPaths) args.push("--extension", ext);
-  }
-
-  args.push("--extension", EXTENSION_DIR);
 
   let promptTmpDir: string | null = null;
+  let systemPromptPath: string | undefined;
   if (workerConfig.systemPrompt) {
     promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-lobby-"));
-    const promptPath = path.join(promptTmpDir, "crew-worker.md");
-    fs.writeFileSync(promptPath, workerConfig.systemPrompt, { mode: 0o600 });
-    args.push("--append-system-prompt", promptPath);
+    systemPromptPath = path.join(promptTmpDir, "crew-worker.md");
+    fs.writeFileSync(systemPromptPath, workerConfig.systemPrompt, { mode: 0o600 });
   }
 
-  args.push(prompt);
+  const spawnResult = buildRuntimeSpawn(
+    runtime,
+    { prompt, systemPromptPath },
+    {
+      model,
+      thinking,
+      tools: workerConfig.tools,
+      extensionDir: EXTENSION_DIR,
+    },
+    { ...process.env as Record<string, string>, ...(config.work.env ?? {}), PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id },
+  );
 
-  const envOverrides = config.work.env ?? {};
-  const env = { ...process.env, ...envOverrides, PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id };
+  // R5 compliance: log warnings for unsupported features
+  for (const warning of spawnResult.warnings) {
+    logFeedEvent(cwd, "system", warning);
+  }
 
-  const proc = spawn("pi", args, {
+  const proc = spawn(spawnResult.command, spawnResult.args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
-    env,
+    env: spawnResult.env,
   });
 
   const aliveFile = path.join(crewDir, `lobby-${id}.alive`);
@@ -144,9 +135,10 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
       const lines = jsonlBuffer.split("\n");
       jsonlBuffer = lines.pop() ?? "";
       for (const line of lines) {
-        const event = parseJsonlLine(line);
-        if (event) {
-          updateProgress(progress, event, worker.startedAt);
+        // Use adapter for normalized progress tracking
+        const progressEvent = spawnResult.adapter.parseProgressEvent(line);
+        if (progressEvent) {
+          updateProgressFromEvent(progress, progressEvent, worker.startedAt);
           const displayId = worker.assignedTaskId ?? taskId;
           updateLiveWorker(cwd, displayId, {
             taskId: displayId,
