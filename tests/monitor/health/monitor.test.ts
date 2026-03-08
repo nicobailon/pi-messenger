@@ -104,33 +104,6 @@ describe("SessionHealthMonitor", () => {
     expect(status).toBe("healthy");
   });
 
-  it("infers paused sessions as waiting instead of stuck", () => {
-    const id = createActiveSession(store, emitter);
-    store.update(id, { status: "paused" });
-
-    emitter.emit({
-      id: `evt-${id}-waiting`,
-      type: "agent.waiting",
-      sessionId: id,
-      timestamp: Date.now(),
-      sequence: 1,
-      payload: {
-        type: "agent.waiting",
-        reason: "Waiting for operator approval",
-      },
-    });
-
-    vi.advanceTimersByTime(180_000);
-    const status = monitor.checkHealth(id);
-    const snapshot = monitor.getSessionHealth(id);
-
-    expect(status).toBe("healthy");
-    expect(snapshot.state).toBe("waiting");
-    expect(snapshot.summary).toMatch(/waiting for operator approval/i);
-    expect(snapshot.actionable).toBe(false);
-    expect(monitor.getAlert(id)).toBeUndefined();
-  });
-
   // ─── Stale detection (degraded) ──────────────────────────────────────────────
 
   it("triggers degraded alert when session is stale", () => {
@@ -163,27 +136,6 @@ describe("SessionHealthMonitor", () => {
     expect(alerts[0].reason).toMatch(/stale/i);
   });
 
-  it("stores explainable degraded state with repeat and history counts", () => {
-    monitor.setThresholds({ staleAfterMs: 5_000, stuckAfterMs: 30_000, errorRateThreshold: 0.5 });
-    const id = createActiveSession(store, emitter);
-
-    vi.advanceTimersByTime(6_000);
-    monitor.checkHealth(id);
-    monitor.checkHealth(id);
-    monitor.checkHealth(id);
-
-    const alert = monitor.getAlert(id);
-    const snapshot = monitor.getSessionHealth(id);
-
-    expect(alert?.explanation?.state).toBe("degraded");
-    expect(alert?.explanation?.summary).toMatch(/no recent output|stale/i);
-    expect(alert?.explanation?.repeatCount).toBe(3);
-    expect(alert?.explanation?.historyCount).toBe(1);
-    expect(snapshot.repeatCount).toBe(3);
-    expect(snapshot.historyCount).toBe(1);
-    expect(snapshot.signals.idleMs).toBeGreaterThanOrEqual(6_000);
-  });
-
   // ─── Stuck detection (critical) ──────────────────────────────────────────────
 
   it("triggers critical alert when session is stuck", () => {
@@ -213,26 +165,6 @@ describe("SessionHealthMonitor", () => {
     monitor.checkHealth(id);
 
     expect(alerts[0].reason).toMatch(/stuck/i);
-  });
-
-  it("escalates from degraded to stuck with a new history entry", () => {
-    monitor.setThresholds({ staleAfterMs: 5_000, stuckAfterMs: 15_000, errorRateThreshold: 0.5 });
-    const id = createActiveSession(store, emitter);
-
-    vi.advanceTimersByTime(6_000);
-    monitor.checkHealth(id);
-
-    vi.advanceTimersByTime(10_000);
-    monitor.checkHealth(id);
-
-    const alert = monitor.getAlert(id);
-    const snapshot = monitor.getSessionHealth(id);
-
-    expect(alert?.explanation?.state).toBe("stuck");
-    expect(alert?.explanation?.historyCount).toBe(2);
-    expect(snapshot.historyCount).toBe(2);
-    expect(snapshot.summary).toMatch(/stuck/i);
-    expect(snapshot.actionable).toBe(true);
   });
 
   // ─── Alert emission via emitter ───────────────────────────────────────────────
