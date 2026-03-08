@@ -2,7 +2,7 @@
 name: crew-worker
 description: Implements a single crew task with mesh coordination
 tools: read, write, edit, bash, pi_messenger
-model: anthropic/claude-haiku-4-5
+model: anthropic/claude-opus-4-6
 crewRole: worker
 maxOutput: { bytes: 204800, lines: 5000 }
 parallel: true

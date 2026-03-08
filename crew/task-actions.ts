@@ -7,6 +7,7 @@ import type { Task } from "./types.js";
 export type TaskAction = "start" | "block" | "unblock" | "reset" | "cascade-reset" | "delete" | "stop";
 
 export interface TaskActionOptions {
+  force?: boolean;
   isWorkerActive?: (taskId: string) => boolean;
   namespace?: string;
 }
@@ -86,6 +87,11 @@ export function executeTaskAction(
     case "reset": {
       const resetTasks = store.resetTask(cwd, taskId, false);
       if (resetTasks.length === 0) return { success: false, error: "reset_failed", message: `Failed to reset ${taskId}` };
+      if (options?.force) {
+        for (const t of resetTasks) {
+          store.updateTask(cwd, t.id, { attempt_count: 0, spawn_failure_count: 0 });
+        }
+      }
       logFeedEvent(cwd, agentName, "task.reset", taskId, task.title);
       return { success: true, message: `Reset ${taskId}`, resetTasks };
     }
@@ -93,6 +99,11 @@ export function executeTaskAction(
     case "cascade-reset": {
       const resetTasks = store.resetTask(cwd, taskId, true);
       if (resetTasks.length === 0) return { success: false, error: "reset_failed", message: `Failed to reset ${taskId}` };
+      if (options?.force) {
+        for (const t of resetTasks) {
+          store.updateTask(cwd, t.id, { attempt_count: 0, spawn_failure_count: 0 });
+        }
+      }
       logFeedEvent(cwd, agentName, "task.reset", taskId, `cascade (${resetTasks.length} tasks)`);
       return { success: true, message: `Reset ${taskId} + ${Math.max(0, resetTasks.length - 1)} dependents`, resetTasks };
     }

@@ -126,7 +126,7 @@ export interface CrewParams {
 
   // Task reset
   cascade?: boolean;
-
+  force?: boolean;
   // Revision
   prompt?: string;
 

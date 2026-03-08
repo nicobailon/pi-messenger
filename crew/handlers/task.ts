@@ -678,8 +678,9 @@ function taskReset(cwd: string, params: CrewParams, state: MessengerState, names
   }
 
   const cascade = params.cascade ?? false;
+  const force = params.force ?? false;
   const action = cascade ? "cascade-reset" : "reset";
-  const actionResult = executeTaskAction(cwd, action, id, state.agentName || "unknown", undefined, { namespace });
+  const actionResult = executeTaskAction(cwd, action, id, state.agentName || "unknown", undefined, { namespace, force });
   if (!actionResult.success) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.reset",

@@ -150,6 +150,60 @@ describe("crew/task-actions", () => {
     expect(progress).toContain("Worker stopped by user");
   });
 
+  it("reset with force zeroes attempt_count and spawn_failure_count", () => {
+    const { cwd } = createTempCrewDirs();
+    store.createPlan(cwd, "docs/PRD.md");
+    const task = store.createTask(cwd, "Task", "Desc");
+    store.startTask(cwd, task.id, "AgentA");
+    // Simulate multiple attempts and spawn failures
+    store.updateTask(cwd, task.id, { attempt_count: 5, spawn_failure_count: 3, status: "blocked" as any });
+
+    const result = executeTaskAction(cwd, "reset", task.id, "AgentA", undefined, { force: true });
+
+    expect(result.success).toBe(true);
+    const updated = store.getTask(cwd, task.id);
+    expect(updated?.attempt_count).toBe(0);
+    expect(updated?.spawn_failure_count).toBe(0);
+    expect(updated?.status).toBe("todo");
+  });
+
+  it("reset without force preserves attempt_count and spawn_failure_count", () => {
+    const { cwd } = createTempCrewDirs();
+    store.createPlan(cwd, "docs/PRD.md");
+    const task = store.createTask(cwd, "Task", "Desc");
+    store.startTask(cwd, task.id, "AgentA");
+    store.updateTask(cwd, task.id, { attempt_count: 5, spawn_failure_count: 3, status: "blocked" as any });
+
+    const result = executeTaskAction(cwd, "reset", task.id, "AgentA");
+
+    expect(result.success).toBe(true);
+    const updated = store.getTask(cwd, task.id);
+    expect(updated?.attempt_count).toBe(5);
+    expect(updated?.spawn_failure_count).toBe(3);
+  });
+
+  it("cascade-reset with force zeroes attempt_count and spawn_failure_count on all reset tasks", () => {
+    const { cwd } = createTempCrewDirs();
+    store.createPlan(cwd, "docs/PRD.md");
+    const dep = store.createTask(cwd, "Dep", "Desc");
+    const task = store.createTask(cwd, "Main", "Desc", [dep.id]);
+    store.startTask(cwd, dep.id, "AgentA");
+    store.updateTask(cwd, dep.id, { attempt_count: 3, spawn_failure_count: 2, status: "blocked" as any });
+    store.startTask(cwd, task.id, "AgentB");
+    store.updateTask(cwd, task.id, { attempt_count: 4, spawn_failure_count: 1, status: "in_progress" as any });
+
+    const result = executeTaskAction(cwd, "cascade-reset", dep.id, "AgentA", undefined, { force: true });
+
+    expect(result.success).toBe(true);
+    expect(result.resetTasks!.length).toBeGreaterThanOrEqual(1);
+    // Check all reset tasks have zeroed counters
+    for (const rt of result.resetTasks!) {
+      const updated = store.getTask(cwd, rt.id);
+      expect(updated?.attempt_count).toBe(0);
+      expect(updated?.spawn_failure_count).toBe(0);
+    }
+  });
+
   it("rejects stop when task is not in_progress", () => {
     const { cwd } = createTempCrewDirs();
     store.createPlan(cwd, "docs/PRD.md");
