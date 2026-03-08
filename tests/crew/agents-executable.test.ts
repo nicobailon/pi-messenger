@@ -147,6 +147,49 @@ describe("crew/agents — executable resolution & ENOENT guard", () => {
     }
   });
 
+  it("loads configured git package extensions from settings.json and still loads pi-messenger", async () => {
+    writeWorkerAgent(dirs.cwd);
+    const originalHome = process.env.HOME;
+    process.env.HOME = dirs.root;
+
+    try {
+      const settingsPath = path.join(dirs.root, ".pi", "agent", "settings.json");
+      const packageExtensionPath = path.join(
+        dirs.root,
+        ".pi",
+        "agent",
+        "git",
+        "github.com",
+        "acme",
+        "pi-extra",
+        "index.ts",
+      );
+      fs.mkdirSync(path.dirname(packageExtensionPath), { recursive: true });
+      fs.writeFileSync(packageExtensionPath, "export {};\n");
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ packages: ["git:github.com/acme/pi-extra"] }),
+      );
+
+      await spawnAgents([{ agent: "crew-worker", task: "do work", taskId: "task-ext" }], dirs.cwd);
+
+      const args = spawnMock.mock.calls[0][1] as string[];
+      const extensionValues: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--extension" && args[i + 1]) {
+          extensionValues.push(args[i + 1]);
+        }
+      }
+
+      expect(extensionValues).toContain(packageExtensionPath);
+      expect(extensionValues.some(ext => path.basename(ext) === "pi-messenger")).toBe(true);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
+
   // ── ENOENT / spawn error guard ───────────────────────────────────────────
 
   it("registers an 'error' handler on the spawned process to prevent crash", async () => {

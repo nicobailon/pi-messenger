@@ -15,6 +15,26 @@ export interface ReviseResult {
   message: string;
 }
 
+type NamespaceParams = CrewParams & {
+  crew?: string;
+  crewNamespace?: string;
+  namespace?: string;
+};
+
+function resolveCrewNamespace(params: CrewParams): string {
+  const ns =
+    (params as NamespaceParams).crewNamespace
+    ?? (params as NamespaceParams).crew
+    ?? (params as NamespaceParams).namespace
+    ?? "shared";
+  const normalized = typeof ns === "string" ? ns.trim() : "";
+  return normalized.length > 0 ? normalized : "shared";
+}
+
+function namespacedTaskId(taskId: string, crewNamespace: string): string {
+  return crewNamespace === "shared" ? taskId : `${crewNamespace}::${taskId}`;
+}
+
 // =============================================================================
 // Single task revision
 // =============================================================================
@@ -24,13 +44,22 @@ export async function executeRevise(
   taskId: string,
   prompt: string | undefined,
   agentName: string,
+  crewNamespace = "shared",
 ): Promise<ReviseResult> {
+  const reviserTaskId = namespacedTaskId("__reviser__", crewNamespace);
+  const plannerTaskId = namespacedTaskId("__planner__", crewNamespace);
+  const planningActive = crewNamespace === "shared"
+    ? isPlanningForCwd(cwd)
+    : getLiveWorkers(cwd).has(plannerTaskId);
+  const autonomousActive = crewNamespace === "shared"
+    ? isAutonomousForCwd(cwd)
+    : false;
   const task = store.getTask(cwd, taskId);
   if (!task) return { success: false, message: `Task ${taskId} not found` };
   if (task.status === "in_progress") return { success: false, message: `Task ${taskId} is in_progress` };
-  if (getLiveWorkers(cwd).has("__reviser__")) return { success: false, message: "A revision is already running" };
-  if (isPlanningForCwd(cwd)) return { success: false, message: "Cannot revise during planning" };
-  if (isAutonomousForCwd(cwd)) return { success: false, message: "Cannot revise during autonomous work" };
+  if (getLiveWorkers(cwd).has(reviserTaskId)) return { success: false, message: "A revision is already running" };
+  if (planningActive) return { success: false, message: "Cannot revise during planning" };
+  if (autonomousActive) return { success: false, message: "Cannot revise during autonomous work" };
 
   if (prompt) {
     store.appendTaskProgress(cwd, taskId, agentName, `Revision requested: "${prompt}"`);
@@ -49,7 +78,7 @@ export async function executeRevise(
     const [agentResult] = await spawnAgents([{
       agent: "crew-planner",
       task: revisePrompt,
-      taskId: "__reviser__",
+      taskId: reviserTaskId,
       modelOverride: config.models?.planner,
     }], cwd);
 
@@ -83,8 +112,9 @@ export async function executeRevise(
 export async function taskRevise(cwd: string, params: CrewParams, state: MessengerState) {
   const { id, prompt } = params;
   if (!id) return result("Error: id required for task.revise", { mode: "task.revise", error: "missing_id" });
+  const crewNamespace = resolveCrewNamespace(params);
 
-  const r = await executeRevise(cwd, id, prompt ?? undefined, state.agentName || "unknown");
+  const r = await executeRevise(cwd, id, prompt ?? undefined, state.agentName || "unknown", crewNamespace);
   if (!r.success) {
     return result(`Error: ${r.message}`, { mode: "task.revise", error: "revision_failed", id });
   }
@@ -100,12 +130,21 @@ export async function executeReviseTree(
   taskId: string,
   prompt: string | undefined,
   agentName: string,
+  crewNamespace = "shared",
 ): Promise<ReviseResult> {
+  const reviserTaskId = namespacedTaskId("__reviser__", crewNamespace);
+  const plannerTaskId = namespacedTaskId("__planner__", crewNamespace);
+  const planningActive = crewNamespace === "shared"
+    ? isPlanningForCwd(cwd)
+    : getLiveWorkers(cwd).has(plannerTaskId);
+  const autonomousActive = crewNamespace === "shared"
+    ? isAutonomousForCwd(cwd)
+    : false;
   const target = store.getTask(cwd, taskId);
   if (!target) return { success: false, message: `Task ${taskId} not found` };
-  if (getLiveWorkers(cwd).has("__reviser__")) return { success: false, message: "A revision is already running" };
-  if (isPlanningForCwd(cwd)) return { success: false, message: "Cannot revise during planning" };
-  if (isAutonomousForCwd(cwd)) return { success: false, message: "Cannot revise during autonomous work" };
+  if (getLiveWorkers(cwd).has(reviserTaskId)) return { success: false, message: "A revision is already running" };
+  if (planningActive) return { success: false, message: "Cannot revise during planning" };
+  if (autonomousActive) return { success: false, message: "Cannot revise during autonomous work" };
 
   const dependents = store.getTransitiveDependents(cwd, taskId);
   const subtreeAll = [target, ...dependents];
@@ -133,7 +172,7 @@ export async function executeReviseTree(
     const [agentResult] = await spawnAgents([{
       agent: "crew-planner",
       task: revisePrompt,
-      taskId: "__reviser__",
+      taskId: reviserTaskId,
       modelOverride: config.models?.planner,
     }], cwd);
 
@@ -226,8 +265,9 @@ export async function executeReviseTree(
 export async function taskReviseTree(cwd: string, params: CrewParams, state: MessengerState) {
   const { id, prompt } = params;
   if (!id) return result("Error: id required for task.revise-tree", { mode: "task.revise-tree", error: "missing_id" });
+  const crewNamespace = resolveCrewNamespace(params);
 
-  const r = await executeReviseTree(cwd, id, prompt ?? undefined, state.agentName || "unknown");
+  const r = await executeReviseTree(cwd, id, prompt ?? undefined, state.agentName || "unknown", crewNamespace);
   if (!r.success) {
     return result(`Error: ${r.message}`, { mode: "task.revise-tree", error: "revision_failed", id });
   }

@@ -60,6 +60,26 @@ describe("executeReviseTree", () => {
     state.clearPlanningState(tmpDir);
   });
 
+  it("does not treat shared planning state as blocking for namespaced tree revision", async () => {
+    const t1 = store.createTask(tmpDir, "Root", "spec");
+    const t2 = store.createTask(tmpDir, "Child", "spec", [t1.id]);
+    state.startPlanningRun(tmpDir, 3);
+    spawnAgents.mockResolvedValue([{
+      exitCode: 0,
+      output: `\`\`\`tasks-json
+[
+  {"id": "${t2.id}", "title": "Child", "spec": "updated child", "dependsOn": ["${t1.id}"]}
+]
+\`\`\``,
+      error: null,
+      progress: { toolCallCount: 0, tokens: 0 },
+    }]);
+
+    const r = await executeReviseTree(tmpDir, t1.id, undefined, "agent", "alpha");
+    expect(r.success).toBe(true);
+    state.clearPlanningState(tmpDir);
+  });
+
   it("rejects during autonomous work", async () => {
     const t1 = store.createTask(tmpDir, "Root");
     state.autonomousState.active = true;
@@ -67,6 +87,26 @@ describe("executeReviseTree", () => {
     const r = await executeReviseTree(tmpDir, t1.id, undefined, "agent");
     expect(r.success).toBe(false);
     expect(r.message).toContain("autonomous");
+  });
+
+  it("does not treat shared autonomous state as blocking for namespaced tree revision", async () => {
+    const t1 = store.createTask(tmpDir, "Root", "spec");
+    const t2 = store.createTask(tmpDir, "Child", "spec", [t1.id]);
+    state.autonomousState.active = true;
+    state.autonomousState.cwd = tmpDir;
+    spawnAgents.mockResolvedValue([{
+      exitCode: 0,
+      output: `\`\`\`tasks-json
+[
+  {"id": "${t2.id}", "title": "Child", "spec": "updated child", "dependsOn": ["${t1.id}"]}
+]
+\`\`\``,
+      error: null,
+      progress: { toolCallCount: 0, tokens: 0 },
+    }]);
+
+    const r = await executeReviseTree(tmpDir, t1.id, undefined, "agent", "alpha");
+    expect(r.success).toBe(true);
   });
 
   it("rejects when subtree has live workers", async () => {
@@ -138,6 +178,26 @@ describe("executeReviseTree", () => {
     const newTask = allTasks.find(t => t.title === "New Task");
     expect(newTask).toBeDefined();
     expect(store.getTaskSpec(tmpDir, newTask!.id)).toContain("brand new spec");
+  });
+
+  it("uses namespaced reviser task ID for tree revision when namespace is provided", async () => {
+    const t1 = store.createTask(tmpDir, "Root", "spec");
+    const t2 = store.createTask(tmpDir, "Child", "spec", [t1.id]);
+
+    spawnAgents.mockResolvedValue([{
+      exitCode: 0,
+      output: `\`\`\`tasks-json
+[
+  {"id": "${t2.id}", "title": "Child", "spec": "updated child", "dependsOn": ["${t1.id}"]}
+]
+\`\`\``,
+      error: null,
+      progress: { toolCallCount: 0, tokens: 0 },
+    }]);
+
+    const r = await executeReviseTree(tmpDir, t1.id, undefined, "agent", "alpha");
+    expect(r.success).toBe(true);
+    expect(spawnAgents.mock.calls[0][0][0].taskId).toBe("alpha::__reviser__");
   });
 
   it("rejects if returned ID is outside subtree", async () => {

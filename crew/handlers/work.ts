@@ -20,6 +20,33 @@ import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, a
 import { getAvailableLobbyWorkers, assignTaskToLobbyWorker, cleanupUnassignedAliveFiles } from "../lobby.js";
 import { logFeedEvent } from "../../feed.js";
 
+type NamespaceParams = CrewParams & {
+  crew?: string;
+  crewNamespace?: string;
+  namespace?: string;
+};
+
+function resolveCrewNamespace(params: CrewParams): string {
+  const ns =
+    (params as NamespaceParams).crewNamespace
+    ?? (params as NamespaceParams).crew
+    ?? (params as NamespaceParams).namespace
+    ?? "shared";
+  const normalized = typeof ns === "string" ? ns.trim() : "";
+  return normalized.length > 0 ? normalized : "shared";
+}
+
+function namespacedTaskId(taskId: string, crewNamespace: string): string {
+  return crewNamespace === "shared" ? taskId : `${crewNamespace}::${taskId}`;
+}
+
+function fromNamespacedTaskId(taskId: string | undefined, crewNamespace: string): string | undefined {
+  if (!taskId) return undefined;
+  if (crewNamespace === "shared") return taskId;
+  const prefix = `${crewNamespace}::`;
+  return taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
+}
+
 export async function execute(
   params: CrewParams,
   dirs: Dirs,
@@ -30,6 +57,8 @@ export async function execute(
   const cwd = ctx.cwd ?? process.cwd();
   const config = loadCrewConfig(getCrewDir(cwd));
   const { autonomous, concurrency: concurrencyOverride } = params;
+  const crewNamespace = resolveCrewNamespace(params);
+  const sharedAutonomous = autonomous && crewNamespace === "shared";
 
   // Verify plan exists
   const plan = store.getPlan(cwd);
@@ -99,13 +128,13 @@ export async function execute(
 
   // Determine concurrency
   const requestedConcurrency = concurrencyOverride
-    ?? (autonomous && isAutonomousForCwd(cwd)
+    ?? (sharedAutonomous && isAutonomousForCwd(cwd)
       ? autonomousState.concurrency
       : config.concurrency.workers);
   autonomousState.concurrency = clampConcurrency(requestedConcurrency, config.concurrency.max);
 
   // If autonomous mode, set up state and persist (only on first wave or cwd change)
-  if (autonomous && !isAutonomousForCwd(cwd)) {
+  if (sharedAutonomous && !isAutonomousForCwd(cwd)) {
     startAutonomous(cwd, autonomousState.concurrency);
     appendEntry("crew-state", autonomousState);
   }
@@ -113,7 +142,8 @@ export async function execute(
   // Assign tasks to lobby workers first (they're already running and warmed up)
   const prdLabel = store.getPlanLabel(plan);
   const lobbyAssigned = new Set<string>();
-  const lobbyWorkers = getAvailableLobbyWorkers(cwd);
+  const canUseLobbyWorkers = crewNamespace === "shared";
+  const lobbyWorkers = canUseLobbyWorkers ? getAvailableLobbyWorkers(cwd) : [];
   for (const lobbyWorker of lobbyWorkers) {
     const task = readyTasks.find(t => !lobbyAssigned.has(t.id));
     if (!task) break;
@@ -140,7 +170,9 @@ export async function execute(
     logFeedEvent(cwd, lobbyWorker.name, "task.start", task.id, task.title);
     lobbyAssigned.add(task.id);
   }
-  cleanupUnassignedAliveFiles(cwd);
+  if (canUseLobbyWorkers) {
+    cleanupUnassignedAliveFiles(cwd);
+  }
 
   // Build prompts for remaining tasks — spawnAgents throttles via autonomousState.concurrency
   const remainingTasks = readyTasks.filter(t => !lobbyAssigned.has(t.id));
@@ -152,7 +184,8 @@ export async function execute(
 
   for (const task of remainingTasks) {
     const currentTask = store.getTask(cwd, task.id);
-    if (!currentTask || currentTask.status !== "todo" || hasActiveWorker(cwd, task.id)) continue;
+    const namespacedId = namespacedTaskId(task.id, crewNamespace);
+    if (!currentTask || currentTask.status !== "todo" || hasActiveWorker(cwd, namespacedId)) continue;
 
     const workerName = generateMemorableName();
     const updatedTask = store.updateTask(cwd, task.id, {
@@ -183,14 +216,14 @@ export async function execute(
     return {
       agent: "crew-worker",
       task: prompt,
-      taskId: task.id,
+      taskId: namespacedTaskId(task.id, crewNamespace),
       modelOverride,
       workerName,
     };
   });
 
   const attemptedTaskIds = workerTasks
-    .map(workerTask => workerTask.taskId)
+    .map(workerTask => fromNamespacedTaskId(workerTask.taskId, crewNamespace))
     .filter((taskId): taskId is string => !!taskId);
 
   const workerResults = workerTasks.length > 0
@@ -211,7 +244,7 @@ export async function execute(
 
   for (let i = 0; i < workerResults.length; i++) {
     const r = workerResults[i];
-    const taskId = r.taskId;
+    const taskId = fromNamespacedTaskId(r.taskId, crewNamespace);
     if (!taskId) {
       failed.push(`unknown-result-${i}`);
       continue;
@@ -248,7 +281,7 @@ export async function execute(
         } else {
           failed.push(taskId);
         }
-      } else if (autonomous && task?.status === "in_progress") {
+      } else if (sharedAutonomous && task?.status === "in_progress") {
         store.appendTaskProgress(cwd, taskId, "system", `Worker crashed: ${r.error ?? "Unknown error"}`);
         store.blockTask(cwd, taskId, `Worker failed: ${r.error ?? "Unknown error"}`);
         blocked.push(taskId);
@@ -264,9 +297,9 @@ export async function execute(
   syncCompletedCount(cwd);
 
   // Save current wave number BEFORE addWaveResult increments it
-  const currentWave = autonomous ? autonomousState.waveNumber : 1;
+  const currentWave = sharedAutonomous ? autonomousState.waveNumber : 1;
   
-  if (autonomous) {
+  if (sharedAutonomous) {
     addWaveResult({
       waveNumber: currentWave,
       tasksAttempted: attemptedTaskIds,
@@ -328,9 +361,9 @@ export async function execute(
   const nextText = nextReady.length > 0
     ? `\n\n**Ready for next wave:** ${nextReady.map(t => t.id).join(", ")}`
     : "";
-  const continueText = autonomous && !signal?.aborted && nextReady.length > 0
+  const continueText = sharedAutonomous && !signal?.aborted && nextReady.length > 0
     ? "Autonomous mode: Continuing to next wave..."
-    : signal?.aborted && autonomous
+    : signal?.aborted && sharedAutonomous
       ? "Autonomous mode stopped (cancelled)."
       : "";
 
@@ -356,7 +389,7 @@ ${continueText}`;
     failed,
     blocked,
     nextReady: nextReady.map(t => t.id),
-    autonomous: !!autonomous
+    autonomous: !!sharedAutonomous
   });
 }
 
@@ -368,4 +401,3 @@ function syncCompletedCount(cwd: string): void {
     store.updatePlan(cwd, { completed_count: doneCount });
   }
 }
-

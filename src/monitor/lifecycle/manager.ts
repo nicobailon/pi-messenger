@@ -39,6 +39,9 @@ export class SessionLifecycleManager {
       model: metadata.model,
       agent: metadata.agent,
       startedAt,
+      ...(metadata.taskId !== undefined && { taskId: metadata.taskId }),
+      ...(metadata.workerPid !== undefined && { workerPid: metadata.workerPid }),
+      ...(metadata.agentRole !== undefined && { agentRole: metadata.agentRole }),
     };
 
     this.store.create(fullMetadata);

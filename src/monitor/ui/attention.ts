@@ -1,29 +1,32 @@
 import type { Component, Focusable } from "@mariozechner/pi-tui";
 import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import type { AttentionItem } from "../types/attention.js";
-import { ANSI, visibleLen } from "./render.js";
+import { ANSI } from "./render.js";
 
 /**
  * Attention item reason badges for panel rendering.
  */
 function renderReasonBadge(reason: AttentionItem["reason"]): string {
+  const ansi = ANSI as Record<string, string>;
+  const badgeStyle = `${ansi.bgRed ?? "\u001b[41m"}${ansi.fgWhite ?? "\u001b[97m"}`;
+
   switch (reason) {
     case "waiting_on_human":
-      return `${ANSI.cyan}○ waiting${ANSI.reset}`;
+      return `${badgeStyle}○ waiting${ANSI.reset}`;
     case "stuck":
-      return `${ANSI.red}✖ stuck${ANSI.reset}`;
+      return `${badgeStyle}✖ stuck${ANSI.reset}`;
     case "degraded":
-      return `${ANSI.yellow}⚠ degraded${ANSI.reset}`;
+      return `${badgeStyle}⚠ degraded${ANSI.reset}`;
     case "high_error_rate":
-      return `${ANSI.red}⚠ high errors${ANSI.reset}`;
+      return `${badgeStyle}⚠ high errors${ANSI.reset}`;
     case "repeated_retries":
-      return `${ANSI.yellow}↻ retries${ANSI.reset}`;
+      return `${badgeStyle}↻ retries${ANSI.reset}`;
     case "failed_recoverable":
-      return `${ANSI.red}✖ failed${ANSI.reset}`;
+      return `${badgeStyle}✖ failed${ANSI.reset}`;
     case "stale_running":
-      return `${ANSI.blue}… stale${ANSI.reset}`;
+      return `${badgeStyle}… stale${ANSI.reset}`;
     default:
-      return `${ANSI.gray}? unknown${ANSI.reset}`;
+      return `${badgeStyle}? unknown${ANSI.reset}`;
   }
 }
 
@@ -87,7 +90,7 @@ export class AttentionQueuePanel implements Component, Focusable {
 
     // ── Top border with title ────────────────────────────────────────────
     const titleLabel = `${ANSI.bold}${this.title}${ANSI.reset}`;
-    const titleVisible = visibleLen(titleLabel);
+    const titleVisible = visibleWidth(titleLabel);
     const dashTotal = Math.max(0, w - 2 - titleVisible - 2);
     const dashLeft = Math.floor(dashTotal / 2);
     const dashRight = dashTotal - dashLeft;
@@ -115,29 +118,23 @@ export class AttentionQueuePanel implements Component, Focusable {
         const item = this.items[i];
         const selected = i === this.selectedIndex;
 
-        const prefix = selected ? "> " : "  ";
+        const prefix = selected ? " > " : "   ";
         const badge = renderReasonBadge(item.reason);
 
         const row1 = `${prefix}${badge} ${item.sessionId} · ${item.reason}`;
         const row2 = `    ${ANSI.dim}${item.message}${ANSI.reset}`;
-        const row3 = `    ${ANSI.dim}↳ ${item.recommendedAction}${ANSI.reset}`;
 
-        // Keep each visible row aligned.
         lines.push(row(row1));
         rowsRendered++;
         lines.push(row(row2));
         rowsRendered++;
-
-        // Only add the recommended-action row when there is room.
-        if (rowsRendered + 1 <= maxRows) {
-          lines.push(row(row3));
-          rowsRendered++;
-        }
       }
     }
 
-    const legend = this.focused ? `${ANSI.dim}↑↓ navigate${ANSI.reset}` : "";
-    const legendVisible = visibleLen(legend);
+    const legend = this.focused
+      ? `${ANSI.dim}↑↓ navigate  enter inspect${ANSI.reset}`
+      : "";
+    const legendVisible = visibleWidth(legend);
     const bottomDashes = Math.max(0, w - 2 - legendVisible - (legendVisible > 0 ? 2 : 0));
     const bottomLeft = Math.floor(bottomDashes / 2);
     const bottomRight = bottomDashes - bottomLeft;
@@ -176,6 +173,8 @@ export class AttentionQueuePanel implements Component, Focusable {
       this.onChangeCallback?.();
     } else if (matchesKey(data, "end")) {
       this.selectedIndex = Math.max(0, this.items.length - 1);
+      this.onChangeCallback?.();
+    } else if (matchesKey(data, "enter")) {
       this.onChangeCallback?.();
     }
   }

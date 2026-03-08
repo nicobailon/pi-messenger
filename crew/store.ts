@@ -14,6 +14,27 @@ import { allocateTaskId } from "./id-allocator.js";
 // Directory Helpers
 // =============================================================================
 
+
+const SHARED_NAMESPACE = "shared";
+
+function normalizeNamespace(value?: string): string {
+  if (typeof value !== "string") return SHARED_NAMESPACE;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : SHARED_NAMESPACE;
+}
+
+function isTaskInNamespace(task: Task, namespace?: string): boolean {
+  const taskNamespace = task.namespace === undefined
+    ? SHARED_NAMESPACE
+    : normalizeNamespace(task.namespace);
+
+  if (namespace === undefined) return true;
+  const requested = normalizeNamespace(namespace);
+  return requested === SHARED_NAMESPACE
+    ? taskNamespace === SHARED_NAMESPACE
+    : taskNamespace === requested;
+}
+
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -174,13 +195,16 @@ export function createTask(
   cwd: string,
   title: string,
   description?: string,
-  dependsOn?: string[]
+  dependsOn?: string[],
+  namespace?: string,
 ): Task {
   const id = allocateTaskId(cwd);
   const now = new Date().toISOString();
+  const normalizedNamespace = normalizeNamespace(namespace);
 
   const task: Task = {
     id,
+    ...(namespace ? { namespace: normalizedNamespace } : {}),
     title,
     status: "todo",
     depends_on: dependsOn ?? [],
@@ -223,9 +247,12 @@ export function incrementSpawnFailureCount(cwd: string, taskId: string): void {
   updateTask(cwd, taskId, { spawn_failure_count: (task.spawn_failure_count ?? 0) + 1 });
 }
 
-export function getTask(cwd: string, taskId: string): Task | null {
+export function getTask(cwd: string, taskId: string, namespace?: string): Task | null {
   const raw = readJson<Task>(path.join(getTasksDir(cwd), `${taskId}.json`));
-  return raw ? normalizeTask(raw) : null;
+  if (!raw) return null;
+
+  const task = normalizeTask(raw);
+  return isTaskInNamespace(task, namespace) ? task : null;
 }
 
 export function updateTask(cwd: string, taskId: string, updates: Partial<Task>): Task | null {
@@ -242,7 +269,7 @@ export function updateTask(cwd: string, taskId: string, updates: Partial<Task>):
   return updated;
 }
 
-export function getTasks(cwd: string): Task[] {
+export function getTasks(cwd: string, namespace?: string): Task[] {
   const dir = getTasksDir(cwd);
   if (!fs.existsSync(dir)) return [];
 
@@ -250,7 +277,12 @@ export function getTasks(cwd: string): Task[] {
   for (const file of fs.readdirSync(dir)) {
     if (!file.endsWith(".json")) continue;
     const raw = readJson<Task>(path.join(dir, file));
-    if (raw) tasks.push(normalizeTask(raw));
+    if (raw) {
+      const task = normalizeTask(raw);
+      if (isTaskInNamespace(task, namespace)) {
+        tasks.push(task);
+      }
+    }
   }
 
   // Sort by ID number (task-1, task-2, ...)
@@ -455,8 +487,11 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
 // Ready Tasks (Dependency Resolution)
 // =============================================================================
 
-export function getReadyTasks(cwd: string, options?: { advisory?: boolean }): Task[] {
-  const tasks = getTasks(cwd);
+export function getReadyTasks(
+  cwd: string,
+  options?: { advisory?: boolean; namespace?: string },
+): Task[] {
+  const tasks = getTasks(cwd, options?.namespace);
   if (options?.advisory) {
     return tasks.filter(t => t.status === "todo" && !t.milestone);
   }

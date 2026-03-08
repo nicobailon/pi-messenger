@@ -254,6 +254,47 @@ describe("lobby workers", () => {
     expect(promptArg).toContain("TASK ASSIGNMENT");
   });
 
+  it("loads configured git package extensions from settings.json and still loads pi-messenger", async () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-lobby-home-"));
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+
+    try {
+      const settingsPath = path.join(tempHome, ".pi", "agent", "settings.json");
+      const packageExtensionPath = path.join(
+        tempHome,
+        ".pi",
+        "agent",
+        "git",
+        "github.com",
+        "acme",
+        "pi-extra",
+        "index.ts",
+      );
+      fs.mkdirSync(path.dirname(packageExtensionPath), { recursive: true });
+      fs.writeFileSync(packageExtensionPath, "export {};\n");
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify({ packages: ["git:github.com/acme/pi-extra"] }));
+
+      const { spawn } = await import("node:child_process");
+      lobby.spawnLobbyWorker("/test/cwd");
+      const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+      const extensionValues: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--extension" && args[i + 1]) {
+          extensionValues.push(args[i + 1]);
+        }
+      }
+
+      expect(extensionValues).toContain(packageExtensionPath);
+      expect(extensionValues.some(ext => path.basename(ext) === "pi-messenger")).toBe(true);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch {}
+    }
+  });
+
   it("close handler resets orphaned in_progress task to todo", async () => {
     const storeModule = await import("../../crew/store.js");
     const feedModule = await import("../../feed.js");

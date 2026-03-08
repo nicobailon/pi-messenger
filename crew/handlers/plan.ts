@@ -43,6 +43,26 @@ const PROGRESS_FILE = "planning-progress.md";
 const OUTLINE_FILE = "planning-outline.md";
 const MAX_PROGRESS_PROMPT_SIZE = 50000;
 
+type NamespaceParams = CrewParams & {
+  crew?: string;
+  crewNamespace?: string;
+  namespace?: string;
+};
+
+function resolveCrewNamespace(params: CrewParams): string {
+  const ns =
+    (params as NamespaceParams).crewNamespace
+    ?? (params as NamespaceParams).crew
+    ?? (params as NamespaceParams).namespace
+    ?? "shared";
+  const normalized = typeof ns === "string" ? ns.trim() : "";
+  return normalized.length > 0 ? normalized : "shared";
+}
+
+function namespacedTaskId(taskId: string, crewNamespace: string): string {
+  return crewNamespace === "shared" ? taskId : `${crewNamespace}::${taskId}`;
+}
+
 function getProgressPath(cwd: string): string {
   return path.join(store.getCrewDir(cwd), PROGRESS_FILE);
 }
@@ -205,13 +225,53 @@ export async function execute(
 ) {
   const cwd = ctx.cwd ?? process.cwd();
   const { prd, prompt } = params;
+  const crewNamespace = resolveCrewNamespace(params);
+  const isSharedNamespace = crewNamespace === "shared";
+  const plannerTaskId = namespacedTaskId("__planner__", crewNamespace);
+  const reviewerTaskId = namespacedTaskId("__reviewer__", crewNamespace);
   const reportProgress = () => onProgress?.();
-  resetPlanningCancellation();
+  if (isSharedNamespace) {
+    resetPlanningCancellation();
+  }
+
+  const isPlanningActiveForNamespace = () => (
+    isSharedNamespace
+      ? isPlanningForCwd(cwd)
+      : getLiveWorkers(cwd).has(plannerTaskId)
+  );
+
+  const planningCancelledForNamespace = () => (
+    isSharedNamespace && isPlanningCancelled()
+  );
+
+  const setPlanningPhaseForNamespace = (phase: PlanningPhase, pass: number) => {
+    if (!isSharedNamespace) return;
+    setPlanningPhase(cwd, phase, pass);
+  };
+
+  const finishPlanningRunForNamespace = (status: "completed" | "failed", pass: number) => {
+    if (!isSharedNamespace) return;
+    finishPlanningRun(cwd, status, pass);
+  };
+
+  const advancePhaseForNamespace = (
+    phase: PlanningPhase,
+    feedType: "plan.pass.start" | "plan.pass.done" | "plan.review.start" | "plan.review.done",
+    target: string,
+    preview: string,
+    pass: number,
+  ) => {
+    if (isSharedNamespace) {
+      advancePhase(cwd, phase, agentName, feedType, target, preview, pass);
+      return;
+    }
+    logFeedEvent(cwd, agentName, feedType, target, preview);
+  };
 
   const existingPlan = store.getPlan(cwd);
   if (existingPlan) {
     const existingTasks = store.getTasks(cwd);
-    const planningActive = isPlanningForCwd(cwd);
+    const planningActive = isPlanningActiveForNamespace();
 
     if (planningActive) {
       return result("Planning is already in progress.", { mode: "plan", error: "planning_active" });
@@ -230,7 +290,9 @@ export async function execute(
 
     if (existingTasks.length > 0 && prompt) {
       const liveWorkers = getLiveWorkers(cwd);
-      const inProgress = existingTasks.filter(t => t.status === "in_progress" || liveWorkers.has(t.id));
+      const inProgress = existingTasks.filter(t => (
+        t.status === "in_progress" || liveWorkers.has(namespacedTaskId(t.id, crewNamespace))
+      ));
       if (inProgress.length > 0) {
         return result(`Cannot re-plan: ${inProgress.length} task(s) in progress (${inProgress.map(t => t.id).join(", ")}). Stop or complete them first.`, {
           mode: "plan",
@@ -308,8 +370,10 @@ export async function execute(
   store.createPlan(cwd, prdPath, isPromptBased ? prompt : undefined);
   startRunInProgress(cwd, runLabel);
   if (prompt && !isPromptBased) injectSteeringPrompt(cwd, prompt);
-  startPlanningRun(cwd, maxPasses);
-  setPlanningPhase(cwd, "read-prd", 0);
+  if (isSharedNamespace) {
+    startPlanningRun(cwd, maxPasses);
+    setPlanningPhaseForNamespace("read-prd", 0);
+  }
   logFeedEvent(cwd, agentName, "plan.start", prdPath, `max passes ${maxPasses}`);
   notify(ctx, `Planning started: ${isPromptBased ? runLabel : path.basename(prdPath)} (${maxPasses} pass${maxPasses === 1 ? "" : "es"})`, "info");
   reportProgress();
@@ -322,7 +386,7 @@ export async function execute(
 
   for (let pass = 1; pass <= maxPasses; pass++) {
     const passPhase: PlanningPhase = pass === 1 ? "scan-code" : "gap-analysis";
-    advancePhase(cwd, passPhase, agentName, "plan.pass.start", prdPath, `pass ${pass}/${maxPasses}`, pass);
+    advancePhaseForNamespace(passPhase, "plan.pass.start", prdPath, `pass ${pass}/${maxPasses}`, pass);
     reportProgress();
     notify(ctx, `Planning pass ${pass}/${maxPasses} in progress`, "info");
 
@@ -334,16 +398,16 @@ export async function execute(
       agent: PLANNER_AGENT,
       task: plannerPrompt,
       modelOverride: config.models?.planner,
-      taskId: "__planner__",
+      taskId: plannerTaskId,
     }], cwd);
 
-    if (isPlanningCancelled()) {
+    if (planningCancelledForNamespace()) {
       return result("Planning cancelled.", { mode: "plan", error: "cancelled" });
     }
 
     if (plannerResult.exitCode !== 0) {
       if (pass === 1) {
-        finishPlanningRun(cwd, "failed", pass);
+        finishPlanningRunForNamespace("failed", pass);
         reportProgress();
         logFeedEvent(cwd, agentName, "plan.failed", prdPath, `pass ${pass} failed`);
         notify(ctx, "Planning failed on pass 1. No tasks were created.", "error");
@@ -364,13 +428,13 @@ export async function execute(
     lastPlannerOutput = plannerResult.output;
     passesCompleted = pass;
     appendPassToProgress(cwd, pass, lastPlannerOutput);
-    advancePhase(cwd, "build-task-graph", agentName, "plan.pass.done", prdPath, `pass ${pass}/${maxPasses} complete`, pass);
+    advancePhaseForNamespace("build-task-graph", "plan.pass.done", prdPath, `pass ${pass}/${maxPasses} complete`, pass);
     reportProgress();
 
     if (pass >= maxPasses) break;
     if (!hasReviewer) break;
 
-    advancePhase(cwd, "review-pass", agentName, "plan.review.start", prdPath, `review pass ${pass}`, pass);
+    advancePhaseForNamespace("review-pass", "plan.review.start", prdPath, `review pass ${pass}`, pass);
     reportProgress();
     notify(ctx, `Reviewing planning pass ${pass}/${maxPasses}`, "info");
 
@@ -387,16 +451,16 @@ export async function execute(
       agent: "crew-reviewer",
       task: reviewPrompt,
       modelOverride: config.models?.reviewer,
-      taskId: "__reviewer__",
+      taskId: reviewerTaskId,
     }], cwd);
 
-    if (isPlanningCancelled()) {
+    if (planningCancelledForNamespace()) {
       return result("Planning cancelled.", { mode: "plan", error: "cancelled" });
     }
 
     if (reviewResult.exitCode !== 0) {
       logFeedEvent(cwd, agentName, "plan.review.done", prdPath, `review pass ${pass} failed`);
-      setPlanningPhase(cwd, "build-steps", pass);
+      setPlanningPhaseForNamespace("build-steps", pass);
       reportProgress();
       notify(ctx, `Review failed on pass ${pass}; continuing with planner output.`, "warning");
       break;
@@ -405,13 +469,13 @@ export async function execute(
     lastVerdict = parseVerdict(reviewResult.output);
     lastReviewOutput = reviewResult.output;
     appendReviewToProgress(cwd, pass, lastVerdict.verdict, reviewResult.output);
-    advancePhase(cwd, "build-steps", agentName, "plan.review.done", prdPath, `review ${pass}: ${lastVerdict.verdict}`, pass);
+    advancePhaseForNamespace("build-steps", "plan.review.done", prdPath, `review ${pass}: ${lastVerdict.verdict}`, pass);
     reportProgress();
 
     if (lastVerdict.verdict === "SHIP") break;
   }
 
-  setPlanningPhase(cwd, "build-steps", passesCompleted);
+  setPlanningPhaseForNamespace("build-steps", passesCompleted);
   reportProgress();
 
   const tasks = parseJsonTaskBlock(lastPlannerOutput) ?? parseTasksFromOutput(lastPlannerOutput);
@@ -423,7 +487,7 @@ export async function execute(
 
   if (tasks.length === 0) {
     store.setPlanSpec(cwd, lastPlannerOutput);
-    finishPlanningRun(cwd, "failed", passesCompleted);
+    finishPlanningRunForNamespace("failed", passesCompleted);
     reportProgress();
     logFeedEvent(cwd, agentName, "plan.failed", prdPath, "no tasks parsed");
     notify(ctx, "Planning finished but no tasks could be parsed. Review plan.md.", "warning");
@@ -493,11 +557,11 @@ export async function execute(
   const planningBlock = planningSummary ? `${planningSummary}\n` : "";
   const warningBlock = warningLine ? `${warningLine}\n` : "";
 
-  setPlanningPhase(cwd, "finalizing", passesCompleted);
+  setPlanningPhaseForNamespace("finalizing", passesCompleted);
   reportProgress();
 
   const successLabel = isPromptBased ? `"${runLabel}"` : `**${prdPath}**`;
-  const shouldAutoWork = params.autoWork !== false;
+  const shouldAutoWork = isSharedNamespace && params.autoWork !== false;
   const nextSteps = shouldAutoWork
     ? `Workers will start automatically.`
     : `**Next steps:**
@@ -514,7 +578,7 @@ ${taskList}
 
 ${nextSteps}`;
 
-  finishPlanningRun(cwd, "completed", passesCompleted);
+  finishPlanningRunForNamespace("completed", passesCompleted);
   reportProgress();
   logFeedEvent(cwd, agentName, "plan.done", prdPath, `${createdTasks.length} tasks created`);
   if (warningLine) {

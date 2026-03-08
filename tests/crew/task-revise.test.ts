@@ -80,6 +80,21 @@ describe("executeRevise", () => {
     state.clearPlanningState(tmpDir);
   });
 
+  it("does not treat shared planning state as blocking for namespaced revision", async () => {
+    const task = store.createTask(tmpDir, "test task", "spec");
+    state.startPlanningRun(tmpDir, 3);
+    spawnAgents.mockResolvedValue([{
+      exitCode: 0,
+      output: '```revised-task\n{"spec": "# Better Spec\\nImproved"}\n```',
+      error: null,
+      progress: { toolCallCount: 0, tokens: 0 },
+    }]);
+
+    const r = await executeRevise(tmpDir, task.id, undefined, "agent", "alpha");
+    expect(r.success).toBe(true);
+    state.clearPlanningState(tmpDir);
+  });
+
   it("rejects during autonomous work", async () => {
     const task = store.createTask(tmpDir, "test task");
     state.autonomousState.active = true;
@@ -88,6 +103,21 @@ describe("executeRevise", () => {
     const r = await executeRevise(tmpDir, task.id, undefined, "agent");
     expect(r.success).toBe(false);
     expect(r.message).toContain("autonomous");
+  });
+
+  it("does not treat shared autonomous state as blocking for namespaced revision", async () => {
+    const task = store.createTask(tmpDir, "test task", "spec");
+    state.autonomousState.active = true;
+    state.autonomousState.cwd = tmpDir;
+    spawnAgents.mockResolvedValue([{
+      exitCode: 0,
+      output: '```revised-task\n{"spec": "# Better Spec\\nImproved"}\n```',
+      error: null,
+      progress: { toolCallCount: 0, tokens: 0 },
+    }]);
+
+    const r = await executeRevise(tmpDir, task.id, undefined, "agent", "alpha");
+    expect(r.success).toBe(true);
   });
 
   it("revises task with prompt and updates spec", async () => {
@@ -107,6 +137,20 @@ describe("executeRevise", () => {
     expect(updated?.title).toBe("new title");
     const spec = store.getTaskSpec(tmpDir, task.id);
     expect(spec).toContain("Revised content");
+  });
+
+  it("uses namespaced reviser task ID when namespace is provided", async () => {
+    const task = store.createTask(tmpDir, "test task", "old spec");
+    spawnAgents.mockResolvedValue([{
+      exitCode: 0,
+      output: '```revised-task\n{"spec": "# Better Spec\\nImproved"}\n```',
+      error: null,
+      progress: { toolCallCount: 0, tokens: 0 },
+    }]);
+
+    const r = await executeRevise(tmpDir, task.id, undefined, "agent", "alpha");
+    expect(r.success).toBe(true);
+    expect(spawnAgents.mock.calls[0][0][0].taskId).toBe("alpha::__reviser__");
   });
 
   it("revises task without prompt", async () => {

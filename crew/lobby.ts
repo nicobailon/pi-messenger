@@ -20,6 +20,7 @@ import {
   resolveExecutable,
 } from "./agents.js";
 import { discoverCrewAgents } from "./utils/discover.js";
+import { loadConfiguredPackageExtensions } from "./utils/extensions.js";
 import { loadCrewConfig, type CrewConfig } from "./utils/config.js";
 import {
   createProgress,
@@ -87,16 +88,27 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   if (workerConfig.tools?.length) {
     const builtinTools: string[] = [];
-    const extensionPaths: string[] = [];
+    const extensionPaths = new Set<string>();
     for (const tool of workerConfig.tools) {
       if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
-        extensionPaths.push(tool);
+        extensionPaths.add(tool);
       } else if (BUILTIN_TOOLS.has(tool)) {
         builtinTools.push(tool);
       }
     }
     if (builtinTools.length > 0) args.push("--tools", builtinTools.join(","));
+    for (const configuredPath of loadConfiguredPackageExtensions()) {
+      if (configuredPath !== EXTENSION_DIR) {
+        extensionPaths.add(configuredPath);
+      }
+    }
     for (const ext of extensionPaths) args.push("--extension", ext);
+  } else {
+    for (const configuredPath of loadConfiguredPackageExtensions()) {
+      if (configuredPath !== EXTENSION_DIR) {
+        args.push("--extension", configuredPath);
+      }
+    }
   }
 
   args.push("--extension", EXTENSION_DIR);

@@ -70,6 +70,24 @@ describe("plan with prompt (re-plan)", () => {
     expect(tasks[0].title).toBe("Task A");
   });
 
+  it("uses namespaced planner task ID when crew namespace is provided", async () => {
+    spawnAgents.mockResolvedValue([{
+      exitCode: 0,
+      output: plannerOutput,
+      error: null,
+      progress: { toolCallCount: 0, tokens: 0 },
+    }]);
+
+    await planHandler.execute(
+      { action: "plan", prompt: "focus on performance", crew: "alpha" } as any,
+      mockCtx,
+      "agent",
+    );
+
+    const plannerTask = spawnAgents.mock.calls[0][0][0];
+    expect(plannerTask.taskId).toBe("alpha::__planner__");
+  });
+
   it("rejects re-plan when tasks are in_progress", async () => {
     store.createPlan(tmpDir, "docs/PRD.md");
     const task = store.createTask(tmpDir, "Active task");

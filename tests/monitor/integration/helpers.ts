@@ -74,12 +74,14 @@ export function makeMetadata(overrides: Partial<{
   cwd: string;
   model: string;
   agent: string;
+  taskId: string;
 }> = {}) {
   return {
     name: overrides.name ?? "test-session",
     cwd: overrides.cwd ?? "/tmp/test",
     model: overrides.model ?? "claude-3",
     agent: overrides.agent ?? "test-agent",
+    taskId: overrides.taskId ?? randomUUID(),
   };
 }
 

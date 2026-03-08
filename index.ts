@@ -376,6 +376,12 @@ Usage (action-based API - preferred):
       })),
 
       // ═══════════════════════════════════════════════════════════════════════
+      // CREW NAMESPACING PARAMETERS
+      // ═══════════════════════════════════════════════════════════════════════
+      crew: Type.Optional(Type.String({ description: "Target crew namespace (e.g. 'shared', 'alpha')" })),
+      crewMode: Type.Optional(StringEnum(["shared", "session", "branch", "worktree", "custom"], { description: "Automatic isolation mode" })),
+      
+      // ═══════════════════════════════════════════════════════════════════════
       // CREW PARAMETERS
       // ═══════════════════════════════════════════════════════════════════════
       prd: Type.Optional(Type.String({ description: "PRD file path for plan action" })),

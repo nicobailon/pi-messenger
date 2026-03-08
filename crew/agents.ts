@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverCrewAgents, type CrewAgentConfig } from "./utils/discover.js";
+import { loadConfiguredPackageExtensions } from "./utils/extensions.js";
 import { truncateOutput } from "./utils/truncate.js";
 import {
   createProgress,
@@ -343,10 +344,10 @@ async function runAgent(
 
     if (agentConfig?.tools?.length) {
       const builtinTools: string[] = [];
-      const extensionPaths: string[] = [];
+      const extensionPaths = new Set<string>();
       for (const tool of agentConfig.tools) {
         if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
-          extensionPaths.push(tool);
+          extensionPaths.add(tool);
         } else if (BUILTIN_TOOLS.has(tool)) {
           builtinTools.push(tool);
         }
@@ -355,8 +356,19 @@ async function runAgent(
       if (builtinTools.length > 0) {
         args.push("--tools", builtinTools.join(","));
       }
+      for (const configuredPath of loadConfiguredPackageExtensions()) {
+        if (configuredPath !== EXTENSION_DIR) {
+          extensionPaths.add(configuredPath);
+        }
+      }
       for (const extensionPath of extensionPaths) {
         args.push("--extension", extensionPath);
+      }
+    } else {
+      for (const configuredPath of loadConfiguredPackageExtensions()) {
+        if (configuredPath !== EXTENSION_DIR) {
+          args.push("--extension", configuredPath);
+        }
       }
     }
 

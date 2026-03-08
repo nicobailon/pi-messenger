@@ -35,6 +35,7 @@ export interface TaskEvidence {
 
 export interface Task {
   id: string;                    // task-N format
+  namespace?: string;            // Crew namespace owner (defaults to shared)
   title: string;
   status: TaskStatus;
   milestone?: boolean;

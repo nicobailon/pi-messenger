@@ -15,12 +15,33 @@ import { loadCrewConfig } from "../utils/config.js";
 import { parseVerdict, type ParsedReview } from "../utils/verdict.js";
 import * as store from "../store.js";
 
+type NamespaceParams = CrewParams & {
+  crew?: string;
+  crewNamespace?: string;
+  namespace?: string;
+};
+
+function resolveCrewNamespace(params: CrewParams): string {
+  const ns =
+    (params as NamespaceParams).crewNamespace
+    ?? (params as NamespaceParams).crew
+    ?? (params as NamespaceParams).namespace
+    ?? "shared";
+  const normalized = typeof ns === "string" ? ns.trim() : "";
+  return normalized.length > 0 ? normalized : "shared";
+}
+
+function namespacedTaskId(taskId: string, crewNamespace: string): string {
+  return crewNamespace === "shared" ? taskId : `${crewNamespace}::${taskId}`;
+}
+
 export async function execute(
   params: CrewParams,
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
   const { target, type } = params;
+  const crewNamespace = resolveCrewNamespace(params);
   const config = loadCrewConfig(store.getCrewDir(cwd));
   const reviewerModel = config.models?.reviewer;
 
@@ -45,9 +66,9 @@ export async function execute(
   const reviewType = type ?? (target.startsWith("task-") ? "impl" : "plan");
 
   if (reviewType === "impl") {
-    return reviewImplementation(cwd, target, reviewerModel);
+    return reviewImplementation(cwd, target, reviewerModel, crewNamespace);
   } else {
-    return reviewPlan(cwd, reviewerModel);
+    return reviewPlan(cwd, reviewerModel, crewNamespace);
   }
 }
 
@@ -55,7 +76,7 @@ export async function execute(
 // Implementation Review
 // =============================================================================
 
-async function reviewImplementation(cwd: string, taskId: string, modelOverride?: string) {
+async function reviewImplementation(cwd: string, taskId: string, modelOverride?: string, crewNamespace = "shared") {
   const task = store.getTask(cwd, taskId);
   if (!task) {
     return result(`Error: Task ${taskId} not found.`, {
@@ -122,6 +143,7 @@ Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback
     agent: "crew-reviewer",
     task: prompt,
     modelOverride,
+    taskId: namespacedTaskId("__reviewer__", crewNamespace),
   }], cwd);
 
   if (reviewResult.exitCode !== 0) {
@@ -174,7 +196,7 @@ ${verdict.verdict === "SHIP" ? "✅ Ready to merge!" : verdict.verdict === "NEED
 // Plan Review
 // =============================================================================
 
-async function reviewPlan(cwd: string, modelOverride?: string) {
+async function reviewPlan(cwd: string, modelOverride?: string, crewNamespace = "shared") {
   const plan = store.getPlan(cwd);
   if (!plan) {
     return result("Error: No plan found.", {
@@ -230,6 +252,7 @@ Output your verdict as SHIP (plan is solid), NEEDS_WORK (minor adjustments), or 
     agent: "crew-reviewer",
     task: prompt,
     modelOverride,
+    taskId: namespacedTaskId("__reviewer__", crewNamespace),
   }], cwd);
 
   if (reviewResult.exitCode !== 0) {

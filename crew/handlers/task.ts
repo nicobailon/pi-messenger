@@ -6,6 +6,8 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { MessengerState } from "../../lib.js";
 import type { CrewParams, Task, TaskEvidence } from "../types.js";
 import { result } from "../utils/result.js";
@@ -441,8 +443,44 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
     });
   }
 
-  const summary = params.summary ?? "Task completed";
+  const summary = params.summary?.trim();
+  if (!summary) {
+    return result("Error: summary required for task.done and must be non-empty", {
+      mode: "task.done",
+      error: "missing_summary",
+      id,
+    });
+  }
+
   const evidence: TaskEvidence | undefined = params.evidence;
+  const commitEvidence = evidence?.commits?.filter(entry => typeof entry === "string" && entry.trim().length > 0);
+  if (!commitEvidence || commitEvidence.length === 0) {
+    return result("Error: evidence.commits must include at least one non-empty entry", {
+      mode: "task.done",
+      error: "missing_evidence_commits",
+      id,
+    });
+  }
+
+  const testEvidence = evidence?.tests?.filter(entry => typeof entry === "string" && entry.trim().length > 0);
+  if (!testEvidence || testEvidence.length === 0) {
+    return result("Error: evidence.tests must include at least one non-empty entry", {
+      mode: "task.done",
+      error: "missing_evidence_tests",
+      id,
+    });
+  }
+
+  const handoffArtifactRel = path.join(".pi", "messenger", "crew", "artifacts", `${id}-handoff.md`);
+  const handoffArtifactPath = path.join(cwd, handoffArtifactRel);
+  if (!fs.existsSync(handoffArtifactPath)) {
+    return result(`Error: handoff artifact required at ${handoffArtifactRel}`, {
+      mode: "task.done",
+      error: "missing_handoff_artifact",
+      id,
+      handoff: handoffArtifactRel,
+    });
+  }
 
   const completed = store.completeTask(cwd, id, summary, evidence);
   if (!completed) {
