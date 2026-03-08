@@ -98,7 +98,9 @@ function taskCreate(cwd: string, params: CrewParams, namespace: string) {
     }
   }
 
-  const task = store.createTask(cwd, params.title, params.content, params.dependsOn, namespace);
+  const task = store.createTask(cwd, params.title, params.content, params.dependsOn, namespace, {
+    critical: params.critical,
+  });
 
   const depsText = task.depends_on.length > 0 
     ? `\n**Depends on:** ${task.depends_on.join(", ")}`

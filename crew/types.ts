@@ -74,6 +74,10 @@ export interface Task {
   retry_count?: number;
   spawn_failure_count?: number;  // How many times the spawned process failed to start (ENOENT/EACCES/etc.)
   last_review?: ReviewFeedback;  // Feedback from last review (for retry)
+  rollback_reason?: string;      // Reason task was rolled back and re-queued
+
+  /** When true, task gets dual-worker verification: two independent workers, outputs compared */
+  critical?: boolean;
 }
 
 export interface ReviewFeedback {
@@ -134,6 +138,9 @@ export interface CrewParams {
   // Task reset
   cascade?: boolean;
   force?: boolean;
+
+  // Critical task dual-verification
+  critical?: boolean;
   // Revision
   prompt?: string;
 

@@ -197,6 +197,7 @@ export function createTask(
   description?: string,
   dependsOn?: string[],
   namespace?: string,
+  options?: { critical?: boolean },
 ): Task {
   const id = allocateTaskId(cwd);
   const now = new Date().toISOString();
@@ -212,6 +213,7 @@ export function createTask(
     updated_at: now,
     attempt_count: 0,
     spawn_failure_count: 0,
+    ...(options?.critical ? { critical: true } : {}),
   };
 
   writeJson(path.join(getTasksDir(cwd), `${id}.json`), task);

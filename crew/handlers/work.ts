@@ -7,7 +7,7 @@
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { generateMemorableName, type Dirs } from "../../lib.js";
-import type { CrewParams, AppendEntryFn } from "../types.js";
+import type { CrewParams, AppendEntryFn, AgentResult } from "../types.js";
 import { result } from "../utils/result.js";
 import { resolveModel, spawnAgents } from "../agents.js";
 import { loadCrewConfig } from "../utils/config.js";
@@ -222,6 +222,280 @@ function spawnIntegrationTest(
   });
 }
 
+/**
+ * Trigger a rollback for a task that caused cascading failures.
+ * Spawns the rollback-agent to revert changes, then resets the task to todo
+ * with rollback context so it can be re-attempted.
+ */
+export function triggerRollback(cwd: string, taskId: string, reason: string): void {
+  const task = store.getTask(cwd, taskId);
+  if (!task) {
+    store.appendTaskProgress(cwd, taskId, "system",
+      `Rollback skipped: task ${taskId} not found`);
+    return;
+  }
+
+  const baseCommit = task.base_commit;
+  if (!baseCommit) {
+    store.appendTaskProgress(cwd, taskId, "system",
+      `Rollback skipped: no base_commit recorded for ${taskId}`);
+    return;
+  }
+
+  const rollbackPrompt = [
+    `## Rollback: ${taskId}`,
+    ``,
+    `### Task: ${task.title}`,
+    ``,
+    `### Base Commit: ${baseCommit}`,
+    ``,
+    `### Failure Details:`,
+    reason,
+    ``,
+    `### Instructions:`,
+    `1. \`git log --oneline ${baseCommit}..HEAD\` to see commits from this task`,
+    `2. \`git diff ${baseCommit}..HEAD\` to see all changes`,
+    `3. \`git revert --no-commit ${baseCommit}..HEAD\` to undo changes`,
+    `4. Verify: run tests to confirm revert fixed the issue`,
+    `5. If revert fixed it, commit with message "rollback: revert ${taskId} due to cascading failures"`,
+    `6. Report what was reverted and why`,
+    ``,
+    `Working directory: ${cwd}`,
+  ].join("\n");
+
+  store.appendTaskProgress(cwd, taskId, "system",
+    `Rollback triggered for ${taskId}: ${reason}`);
+  logFeedEvent(cwd, "rollback-agent", "message", taskId,
+    `Rollback initiated for ${task.title}`);
+
+  const rollbackModel = resolveModel("openai/gpt-5.3-mini");
+  spawnAgents(
+    [{
+      agent: "rollback-agent",
+      task: rollbackPrompt,
+      taskId: `rollback-${taskId}`,
+      modelOverride: rollbackModel,
+    }],
+    cwd,
+    {},
+  ).then((results) => {
+    const rollbackResult = results[0];
+    if (!rollbackResult) return;
+
+    const output = rollbackResult.output ?? "";
+    const wasReverted = /status:\s*reverted/i.test(output);
+
+    store.appendTaskProgress(cwd, taskId, "rollback-agent",
+      wasReverted
+        ? `✅ Rollback completed: changes from ${taskId} have been reverted`
+        : `❌ Rollback failed: could not revert changes from ${taskId}`);
+    logFeedEvent(cwd, "rollback-agent",
+      wasReverted ? "task.reset" : "task.block",
+      taskId,
+      wasReverted ? "Rollback: reverted" : "Rollback: failed");
+
+    if (wasReverted) {
+      // Reset task to todo with rollback context so it can be re-attempted
+      store.updateTask(cwd, taskId, {
+        status: "todo",
+        assigned_to: undefined,
+        rollback_reason: reason,
+      });
+      store.appendTaskProgress(cwd, taskId, "system",
+        `Task reset to todo after rollback. Reason: ${reason}`);
+    } else {
+      store.blockTask(cwd, taskId,
+        `Rollback failed — manual intervention required. Original failure: ${reason}`);
+    }
+  }).catch((err) => {
+    store.appendTaskProgress(cwd, taskId, "system",
+      `Rollback agent failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
+  });
+}
+
+// =============================================================================
+// Dual-Agent Critical Path Verification
+// =============================================================================
+
+/**
+ * Compare outputs from two independent workers on a critical task.
+ * Heuristic: if both mention the same set of changed files and both
+ * succeeded, treat as convergent. Otherwise divergent.
+ */
+export function compareCriticalOutputs(
+  outputA: string,
+  outputB: string,
+): "convergent" | "divergent" {
+  // Extract file paths mentioned in each output (common patterns: src/..., lib/..., etc.)
+  const filePattern = /(?:^|\s)((?:src|lib|crew|handlers|utils|test|__tests__)\/[\w/.@-]+\.\w+)/gm;
+  const filesA = new Set<string>();
+  const filesB = new Set<string>();
+
+  for (const match of outputA.matchAll(filePattern)) filesA.add(match[1]);
+  for (const match of outputB.matchAll(filePattern)) filesB.add(match[1]);
+
+  // If neither mentions files, fall back to simple length/keyword similarity
+  if (filesA.size === 0 && filesB.size === 0) {
+    // Check if both outputs contain similar completion signals
+    const donePatternA = /✅\s*DONE|status:\s*done/i.test(outputA);
+    const donePatternB = /✅\s*DONE|status:\s*done/i.test(outputB);
+    if (donePatternA && donePatternB) return "convergent";
+    return "divergent";
+  }
+
+  // Compute Jaccard similarity on file sets
+  const intersection = new Set([...filesA].filter(f => filesB.has(f)));
+  const union = new Set([...filesA, ...filesB]);
+  const similarity = union.size > 0 ? intersection.size / union.size : 0;
+
+  // Threshold: if ≥50% file overlap, consider convergent
+  return similarity >= 0.5 ? "convergent" : "divergent";
+}
+
+/**
+ * Spawn a judge agent to adjudicate between two divergent critical-path outputs.
+ */
+function spawnCriticalJudge(
+  taskId: string,
+  taskTitle: string,
+  outputA: string,
+  outputB: string,
+  cwd: string,
+  config: ReturnType<typeof loadCrewConfig>,
+  dirs: Dirs,
+): void {
+  const judgePrompt = [
+    `## Critical Path Adjudication: ${taskId}`,
+    ``,
+    `### Task: ${taskTitle}`,
+    ``,
+    `Two independent workers attempted this critical task and produced divergent results.`,
+    `Compare their approaches and determine which (if either) is correct.`,
+    ``,
+    `### Worker A Output (truncated):`,
+    "```",
+    outputA.slice(0, 3000),
+    "```",
+    ``,
+    `### Worker B Output (truncated):`,
+    "```",
+    outputB.slice(0, 3000),
+    "```",
+    ``,
+    `### Instructions:`,
+    `1. Analyze both approaches`,
+    `2. Determine which approach is more correct/complete`,
+    `3. Output verdict: ACCEPT_A, ACCEPT_B, or REJECT_BOTH`,
+    `4. Explain your reasoning`,
+    ``,
+    `Working directory: ${cwd}`,
+  ].join("\n");
+
+  store.appendTaskProgress(cwd, taskId, "system",
+    `Critical judge spawned: two workers diverged on ${taskId}`);
+  logFeedEvent(cwd, "critical-judge", "message", taskId,
+    `Adjudicating divergent outputs for critical task ${taskTitle}`);
+
+  const judgeModel = resolveModel(config.models?.reviewer);
+  spawnAgents(
+    [{
+      agent: "adversarial-reviewer",
+      task: judgePrompt,
+      taskId: `judge-${taskId}`,
+      modelOverride: judgeModel,
+    }],
+    cwd,
+    { messengerDirs: { registry: dirs.registry, inbox: dirs.inbox } },
+  ).then((results) => {
+    const judgeResult = results[0];
+    if (!judgeResult) return;
+    const output = judgeResult.output ?? "";
+    const verdict = /ACCEPT_A/i.test(output) ? "ACCEPT_A"
+      : /ACCEPT_B/i.test(output) ? "ACCEPT_B"
+      : "REJECT_BOTH";
+
+    store.appendTaskProgress(cwd, taskId, "critical-judge",
+      `Verdict: ${verdict}`);
+    logFeedEvent(cwd, "critical-judge", verdict === "REJECT_BOTH" ? "task.reset" : "task.done",
+      taskId, `Critical judge verdict: ${verdict}`);
+
+    if (verdict === "REJECT_BOTH") {
+      store.updateTask(cwd, taskId, {
+        status: "todo",
+        assigned_to: undefined,
+        last_review: {
+          verdict: "MAJOR_RETHINK",
+          summary: "Both critical-path workers diverged and judge rejected both",
+          issues: ["Dual-worker verification failed: neither approach accepted"],
+          suggestions: [],
+          reviewed_at: new Date().toISOString(),
+        },
+      });
+    }
+  }).catch((err) => {
+    store.appendTaskProgress(cwd, taskId, "system",
+      `Critical judge failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+}
+
+/**
+ * Handle dual-worker spawning and comparison for a critical task.
+ * Returns the AgentResult array from both workers.
+ */
+async function spawnDualWorkers(
+  task: import("../types.js").Task,
+  prdLabel: string,
+  cwd: string,
+  config: ReturnType<typeof loadCrewConfig>,
+  dirs: Dirs,
+  crewNamespace: string,
+  params: CrewParams,
+  otherTasks: import("../types.js").Task[],
+): Promise<{ results: AgentResult[]; workerNames: [string, string] }> {
+  const workerNameA = `${generateMemorableName()}-A`;
+  const workerNameB = `${generateMemorableName()}-B`;
+  const modelOverride = resolveModel(task.model, params.model, config.models?.worker);
+
+  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, otherTasks);
+
+  store.updateTask(cwd, task.id, {
+    status: "in_progress",
+    started_at: new Date().toISOString(),
+    base_commit: store.getBaseCommit(cwd),
+    assigned_to: `${workerNameA},${workerNameB}`,
+    attempt_count: task.attempt_count + 1,
+  });
+
+  store.appendTaskProgress(cwd, task.id, "system",
+    `Critical dual-worker: assigned to ${workerNameA} and ${workerNameB} (attempt ${task.attempt_count + 1})`);
+  logFeedEvent(cwd, "crew", "task.start", task.id,
+    `Critical dual-worker spawn: ${workerNameA} + ${workerNameB}`);
+
+  const taskIdNs = namespacedTaskId(task.id, crewNamespace);
+  const workerTasks = [
+    {
+      agent: "crew-worker",
+      task: prompt,
+      taskId: `${taskIdNs}-A`,
+      modelOverride,
+      workerName: workerNameA,
+    },
+    {
+      agent: "crew-worker",
+      task: prompt,
+      taskId: `${taskIdNs}-B`,
+      modelOverride,
+      workerName: workerNameB,
+    },
+  ];
+
+  const results = await spawnAgents(workerTasks, cwd, {
+    messengerDirs: { registry: dirs.registry, inbox: dirs.inbox },
+  });
+
+  return { results, workerNames: [workerNameA, workerNameB] };
+}
+
 export async function execute(
   params: CrewParams,
   dirs: Dirs,
@@ -384,7 +658,60 @@ export async function execute(
     store.appendTaskProgress(cwd, task.id, "system", `Assigned to ${workerName} via crew-worker (attempt ${currentTask.attempt_count + 1})`);
   }
 
-  const workerTasks = pendingAssignments.map(({ task, workerName, modelOverride }) => {
+  // Separate critical tasks for dual-worker verification
+  const criticalAssignments = pendingAssignments.filter(a => {
+    const freshTask = store.getTask(cwd, a.task.id);
+    return freshTask?.critical === true;
+  });
+  const normalAssignments = pendingAssignments.filter(a => {
+    const freshTask = store.getTask(cwd, a.task.id);
+    return freshTask?.critical !== true;
+  });
+
+  // Spawn dual workers for critical tasks (async, processed after normal workers)
+  const criticalPromises: Promise<void>[] = [];
+  for (const assignment of criticalAssignments) {
+    const { task: assignedTask } = assignment;
+    const freshTask = store.getTask(cwd, assignedTask.id);
+    if (!freshTask) continue;
+
+    const others = pendingAssignments.map(a => a.task).filter(o => o.id !== assignedTask.id);
+    const promise = spawnDualWorkers(
+      freshTask, prdLabel, cwd, config, dirs, crewNamespace, params, others,
+    ).then(({ results: dualResults, workerNames }) => {
+      const [resultA, resultB] = dualResults;
+      const outputA = resultA?.output ?? "";
+      const outputB = resultB?.output ?? "";
+      const bothSucceeded = resultA?.exitCode === 0 && resultB?.exitCode === 0;
+
+      if (bothSucceeded) {
+        const comparison = compareCriticalOutputs(outputA, outputB);
+        store.appendTaskProgress(cwd, assignedTask.id, "system",
+          `Critical comparison: ${comparison} (workers: ${workerNames.join(", ")})`);
+
+        if (comparison === "convergent") {
+          // Accept — the task should already be marked done by the worker
+          logFeedEvent(cwd, "crew", "message", assignedTask.id,
+            `Critical dual-verification: CONVERGENT ✅`);
+        } else {
+          // Divergent — spawn judge
+          logFeedEvent(cwd, "crew", "message", assignedTask.id,
+            `Critical dual-verification: DIVERGENT — spawning judge`);
+          spawnCriticalJudge(assignedTask.id, assignedTask.title, outputA, outputB, cwd, config, dirs);
+        }
+      } else {
+        // One or both failed — log and let normal failure handling apply
+        store.appendTaskProgress(cwd, assignedTask.id, "system",
+          `Critical dual-worker: not both succeeded (A=${resultA?.exitCode}, B=${resultB?.exitCode})`);
+      }
+    }).catch((err) => {
+      store.appendTaskProgress(cwd, assignedTask.id, "system",
+        `Critical dual-worker spawn failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    criticalPromises.push(promise);
+  }
+
+  const workerTasks = normalAssignments.map(({ task, workerName, modelOverride }) => {
     const others = pendingAssignments.map(assignment => assignment.task).filter(other => other.id !== task.id);
     const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
 
@@ -397,12 +724,18 @@ export async function execute(
     };
   });
 
+  // Include critical task IDs in attempted list
+  const criticalTaskIds = criticalAssignments.map(a => a.task.id);
+
   const attemptedTaskIds = workerTasks
     .map(workerTask => fromNamespacedTaskId(workerTask.taskId, crewNamespace))
     .filter((taskId): taskId is string => !!taskId);
+  attemptedTaskIds.push(...criticalTaskIds);
 
-  const workerResults = workerTasks.length > 0
-    ? await spawnAgents(
+  // Await critical dual-worker tasks in parallel with normal workers
+  const [workerResults] = await Promise.all([
+    workerTasks.length > 0
+    ? spawnAgents(
         workerTasks,
         cwd,
         {
@@ -410,7 +743,9 @@ export async function execute(
           messengerDirs: { registry: dirs.registry, inbox: dirs.inbox },
         }
       )
-    : [];
+    : Promise.resolve([] as AgentResult[]),
+    ...criticalPromises,
+  ]);
 
   // Process results
   const succeeded: string[] = [];
