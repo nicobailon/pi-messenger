@@ -96,7 +96,7 @@ function taskCreate(cwd: string, params: CrewParams, crewNamespace?: string) {
     }
   }
 
-  const task = store.createTask(cwd, params.title, params.content, params.dependsOn, crewNamespace);
+  const task = store.createTask(cwd, params.title, params.content, params.dependsOn);
 
   const depsText = task.depends_on.length > 0 
     ? `\n**Depends on:** ${task.depends_on.join(", ")}`
@@ -205,7 +205,7 @@ The parent becomes a milestone that auto-completes when all subtasks are done.`;
 
   const created: Task[] = [];
   for (const sub of subtasks) {
-    const newTask = store.createTask(cwd, sub.title, sub.content, [...task.depends_on]);
+    const newTask = store.createDiscoveredTask(cwd, sub.title, sub.content, [...task.depends_on], task.id);
     created.push(newTask);
   }
 

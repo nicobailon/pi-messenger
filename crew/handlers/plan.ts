@@ -454,7 +454,7 @@ export async function execute(
 
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i];
-    const created = store.createTask(cwd, task.title, task.description, undefined, crewNamespace);
+    const created = store.createTask(cwd, task.title, task.description);
     createdTasks.push({ id: created.id, title: task.title, dependsOn: task.dependsOn, skills: task.skills });
     titleToId.set(task.title.toLowerCase(), created.id);
     titleToId.set(`task ${i + 1}`, created.id);

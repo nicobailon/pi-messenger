@@ -10,7 +10,8 @@ export type CrewTaskSyncEvent =
   | "task.done"
   | "task.blocked"
   | "task.reset"
-  | "task.reviewed";
+  | "task.reviewed"
+  | "task.discovered";
 
 export interface CrewTaskSyncPayload {
   event: CrewTaskSyncEvent;
@@ -55,6 +56,7 @@ export function buildCrewTaskSyncPayload(
     updated_at?: string;
     started_at?: string;
     completed_at?: string;
+    discovered_from?: string;
   },
   event: CrewTaskSyncEvent,
   extra: Record<string, unknown> = {},
@@ -72,6 +74,7 @@ export function buildCrewTaskSyncPayload(
     updated_at: task.updated_at,
     started_at: task.started_at,
     completed_at: task.completed_at,
+    discovered_from: task.discovered_from,
     ...extra,
   };
 }

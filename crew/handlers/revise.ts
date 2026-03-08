@@ -200,7 +200,7 @@ export async function executeReviseTree(
   }
 
   for (const entry of newEntries) {
-    const created = store.createTask(cwd, entry.title!, entry.spec, []);
+    const created = store.createDiscoveredTask(cwd, entry.title!, entry.spec, [], taskId);
     titleToId.set(entry.title!.toLowerCase(), created.id);
   }
 

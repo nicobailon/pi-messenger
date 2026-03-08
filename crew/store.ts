@@ -184,7 +184,8 @@ export function createTask(
   cwd: string,
   title: string,
   description?: string,
-  dependsOn?: string[]
+  dependsOn: string[] = [],
+  discoveredFrom?: string
 ): Task {
   const id = allocateTaskId(cwd);
   const now = new Date().toISOString();
@@ -193,7 +194,8 @@ export function createTask(
     id,
     title,
     status: "todo",
-    depends_on: dependsOn ?? [],
+    depends_on: dependsOn,
+    discovered_from: discoveredFrom,
     created_at: now,
     updated_at: now,
     attempt_count: 0,
@@ -213,23 +215,36 @@ export function createTask(
     updatePlan(cwd, { task_count: plan.task_count + 1 });
   }
 
+  const creationEvent: CrewTaskSyncEvent = discoveredFrom ? "task.discovered" : "task.created";
+
   syncCrewTask(
-    buildCrewTaskSyncPayload(task, "task.created", {
+    buildCrewTaskSyncPayload(task, creationEvent, {
       namespace: "",
       content: description ?? "",
       plan_id: plan?.prd ?? "",
       source_spec_id: `${id}.md`,
-      depends_on: dependsOn ?? [],
+      depends_on: dependsOn,
     }),
   );
 
   return task;
 }
 
+export function createDiscoveredTask(
+  cwd: string,
+  title: string,
+  description?: string,
+  dependsOn: string[] = [],
+  discoveredFrom?: string
+): Task {
+  return createTask(cwd, title, description, dependsOn, discoveredFrom);
+}
+
 function normalizeTask(raw: Task): Task {
   return {
     ...raw,
     depends_on: Array.isArray(raw.depends_on) ? raw.depends_on : [],
+    discovered_from: typeof raw.discovered_from === "string" ? raw.discovered_from : undefined,
     attempt_count: typeof raw.attempt_count === "number" ? raw.attempt_count : 0,
   };
 }

@@ -72,6 +72,10 @@ describe("crew/task.split", () => {
     const subtaskIds = response.details.subtasks.map((t: { id: string }) => t.id);
     expect(subtaskIds).toHaveLength(2);
 
+    for (const subtaskId of subtaskIds) {
+      expect(store.getTask(cwd, subtaskId)?.discovered_from).toBe(parent.id);
+    }
+
     const reloadedParent = store.getTask(cwd, parent.id);
     expect(reloadedParent?.milestone).toBe(true);
     expect(reloadedParent?.status).toBe("todo");

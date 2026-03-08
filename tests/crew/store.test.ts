@@ -367,6 +367,29 @@ function readSyncEvents(outputPath: string): Array<Record<string, unknown>> {
       }
     });
 
+    it("records discovered_from metadata for created tasks and syncs as task.discovered", () => {
+      const syncOutput = path.join(dirs.root, "sync-events-discovered.log");
+      process.env.SYNC_OUTPUT = syncOutput;
+      process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT = writeSyncCaptureScript(syncOutput);
+
+      store.createPlan(cwd, "docs/PRD.md");
+      const parent = store.createTask(cwd, "Parent", "Parent task");
+      const discovered = store.createTask(cwd, "Discovered child", "Child task", [parent.id], parent.id);
+
+      const discoveredTask = store.getTask(cwd, discovered.id);
+      expect(discoveredTask?.discovered_from).toBe(parent.id);
+
+      try {
+        const events = readSyncEvents(syncOutput);
+        const discoveredEvent = events.find(event => event.id === discovered.id);
+        expect(discoveredEvent?.event).toBe("task.discovered");
+        expect(discoveredEvent?.discovered_from).toBe(parent.id);
+      } finally {
+        delete process.env.SYNC_OUTPUT;
+        delete process.env.PI_MESSENGER_SYNC_CREW_TASK_SCRIPT;
+      }
+    });
+
   });
 
   describe("dependency resolution (getReadyTasks)", () => {
