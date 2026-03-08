@@ -5,6 +5,7 @@ import {
   renderMetricsSummary,
   renderHealthIndicator,
   renderSessionRow,
+  renderGroupedSessions,
   formatDuration,
   stripAnsi,
   visibleLen,
@@ -227,5 +228,95 @@ describe("stripAnsi", () => {
 
   it("returns plain string unchanged", () => {
     expect(stripAnsi("hello world")).toBe("hello world");
+  });
+});
+
+// ─── getEventReason (via renderGroupedSessions) ───────────────────────────────
+
+describe("getEventReason — fallback field extraction", () => {
+  function makeSessionWithEvent(
+    status: "error" | "paused",
+    eventType: string,
+    payload: Record<string, unknown>,
+  ): SessionState {
+    return makeSession({
+      status,
+      events: [
+        {
+          id: "evt-1",
+          type: eventType,
+          timestamp: new Date().toISOString(),
+          data: payload,
+        } as any,
+      ],
+    });
+  }
+
+  it("extracts reason from data.reason (highest priority)", () => {
+    const session = makeSessionWithEvent("error", "session.error", {
+      reason: "explicit reason",
+      message: "fallback message",
+    });
+    const lines = renderGroupedSessions([session], 0, 80);
+    const reasonLine = lines.find((l) => stripAnsi(l).includes("Reason:"));
+    expect(reasonLine).toBeDefined();
+    expect(stripAnsi(reasonLine!)).toContain("explicit reason");
+  });
+
+  it("extracts reason from data.message when reason is absent", () => {
+    const session = makeSessionWithEvent("error", "session.error", {
+      message: "error message text",
+    });
+    const lines = renderGroupedSessions([session], 0, 80);
+    const reasonLine = lines.find((l) => stripAnsi(l).includes("Reason:"));
+    expect(reasonLine).toBeDefined();
+    expect(stripAnsi(reasonLine!)).toContain("error message text");
+  });
+
+  it("extracts reason from data.error when reason and message are absent", () => {
+    const session = makeSessionWithEvent("error", "session.error", {
+      error: "something crashed",
+    });
+    const lines = renderGroupedSessions([session], 0, 80);
+    const reasonLine = lines.find((l) => stripAnsi(l).includes("Reason:"));
+    expect(reasonLine).toBeDefined();
+    expect(stripAnsi(reasonLine!)).toContain("something crashed");
+  });
+
+  it("extracts reason from data.summary when higher-priority fields are absent", () => {
+    const session = makeSessionWithEvent("paused", "session.paused", {
+      summary: "waiting for user input",
+    });
+    const lines = renderGroupedSessions([session], 0, 80);
+    const reasonLine = lines.find((l) => stripAnsi(l).includes("Reason:"));
+    expect(reasonLine).toBeDefined();
+    expect(stripAnsi(reasonLine!)).toContain("waiting for user input");
+  });
+
+  it("returns no reason line when payload has none of the expected fields", () => {
+    const session = makeSessionWithEvent("error", "session.error", {
+      code: 500,
+    });
+    const lines = renderGroupedSessions([session], 0, 80);
+    const reasonLine = lines.find((l) => stripAnsi(l).includes("Reason:"));
+    expect(reasonLine).toBeUndefined();
+  });
+
+  it("supports payload shape (event.payload instead of event.data)", () => {
+    const session = makeSession({
+      status: "error",
+      events: [
+        {
+          id: "evt-2",
+          type: "session.error",
+          timestamp: new Date().toISOString(),
+          payload: { message: "payload shape message" },
+        } as any,
+      ],
+    });
+    const lines = renderGroupedSessions([session], 0, 80);
+    const reasonLine = lines.find((l) => stripAnsi(l).includes("Reason:"));
+    expect(reasonLine).toBeDefined();
+    expect(stripAnsi(reasonLine!)).toContain("payload shape message");
   });
 });

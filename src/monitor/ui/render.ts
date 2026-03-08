@@ -4,6 +4,10 @@
  */
 
 import type { SessionState, SessionStatus, SessionMetrics } from "../types/session.js";
+import {
+  renderSessionRow as renderOverviewSessionRow,
+  type SessionRowData,
+} from "./session-row.js";
 
 // ─── ANSI color constants ─────────────────────────────────────────────────────
 
@@ -200,12 +204,58 @@ function getEventReason(session: SessionState): string | null {
     const matches = relevantTypes.some((t) => event.type.includes(t));
     if (matches) {
       const payload = event.data ?? event.payload;
-      if (payload && typeof payload === "object" && "reason" in payload) {
-        return String((payload as any).reason);
+      if (payload && typeof payload === "object") {
+        const p = payload as any;
+        const value = p.reason ?? p.message ?? p.error ?? p.summary;
+        if (value !== undefined && value !== null) {
+          return String(value);
+        }
       }
     }
   }
   return null;
+}
+
+function inferHealthStatus(session: SessionState, now: number): "healthy" | "degraded" | "critical" {
+  if (session.status !== "active") return "healthy";
+
+  const lastActivityAt = getLastEventTimestamp(session) ?? Date.parse(session.metadata.startedAt);
+  const ageMs = Math.max(0, now - lastActivityAt);
+  const errorRate = session.metrics.eventCount > 0
+    ? session.metrics.errorCount / session.metrics.eventCount
+    : 0;
+
+  if (ageMs >= 120_000) return "critical";
+  if (ageMs >= 30_000 || errorRate >= 0.5) return "degraded";
+  return "healthy";
+}
+
+function inferAttentionReason(
+  session: SessionState,
+  health: "healthy" | "degraded" | "critical",
+): SessionRowData["attention"] {
+  if (session.status === "error") return "failed_recoverable";
+  if (session.status === "paused" || session.status === "idle") return "waiting_on_human";
+  if (health === "critical") return "stuck";
+  if (health === "degraded") return "degraded";
+  return null;
+}
+
+function buildOverviewRow(session: SessionState, selected: boolean, width: number, now: number): string {
+  const lastActivityAt = getLastEventTimestamp(session) ?? Date.parse(session.metadata.startedAt);
+  const health = inferHealthStatus(session, now);
+  const attention = inferAttentionReason(session, health);
+
+  return renderOverviewSessionRow(
+    {
+      session,
+      health,
+      attention,
+      now,
+      lastActivityAt,
+    },
+    { selected, width },
+  );
 }
 
 /**
@@ -275,29 +325,8 @@ export function renderGroupedSessions(
   const renderGroup = (group: SessionState[]) => {
     for (const session of group) {
       const selected = session === selectedSession;
-      const prefix = selected ? "> " : "  ";
-      const name = session.metadata.name || session.metadata.id;
-      const badge = renderStatusBadge(session.status);
+      lines.push(buildOverviewRow(session, selected, width, now));
 
-      // taskId indicator
-      const taskPart = session.metadata.taskId
-        ? ` ${ANSI.dim}[${session.metadata.taskId}]${ANSI.reset}`
-        : "";
-
-      // Last activity age
-      const lastTs = getLastEventTimestamp(session);
-      const agePart =
-        lastTs != null
-          ? ` ${ANSI.dim}${formatDuration(now - lastTs)} ago${ANSI.reset}`
-          : "";
-
-      lines.push(`${prefix}${badge} ${name}${taskPart}${agePart}`);
-
-      // Metrics summary line
-      const metricsSummary = renderMetricsSummary(session.metrics);
-      lines.push(`     ${ANSI.dim}${metricsSummary}${ANSI.reset}`);
-
-      // Reason line for failed/queued sessions
       const reason = getEventReason(session);
       if (reason) {
         lines.push(`     ${ANSI.dim}Reason: ${reason}${ANSI.reset}`);
