@@ -140,6 +140,12 @@ export interface CrewParams {
   // Feed
   limit?: number;
 
+  // Question protocol
+  question?: string;
+  questionId?: string;
+  answer?: string;
+  context?: string;
+
   // Coordination
   spec?: string;
   to?: string | string[];
@@ -150,6 +156,13 @@ export interface CrewParams {
   name?: string;
   notes?: string;
   autoRegisterPath?: "add" | "remove" | "list";
+
+  // Blackboard
+  key?: string;
+  value?: string;
+  reasoning?: string;
+  challenge?: string;
+  resolution?: string;
 }
 
 // =============================================================================

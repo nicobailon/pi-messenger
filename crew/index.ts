@@ -209,6 +209,54 @@ export async function executeCrewAction(
       }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Question protocol — inter-agent Q&A
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'ask': {
+      try {
+        const questionHandler = await import("./handlers/question.js");
+        return questionHandler.execute("ask", params, state, ctx);
+      } catch (e) {
+        return result(`Error: ask handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "ask", error: "handler_error" });
+      }
+    }
+
+    case 'answer': {
+      try {
+        const questionHandler = await import("./handlers/question.js");
+        return questionHandler.execute("answer", params, state, ctx);
+      } catch (e) {
+        return result(`Error: answer handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "answer", error: "handler_error" });
+      }
+    }
+
+    case 'questions': {
+      const questionOp = op ?? "list";
+      try {
+        const questionHandler = await import("./handlers/question.js");
+        return questionHandler.execute(questionOp, params, state, ctx);
+      } catch (e) {
+        return result(`Error: questions.${questionOp} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "questions", error: "handler_error", operation: questionOp });
+      }
+    }
+
+    case 'blackboard': {
+      if (!op) {
+        return result("Error: blackboard action requires operation (e.g., 'blackboard.post', 'blackboard.read').",
+          { mode: "blackboard", error: "missing_operation" });
+      }
+      try {
+        const blackboardHandler = await import("./handlers/blackboard.js");
+        return blackboardHandler.execute(op, params, state, ctx);
+      } catch (e) {
+        return result(`Error: blackboard.${op} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "blackboard", error: "handler_error", operation: op });
+      }
+    }
+
     case 'crew': {
       if (!op) {
         return result("Error: crew action requires operation (e.g., 'crew.status', 'crew.agents').",

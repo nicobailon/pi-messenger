@@ -136,6 +136,82 @@ function spawnAdversarialReview(
   });
 }
 
+/**
+ * Spawn an integration tester for a completed task (async/non-blocking).
+ * Runs test suite, linting, and type-checking. If any check fails, the task
+ * is blocked with failure details.
+ */
+function spawnIntegrationTest(
+  taskId: string,
+  taskTitle: string,
+  baseCommit: string | undefined,
+  cwd: string,
+  config: ReturnType<typeof loadCrewConfig>,
+  dirs: Dirs,
+): void {
+  const testPrompt = [
+    `## Integration Test: ${taskId}`,
+    ``,
+    `### Task: ${taskTitle}`,
+    ``,
+    `### Instructions:`,
+    `1. Project directory: ${cwd}`,
+    `2. Run the test suite (look for package.json scripts: test, vitest, jest)`,
+    `3. Run linting (eslint, biome, or lint script)`,
+    `4. Run type-checking (tsc --noEmit)`,
+    `5. Output a structured report: PASS or FAIL with details for each check`,
+    `6. If any check fails, the overall verdict is FAIL`,
+    ``,
+    `Base commit for reference: ${baseCommit ?? "HEAD~1"}`,
+    `Working directory: ${cwd}`,
+  ].join("\n");
+
+  store.appendTaskProgress(cwd, taskId, "system",
+    `Integration test spawned for ${taskId}`);
+  logFeedEvent(cwd, "integration-tester", "message", taskId, `Integration test started for ${taskTitle}`);
+
+  // Spawn asynchronously — do not await
+  const testModel = resolveModel(config.models?.reviewer);
+  spawnAgents(
+    [{
+      agent: "integration-tester",
+      task: testPrompt,
+      taskId: `integration-${taskId}`,
+      modelOverride: testModel,
+    }],
+    cwd,
+    { messengerDirs: { registry: dirs.registry, inbox: dirs.inbox } },
+  ).then((results) => {
+    const testResult = results[0];
+    if (!testResult) return;
+
+    const output = testResult.output ?? "";
+    const isFail = /## Verdict:\s*FAIL/i.test(output);
+
+    store.appendTaskProgress(cwd, taskId, "integration-tester",
+      isFail
+        ? `❌ Integration tests FAILED: see test output for details`
+        : `✅ Integration tests PASSED`);
+    logFeedEvent(cwd, "integration-tester", isFail ? "task.block" : "task.done",
+      taskId, isFail ? "Integration tests: FAILED" : "Integration tests: PASSED");
+
+    if (isFail) {
+      // Extract failure details from report
+      const failSections = output.match(/### (?:Test Suite|Linting|Type Checking)[\s\S]*?(?=###|## Verdict|<\/integration_test_report>)/g);
+      const failures = failSections
+        ? failSections.filter(s => /Status:\s*FAIL/i.test(s)).map(s => s.trim()).slice(0, 5)
+        : ["See full integration test output for details"];
+
+      store.blockTask(cwd, taskId, `Integration test failures:\n${failures.join("\n")}`);
+      store.appendTaskProgress(cwd, taskId, "system",
+        `Task blocked after integration test failure`);
+    }
+  }).catch((err) => {
+    store.appendTaskProgress(cwd, taskId, "system",
+      `Integration test failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
+  });
+}
+
 export async function execute(
   params: CrewParams,
   dirs: Dirs,
@@ -352,6 +428,10 @@ export async function execute(
         if (config.review?.autoAdversarial !== false && task) {
           spawnAdversarialReview(taskId, task.title, task.summary, task.base_commit, cwd, config, dirs);
         }
+        // Post-completion integration test (async/non-blocking)
+        if (config.review?.autoIntegrationTest !== false && task) {
+          spawnIntegrationTest(taskId, task.title, task.base_commit, cwd, config, dirs);
+        }
       } else if (task?.status === "blocked") {
         blocked.push(taskId);
       } else if (task?.status === "in_progress") {
@@ -369,6 +449,10 @@ export async function execute(
           // Post-completion adversarial review (async/non-blocking)
           if (config.review?.autoAdversarial !== false && task) {
             spawnAdversarialReview(taskId, task.title, task.summary, task.base_commit, cwd, config, dirs);
+          }
+          // Post-completion integration test (async/non-blocking)
+          if (config.review?.autoIntegrationTest !== false && task) {
+            spawnIntegrationTest(taskId, task.title, task.base_commit, cwd, config, dirs);
           }
         } else if (task?.status === "blocked") {
           blocked.push(taskId);

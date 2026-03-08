@@ -60,7 +60,7 @@ export interface CrewConfig {
   };
   memory: { enabled: boolean };
   planSync: { enabled: boolean };
-  review: { enabled: boolean; maxIterations: number };
+  review: { enabled: boolean; maxIterations: number; autoAdversarial?: boolean; autoIntegrationTest?: boolean };
   planning: { maxPasses: number };
   work: {
     maxAttemptsPerTask: number;
@@ -90,7 +90,7 @@ const DEFAULT_CONFIG: CrewConfig = {
   artifacts: { enabled: true, cleanupDays: 7 },
   memory: { enabled: false },
   planSync: { enabled: false },
-  review: { enabled: true, maxIterations: 3 },
+  review: { enabled: true, maxIterations: 3, autoAdversarial: true, autoIntegrationTest: true },
   planning: { maxPasses: 1 },
   work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false, shutdownGracePeriodMs: 30000 },
   dependencies: "advisory",
