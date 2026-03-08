@@ -24,6 +24,7 @@ import {
 import { updateLiveWorker, removeLiveWorker } from "./live-progress.js";
 import * as store from "./store.js";
 import { logFeedEvent } from "../feed.js";
+import { reconcileOrphans } from "./reconcile.js";
 import {
   registerWorker,
   unregisterWorker,
@@ -322,6 +323,8 @@ export function spawnWorkerForTask(
   taskId: string,
   taskPrompt: string,
 ): LobbyWorker | null {
+  reconcileOrphans(cwd, { heartbeatTimeoutMs: 30_000, maxRetries: 3 });
+
   const task = store.getTask(cwd, taskId);
   if (!task || task.status !== "todo") return null;
 

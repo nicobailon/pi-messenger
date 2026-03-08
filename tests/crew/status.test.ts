@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { execute } from "../../crew/handlers/status.js";
-import { createPlan, createTask, startTask } from "../../crew/store.js";
+import { createPlan, createTask, startTask, getTask } from "../../crew/store.js";
 import { autonomousState, planningState, PLANNING_STALE_TIMEOUT_MS, startAutonomous, startPlanningRun, stopAutonomous } from "../../crew/state.js";
 import { createTempCrewDirs } from "../helpers/temp-dirs.js";
 
@@ -88,6 +88,30 @@ describe("crew.status planning health", () => {
 
     const planning = response.details.planning as { stale: boolean };
     expect(planning.stale).toBe(false);
+  });
+
+  it("reconciles stale in_progress tasks before status output", async () => {
+    const { cwd } = createTempCrewDirs();
+    createPlan(cwd, "README.md");
+
+    const task = createTask(cwd, "Stale in progress");
+    startTask(cwd, task.id, "Worker");
+
+    const taskPath = path.join(cwd, ".pi", "messenger", "crew", "tasks", `${task.id}.json`);
+    const payload = JSON.parse(fs.readFileSync(taskPath, "utf-8"));
+    payload.updated_at = new Date(Date.now() - 60_000).toISOString();
+    fs.writeFileSync(taskPath, JSON.stringify(payload, null, 2));
+
+    const response = await execute({ cwd } as any);
+    const text = response.content[0].text;
+
+    expect(response.details.tasks.inProgress).not.toContain(task.id);
+    expect(response.details.tasks.ready).toContain(task.id);
+    expect(text).toContain(`${task.id}: Stale in progress`);
+
+    const reconciled = getTask(cwd, task.id);
+    expect(reconciled?.status).toBe("todo");
+    expect(reconciled?.attempt_count).toBe(2);
   });
 
   it("shows no-tasks guidance when no tasks exist and planning is inactive", async () => {

@@ -25,12 +25,17 @@ vi.mock("../../crew/store.js", () => ({
   getCrewDir: vi.fn((cwd: string) => `${cwd}/.pi/messenger/crew`),
   getTask: vi.fn(() => null),
   getBaseCommit: vi.fn(() => "abc1234"),
+  getTasks: vi.fn(() => []),
   updateTask: vi.fn(),
   appendTaskProgress: vi.fn(),
 }));
 
 vi.mock("../../feed.js", () => ({
   logFeedEvent: vi.fn(),
+}));
+
+vi.mock("../../crew/reconcile.js", () => ({
+  reconcileOrphans: vi.fn(() => ({ reset: [], skipped: [] })),
 }));
 
 vi.mock("../../crew/utils/config.js", () => ({
@@ -397,6 +402,25 @@ describe("lobby workers", () => {
 
     const worker = lobby.spawnWorkerForTask("/test/cwd", "task-6", "# prompt");
     expect(worker).toBeNull();
+  });
+
+  it("spawnWorkerForTask calls reconcileOrphans before assigning", async () => {
+    const reconcile = await import("../../crew/reconcile.js");
+    const storeModule = await import("../../crew/store.js");
+
+    vi.mocked(reconcile.reconcileOrphans).mockClear();
+    vi.mocked(storeModule.getTask).mockReturnValueOnce({
+      id: "task-7", title: "Assigned", status: "todo", attempt_count: 0,
+      depends_on: [], description: "", created_at: "", milestone: false,
+    } as any);
+
+    const worker = lobby.spawnWorkerForTask("/test/cwd", "task-7", "# prompt");
+
+    expect(reconcile.reconcileOrphans).toHaveBeenCalledWith(
+      "/test/cwd",
+      { heartbeatTimeoutMs: 30_000, maxRetries: 3 },
+    );
+    expect(worker).not.toBeNull();
   });
 
   it("builds minimal lobby prompt without chat instructions", async () => {

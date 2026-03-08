@@ -8,6 +8,7 @@
 import { join } from "node:path";
 import * as store from "./store.js";
 import { loadCrewConfig } from "./utils/config.js";
+import { reconcileOrphans } from "./reconcile.js";
 import { discoverCrewSkills } from "./utils/discover.js";
 import { buildWorkerPrompt } from "./prompt.js";
 import { logFeedEvent } from "../feed.js";
@@ -28,6 +29,8 @@ export function spawnWorkersForReadyTasks(
 ): SpawnResult {
   const plan = store.getPlan(cwd);
   if (!plan) return { assigned: 0, firstWorkerName: null };
+
+  reconcileOrphans(cwd, { heartbeatTimeoutMs: 30_000, maxRetries: 3 });
 
   const crewDir = store.getCrewDir(cwd);
   const config = loadCrewConfig(crewDir);
@@ -90,6 +93,8 @@ export function spawnSingleWorker(
 ): { name: string } | null {
   const plan = store.getPlan(cwd);
   if (!plan) return null;
+
+  reconcileOrphans(cwd, { heartbeatTimeoutMs: 30_000, maxRetries: 3 });
 
   const task = store.getTask(cwd, taskId);
   if (!task) return null;

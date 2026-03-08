@@ -12,6 +12,7 @@ import { loadCrewConfig } from "../utils/config.js";
 import { formatDuration } from "../../lib.js";
 import * as store from "../store.js";
 import { autonomousState, getPlanningUpdateAgeMs, isAutonomousForCwd, isPlanningForCwd, isPlanningStalled, planningState, PLANNING_STALE_TIMEOUT_MS } from "../state.js";
+import { reconcileOrphans } from "../reconcile.js";
 
 /**
  * Execute status action - shows plan progress.
@@ -33,6 +34,8 @@ Create a plan:
       hasPlan: false
     });
   }
+
+  reconcileOrphans(cwd, { heartbeatTimeoutMs: 30_000, maxRetries: 3 });
 
   const tasks = store.getTasks(cwd);
   const config = loadCrewConfig(store.getCrewDir(cwd));
