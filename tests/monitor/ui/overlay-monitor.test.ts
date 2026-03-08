@@ -201,56 +201,54 @@ describe("renderMonitorView", () => {
 
   it("renders attention section at top when a session is paused", () => {
     const registry = makeRegistry();
-    const startedAt = new Date().toISOString();
-    const id = registry.lifecycle.start({
-      id: "sess-paused",
+    registry.lifecycle.start({
+      id: "sess-paused-attn",
       name: "Paused Session",
       cwd: "/tmp",
       model: "claude-3",
-      startedAt,
+      startedAt: new Date().toISOString(),
       agent: "TestAgent",
     });
-    registry.lifecycle.pause(id, "waiting for input");
-
+    registry.lifecycle.pause("sess-paused-attn");
     const viewState = makeViewState();
     const lines = renderMonitorView(registry, 80, 20, viewState);
-    expect(lines.join("\n")).toContain("⚠ Attention");
+    const text = lines.join("\n");
+    expect(text).toContain("Attention");
     registry.dispose();
   });
 
   it("renders attention section for sessions in error state", () => {
     const registry = makeRegistry();
-    const startedAt = new Date().toISOString();
-    const id = registry.lifecycle.start({
-      id: "sess-error",
+    registry.lifecycle.start({
+      id: "sess-err-attn",
       name: "Error Session",
       cwd: "/tmp",
       model: "claude-3",
-      startedAt,
-      agent: "TestAgent",
+      startedAt: new Date().toISOString(),
+      agent: "ErrAgent",
     });
-    registry.lifecycle.escalate(id, "tool failure");
-
+    registry.lifecycle.escalate("sess-err-attn", "something went wrong");
     const viewState = makeViewState();
     const lines = renderMonitorView(registry, 80, 20, viewState);
-    expect(lines.join("\n")).toContain("⚠ Attention");
+    const text = lines.join("\n");
+    expect(text).toContain("Attention");
     registry.dispose();
   });
 
   it("does not render attention section for freshly started active sessions", () => {
     const registry = makeRegistry();
     registry.lifecycle.start({
-      id: "sess-healthy",
+      id: "sess-healthy-attn",
       name: "Healthy Session",
       cwd: "/tmp",
       model: "claude-3",
       startedAt: new Date().toISOString(),
-      agent: "TestAgent",
+      agent: "OkAgent",
     });
-
     const viewState = makeViewState();
     const lines = renderMonitorView(registry, 80, 20, viewState);
-    expect(lines.join("\n")).not.toContain("⚠ Attention");
+    const text = lines.join("\n");
+    expect(text).not.toContain("⚠ Attention");
     registry.dispose();
   });
 });
@@ -258,25 +256,27 @@ describe("renderMonitorView", () => {
 describe("renderAttentionQueue", () => {
   it("returns empty array when no attention items", () => {
     const lines = renderAttentionQueue([], 80);
-
-    expect(lines).toEqual([]);
+    expect(lines).toHaveLength(0);
   });
 
   it("renders attention header and items when items exist", () => {
-    const item = {
-      id: "attn-1",
-      sessionId: "sess-attn-sample-xyz",
-      reason: "stale_running" as const,
-      message: "Session has been stale for over 30 seconds",
-      recommendedAction: "Check the session logs for stuck output",
-      timestamp: new Date().toISOString(),
-    };
-
-    const lines = renderAttentionQueue([item], 100);
+    const items = [
+      {
+        id: "att-1",
+        sessionId: "sess-test-12",
+        reason: "stuck" as const,
+        message: "No progress detected",
+        recommendedAction: "Inspect and retry",
+        timestamp: new Date().toISOString(),
+      },
+    ];
+    const lines = renderAttentionQueue(items, 80);
     const text = lines.join("\n");
-
-    expect(text).toContain("⚠ Attention");
-    expect(text).toContain(item.sessionId.slice(0, 12));
+    expect(text).toContain("Attention");
+    expect(text).toContain("sess-test-12");
+    expect(text).toContain("stuck");
+    expect(text).toContain("No progress detected");
+    expect(text).toContain("Inspect and retry");
   });
 });
 

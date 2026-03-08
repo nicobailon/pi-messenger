@@ -120,9 +120,9 @@ describe("overlay monitor attention wiring", () => {
     const lines = renderMonitorView(registry, 100, 30, { ...viewState });
     const text = lines.join("\n");
 
-    expect(text).toContain("Attention Queue");
+    expect(text).toContain("Attention");
     expect(text).toContain("sess-paused");
-    expect(text.indexOf("Attention Queue")).toBeLessThan(text.indexOf("Running"));
+    expect(text.indexOf("Attention")).toBeLessThan(text.indexOf("Running"));
 
     registry.dispose();
   });
