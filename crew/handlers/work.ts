@@ -15,6 +15,7 @@ import { discoverCrewAgents, discoverCrewSkills } from "../utils/discover.js";
 import { buildWorkerPrompt } from "../prompt.js";
 import * as store from "../store.js";
 import { getCrewDir } from "../store.js";
+import { reconcileOrphans } from "../reconcile.js";
 import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, addWaveResult, clampConcurrency } from "../state.js";
 import { getAvailableLobbyWorkers, assignTaskToLobbyWorker, cleanupUnassignedAliveFiles } from "../lobby.js";
 import { logFeedEvent } from "../../feed.js";
@@ -61,6 +62,9 @@ export async function execute(
       error: "no_worker"
     });
   }
+
+  // Reconcile orphaned tasks before selecting ready work
+  reconcileOrphans(cwd, { heartbeatTimeoutMs: 30_000, maxRetries: 3 });
 
   store.autoCompleteMilestones(cwd);
   syncCompletedCount(cwd);
