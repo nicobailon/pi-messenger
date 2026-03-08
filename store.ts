@@ -3,6 +3,7 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
@@ -1133,4 +1134,52 @@ export function validateTargetAgent(to: string, dirs: Dirs): TargetValidation {
   }
 
   return { valid: true };
+}
+
+// =============================================================================
+// Spawner Pre-Registration (V3 — for non-pi workers)
+// =============================================================================
+
+/**
+ * Derive the messenger registry directory.
+ * Same derivation as index.ts:113-116 — single source of truth.
+ */
+export function getMessengerRegistryDir(): string {
+  const baseDir = process.env.PI_MESSENGER_DIR || join(os.homedir(), ".pi", "agent", "messenger");
+  return join(baseDir, "registry");
+}
+
+/**
+ * Pre-register a spawned worker in the registry.
+ * Called by the spawner (lobby.ts / agents.ts) AFTER spawn() for non-pi runtimes.
+ * Non-pi workers don't self-register via the extension — the spawner does it.
+ *
+ * Uses atomic write (tmp + rename) to prevent partial reads.
+ */
+export function registerSpawnedWorker(
+  registryDir: string,
+  workerCwd: string,
+  name: string,
+  pid: number,
+  model: string,
+  sessionId: string,
+): void {
+  ensureDirSync(registryDir);
+
+  const registration: import("./lib.js").AgentRegistration = {
+    name,
+    pid,
+    sessionId,
+    cwd: workerCwd,
+    model,
+    startedAt: new Date().toISOString(),
+    isHuman: false,
+    session: { toolCalls: 0, tokens: 0, filesModified: [] },
+    activity: { lastActivityAt: new Date().toISOString() },
+  };
+
+  const tmpPath = join(registryDir, `.${name}.tmp`);
+  const finalPath = join(registryDir, `${name}.json`);
+  fs.writeFileSync(tmpPath, JSON.stringify(registration, null, 2));
+  fs.renameSync(tmpPath, finalPath);
 }

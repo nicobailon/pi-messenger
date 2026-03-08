@@ -10,6 +10,7 @@ import * as store from "./store.js";
 import { loadCrewConfig } from "./utils/config.js";
 import { discoverCrewSkills } from "./utils/discover.js";
 import { buildWorkerPrompt } from "./prompt.js";
+import { resolveRuntime } from "./utils/adapters/index.js";
 import { logFeedEvent } from "../feed.js";
 import {
   spawnWorkerForTask,
@@ -46,7 +47,8 @@ export function spawnWorkersForReadyTasks(
 
     const task = fresh[0];
     const others = fresh.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
+    const runtime = resolveRuntime(config, "worker");
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, runtime, "pre-claimed");
 
     store.updateTask(cwd, task.id, {
       status: "in_progress",
@@ -73,7 +75,8 @@ export function spawnWorkersForReadyTasks(
 
     const task = fresh[0];
     const others = fresh.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
+    const runtime2 = resolveRuntime(config, "worker");
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, runtime2, "pre-claimed");
     const worker = spawnWorkerForTask(cwd, task.id, prompt);
     if (!worker) break;
 
@@ -100,7 +103,8 @@ export function spawnSingleWorker(
   const skills = discoverCrewSkills(cwd);
   const readyTasks = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
   const others = readyTasks.filter(t => t.id !== task.id);
-  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
+  const runtime = resolveRuntime(config, "worker");
+  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, runtime, "pre-claimed");
   const worker = spawnWorkerForTask(cwd, taskId, prompt);
   return worker ? { name: worker.name } : null;
 }

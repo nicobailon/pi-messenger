@@ -24,6 +24,7 @@ import { buildRuntimeSpawn } from "./runtime-spawn.js";
 import { resolveRuntime } from "./utils/adapters/index.js";
 import { updateLiveWorker, removeLiveWorker } from "./live-progress.js";
 import * as store from "./store.js";
+import { getMessengerRegistryDir, registerSpawnedWorker } from "../store.js";
 import { logFeedEvent } from "../feed.js";
 import {
   registerWorker,
@@ -57,6 +58,12 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   const crewDir = store.getCrewDir(cwd);
   const config = loadCrewConfig(crewDir);
+
+  // Non-pi lobby guard: lobby prompt uses pi_messenger typed tool calls
+  // which non-pi runtimes can't execute. They spawn on-demand via spawnAgents() instead.
+  const runtime = resolveRuntime(config, "worker");
+  if (runtime !== "pi") return null;
+
   const id = randomUUID().slice(0, 6);
   let name = generateMemorableName();
   for (let i = 0; i < 5; i++) {
@@ -68,7 +75,7 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   const prompt = promptOverride ?? buildLobbyPrompt(cwd, config);
 
   // Build spawn args via runtime adapter (V1.7 — unified spawn engine)
-  const runtime = resolveRuntime(config, "worker");
+  // runtime already resolved above for the lobby guard
   const model = config.models?.worker ?? workerConfig.model;
   const thinking = resolveThinking(
     config.thinking?.worker,
@@ -105,6 +112,12 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
     stdio: ["ignore", "pipe", "pipe"],
     env: spawnResult.env,
   });
+
+  // Pre-register non-pi workers (they can't self-register via extension)
+  if (runtime !== "pi" && proc.pid) {
+    const registryDir = getMessengerRegistryDir();
+    registerSpawnedWorker(registryDir, cwd, name, proc.pid, model ?? "unknown", `crew-${id}`);
+  }
 
   const aliveFile = path.join(crewDir, `lobby-${id}.alive`);
   try { fs.writeFileSync(aliveFile, "", { mode: 0o600 }); } catch {}

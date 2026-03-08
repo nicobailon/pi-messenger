@@ -13,6 +13,7 @@ import { resolveModel, spawnAgents } from "../agents.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { discoverCrewAgents, discoverCrewSkills } from "../utils/discover.js";
 import { buildWorkerPrompt } from "../prompt.js";
+import { resolveRuntime } from "../utils/adapters/index.js";
 import * as store from "../store.js";
 import { getCrewDir } from "../store.js";
 import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, addWaveResult, clampConcurrency } from "../state.js";
@@ -120,7 +121,8 @@ export async function execute(
     if (!task) break;
 
     const others = readyTasks.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
+    const workerRuntime = resolveRuntime(config, "worker");
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, workerRuntime, "pre-claimed");
     store.updateTask(cwd, task.id, {
       status: "in_progress",
       started_at: new Date().toISOString(),
@@ -147,7 +149,8 @@ export async function execute(
       config.models?.worker,
     );
     const others = readyTasks.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
+    const workerRuntime2 = resolveRuntime(config, "worker");
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, workerRuntime2, "pre-claimed");
     store.appendTaskProgress(cwd, task.id, "system", `Assigned to crew-worker (attempt ${task.attempt_count + 1})`);
 
     return {

@@ -9,8 +9,10 @@
 import type { RuntimeAdapter } from "./types.js";
 import type { CrewConfig } from "../config.js";
 import { PiAdapter } from "./pi.js";
+import { ClaudeAdapter } from "./claude.js";
 
 const piAdapter = new PiAdapter();
+const claudeAdapter = new ClaudeAdapter();
 
 /**
  * Get a RuntimeAdapter by name.
@@ -21,8 +23,10 @@ export function getAdapter(runtime: string): RuntimeAdapter {
   switch (runtime) {
     case "pi":
       return piAdapter;
+    case "claude":
+      return claudeAdapter;
     default:
-      throw new Error(`Unknown runtime "${runtime}". Known runtimes: pi`);
+      throw new Error(`Unknown runtime "${runtime}". Known runtimes: pi, claude`);
   }
 }
 

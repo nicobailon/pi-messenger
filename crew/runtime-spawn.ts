@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import type { RuntimeAdapter, SpawnTask, AdapterConfig } from "./utils/adapters/types.js";
 import { getAdapter } from "./utils/adapters/index.js";
 
-export const RUNTIME_ALLOWLIST = new Set(["pi"]);
+export const RUNTIME_ALLOWLIST = new Set(["pi", "claude"]);
 
 export interface RuntimeSpawnArgs {
   command: string;

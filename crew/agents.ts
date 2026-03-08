@@ -40,6 +40,7 @@ import {
   resolveThinking,
   modelHasThinkingSuffix,
 } from "./utils/model.js";
+import { getMessengerRegistryDir, registerSpawnedWorker } from "../store.js";
 
 // Re-export for backward compatibility (tests, lobby.ts, collab.ts import from here)
 export { pushModelArgs, resolveModel, resolveThinking, modelHasThinkingSuffix };
@@ -223,6 +224,13 @@ async function runAgent(
     if (task.taskId) {
       registerWorker({ type: "worker", proc, name: workerName, cwd, taskId: task.taskId });
     }
+
+    // Pre-register non-pi workers (they can't self-register via extension)
+    if (runtime !== "pi" && proc.pid) {
+      const registryDir = options.messengerDirs?.registry ?? getMessengerRegistryDir();
+      registerSpawnedWorker(registryDir, cwd, workerName, proc.pid, model ?? "unknown", `crew-${randomUUID().slice(0, 6)}`);
+    }
+
     let gracefulShutdownRequested = false;
     let discoveredWorkerName: string | null = null;
 
