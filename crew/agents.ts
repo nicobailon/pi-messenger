@@ -186,15 +186,16 @@ async function runAgent(
 
     let promptTmpDir: string | null = null;
     let systemPromptPath: string | undefined;
-    if (agentConfig?.systemPrompt) {
+    const systemPrompt = agentConfig?.systemPrompt;
+    if (systemPrompt) {
       promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-agent-"));
       systemPromptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.md`);
-      fs.writeFileSync(systemPromptPath, agentConfig.systemPrompt, { mode: 0o600 });
+      fs.writeFileSync(systemPromptPath, systemPrompt, { mode: 0o600 });
     }
 
     const spawnResult = buildRuntimeSpawn(
       runtime,
-      { prompt: task.task, systemPromptPath },
+      { prompt: task.task, systemPrompt, systemPromptPath },
       {
         model,
         thinking,

@@ -85,7 +85,9 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   let promptTmpDir: string | null = null;
   let systemPromptPath: string | undefined;
+  let systemPrompt: string | undefined;
   if (workerConfig.systemPrompt) {
+    systemPrompt = workerConfig.systemPrompt;
     promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-lobby-"));
     systemPromptPath = path.join(promptTmpDir, "crew-worker.md");
     fs.writeFileSync(systemPromptPath, workerConfig.systemPrompt, { mode: 0o600 });
@@ -93,7 +95,7 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   const spawnResult = buildRuntimeSpawn(
     runtime,
-    { prompt, systemPromptPath },
+    { prompt, systemPrompt, systemPromptPath },
     {
       model,
       thinking,
