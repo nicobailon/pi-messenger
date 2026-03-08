@@ -14,6 +14,7 @@ import { loadCrewConfig } from "../utils/config.js";
 import { discoverCrewAgents, discoverCrewSkills } from "../utils/discover.js";
 import { buildWorkerPrompt } from "../prompt.js";
 import { resolveRuntime } from "../utils/adapters/index.js";
+import { inferTaskCompletion } from "../completion-inference.js";
 import * as store from "../store.js";
 import { getCrewDir } from "../store.js";
 import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, addWaveResult, clampConcurrency } from "../state.js";
@@ -190,10 +191,22 @@ export async function execute(
       } else if (task?.status === "blocked") {
         blocked.push(taskId);
       } else if (task?.status === "in_progress") {
-        store.appendTaskProgress(cwd, taskId, "system",
-          r.wasGracefullyShutdown ? "Task interrupted (shutdown), reset to todo" : "Worker exited without completing task, reset to todo");
-        store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
-        failed.push(taskId);
+        // Try completion inference before resetting to todo
+        const inferred = inferTaskCompletion({
+          cwd,
+          taskId,
+          workerName: r.agent,
+          exitCode: r.exitCode,
+          baseCommit: task.base_commit,
+        });
+        if (inferred) {
+          succeeded.push(taskId);
+        } else {
+          store.appendTaskProgress(cwd, taskId, "system",
+            r.wasGracefullyShutdown ? "Task interrupted (shutdown), reset to todo" : "Worker exited without completing task, reset to todo");
+          store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
+          failed.push(taskId);
+        }
       } else {
         failed.push(taskId);
       }

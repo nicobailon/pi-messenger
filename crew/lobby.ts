@@ -25,6 +25,7 @@ import { resolveRuntime } from "./utils/adapters/index.js";
 import { updateLiveWorker, removeLiveWorker } from "./live-progress.js";
 import * as store from "./store.js";
 import { getMessengerRegistryDir, registerSpawnedWorker } from "../store.js";
+import { inferTaskCompletion } from "./completion-inference.js";
 import { logFeedEvent } from "../feed.js";
 import {
   registerWorker,
@@ -185,19 +186,30 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
     if (worker.assignedTaskId) {
       const task = store.getTask(cwd, worker.assignedTaskId);
       if (task && task.status === "in_progress" && task.assigned_to === worker.name) {
-        const config = loadCrewConfig(store.getCrewDir(cwd));
-        if (task.attempt_count >= config.work.maxAttemptsPerTask) {
-          store.updateTask(cwd, worker.assignedTaskId, {
-            status: "blocked",
-            blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
-            assigned_to: undefined,
-          });
-          logFeedEvent(cwd, worker.name, "task.block", worker.assignedTaskId, `Max attempts reached`);
-        } else {
-          store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
-          store.appendTaskProgress(cwd, worker.assignedTaskId, "system",
-            `Lobby worker ${worker.name} exited (code ${exitCode ?? "unknown"}), reset to todo`);
-          logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, "worker exited");
+        // Try completion inference before falling through to reset
+        const inferred = inferTaskCompletion({
+          cwd,
+          taskId: worker.assignedTaskId,
+          workerName: worker.name,
+          exitCode,
+          baseCommit: task.base_commit,
+        });
+
+        if (!inferred) {
+          const config = loadCrewConfig(store.getCrewDir(cwd));
+          if (task.attempt_count >= config.work.maxAttemptsPerTask) {
+            store.updateTask(cwd, worker.assignedTaskId, {
+              status: "blocked",
+              blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
+              assigned_to: undefined,
+            });
+            logFeedEvent(cwd, worker.name, "task.block", worker.assignedTaskId, `Max attempts reached`);
+          } else {
+            store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
+            store.appendTaskProgress(cwd, worker.assignedTaskId, "system",
+              `Lobby worker ${worker.name} exited (code ${exitCode ?? "unknown"}), reset to todo`);
+            logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, "worker exited");
+          }
         }
       }
     } else {
