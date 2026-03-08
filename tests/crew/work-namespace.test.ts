@@ -66,7 +66,6 @@ describe("crew/work namespacing", () => {
 
     store = await import("../../crew/store.js");
     store.createPlan(cwd, "docs/PRD.md");
-    taskId = store.createTask(cwd, "Task 1", "Implement task").id;
 
     workHandler = await import("../../crew/handlers/work.js");
     const agents = await import("../../crew/agents.js");
@@ -74,6 +73,8 @@ describe("crew/work namespacing", () => {
   });
 
   it("uses namespaced worker task IDs and maps results back to task IDs", async () => {
+    taskId = store.createTask(cwd, "Task 1", "Implement task", undefined, "alpha").id;
+
     spawnAgents.mockImplementation(async (tasks: Array<{ taskId?: string }>) => {
       const workerTaskId = tasks[0]?.taskId ?? "";
       expect(workerTaskId).toBe(`alpha::${taskId}`);
@@ -92,6 +93,8 @@ describe("crew/work namespacing", () => {
   });
 
   it("keeps shared task IDs by default", async () => {
+    taskId = store.createTask(cwd, "Task 1", "Implement task", undefined, "shared").id;
+
     spawnAgents.mockImplementation(async (tasks: Array<{ taskId?: string }>) => {
       const workerTaskId = tasks[0]?.taskId ?? "";
       expect(workerTaskId).toBe(taskId);

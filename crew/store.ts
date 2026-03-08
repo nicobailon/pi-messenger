@@ -204,7 +204,7 @@ export function createTask(
 
   const task: Task = {
     id,
-    ...(namespace ? { namespace: normalizedNamespace } : {}),
+    namespace: normalizedNamespace,
     title,
     status: "todo",
     depends_on: dependsOn ?? [],

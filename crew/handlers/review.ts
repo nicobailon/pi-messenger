@@ -206,7 +206,7 @@ async function reviewPlan(cwd: string, modelOverride?: string, crewNamespace = "
   }
 
   const planSpec = store.getPlanSpec(cwd);
-  const tasks = store.getTasks(cwd);
+  const tasks = store.getTasks(cwd, crewNamespace);
 
   // Build task overview
   const taskOverview = tasks.map(t => {

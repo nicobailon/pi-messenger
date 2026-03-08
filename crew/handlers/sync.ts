@@ -13,12 +13,29 @@ import { discoverCrewAgents } from "../utils/discover.js";
 import { loadCrewConfig } from "../utils/config.js";
 import * as store from "../store.js";
 
+type NamespaceParams = CrewParams & {
+  crew?: string;
+  crewNamespace?: string;
+  namespace?: string;
+};
+
+function resolveCrewNamespace(params: CrewParams): string {
+  const ns =
+    (params as NamespaceParams).crewNamespace
+    ?? (params as NamespaceParams).crew
+    ?? (params as NamespaceParams).namespace
+    ?? "shared";
+  const normalized = typeof ns === "string" ? ns.trim() : "";
+  return normalized.length > 0 ? normalized : "shared";
+}
+
 export async function execute(
   params: CrewParams,
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
   const { target } = params;
+  const crewNamespace = resolveCrewNamespace(params);
 
   if (!target) {
     return result("Error: target (completed task ID) required for sync action.", {
@@ -65,7 +82,7 @@ export async function execute(
     });
   }
 
-  const allTasks = store.getTasks(cwd);
+  const allTasks = store.getTasks(cwd, crewNamespace);
   
   // Find dependent tasks (tasks that depend on the completed task)
   const dependentTasks = allTasks.filter(t => 

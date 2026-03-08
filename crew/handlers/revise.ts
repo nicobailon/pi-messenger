@@ -219,7 +219,7 @@ export async function executeReviseTree(
   }
 
   const titleToId = new Map<string, string>();
-  for (const t of store.getTasks(cwd)) {
+  for (const t of store.getTasks(cwd, crewNamespace)) {
     titleToId.set(t.title.toLowerCase(), t.id);
   }
 

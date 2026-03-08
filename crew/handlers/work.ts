@@ -80,7 +80,7 @@ export async function execute(
   }
 
   store.autoCompleteMilestones(cwd);
-  syncCompletedCount(cwd);
+  syncCompletedCount(cwd, crewNamespace);
 
   // Get ready tasks — auto-block any that exceeded max attempts
   const allReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
@@ -294,7 +294,7 @@ export async function execute(
     }
   }
 
-  syncCompletedCount(cwd);
+  syncCompletedCount(cwd, crewNamespace);
 
   // Save current wave number BEFORE addWaveResult increments it
   const currentWave = sharedAutonomous ? autonomousState.waveNumber : 1;
@@ -314,7 +314,7 @@ export async function execute(
       appendEntry("crew-state", autonomousState);
     } else {
       const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
-      const allTasks = store.getTasks(cwd);
+      const allTasks = store.getTasks(cwd, crewNamespace);
       const allDone = allTasks.every(t => t.status === "done");
       const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");
 
@@ -393,10 +393,10 @@ ${continueText}`;
   });
 }
 
-function syncCompletedCount(cwd: string): void {
+function syncCompletedCount(cwd: string, crewNamespace = "shared"): void {
   const plan = store.getPlan(cwd);
   if (!plan) return;
-  const doneCount = store.getTasks(cwd).filter(t => t.status === "done").length;
+  const doneCount = store.getTasks(cwd, crewNamespace).filter(t => t.status === "done").length;
   if (plan.completed_count !== doneCount) {
     store.updatePlan(cwd, { completed_count: doneCount });
   }

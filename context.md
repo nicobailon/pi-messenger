@@ -1,26 +1,37 @@
----
+I've completed my investigation and written detailed findings to `context.md`.
 
 ## Summary
 
-Found the exact bug you suspected! In `crew/handlers/task.ts`, there are **4 incorrect calls** to `executeTaskAction`:
+The namespace filtering logic **appears correct** in the code. Here's what I found:
 
-1. **Line 399** (task.start): `executeTaskAction(cwd, "start", id, agentName, namespace)`
-2. **Line 554** (task.block): `executeTaskAction(cwd, "block", id, agentName, namespace, params.reason)`
-3. **Line 591** (task.unblock): `executeTaskAction(cwd, "unblock", id, agentName, namespace)`
-4. **Line 682** (task.reset): `executeTaskAction(cwd, action, id, agentName, namespace)`
+### The Filtering Chain
+1. `pi_messenger({ crew: "alpha" })` → `resolveCrewNamespace(params)` → should return `"alpha"`
+2. `taskList(cwd, "alpha")` → `store.getTasks(cwd, "alpha")`  
+3. `getTasks()` filters each task via `isTaskInNamespace(task, "alpha")`
+4. `isTaskInNamespace()` should return `false` for tasks with `namespace: "beta"`
 
-All of them pass `namespace` as the **5th parameter** (which is `reason`), when it should be passed as part of the **6th parameter** (`options` object).
+### The Smoking Gun
 
-**Correct signature:**
+In `isTaskInNamespace` (crew/store.ts:26-36):
 ```typescript
-executeTaskAction(cwd, action, taskId, agentName, reason?, options?: { namespace? })
+if (namespace === undefined) return true;  // ← Shows ALL tasks
 ```
 
-**Should be:**
-```typescript
-executeTaskAction(cwd, "start", id, agentName, undefined, { namespace })
-```
+**If the `namespace` parameter arrives as `undefined`**, it returns `true` for every task, showing all namespaces.
 
-Full findings written to `context.md`.
+### Most Likely Root Cause
 
-✅ DONE: Identified 4 instances of namespace parameter bug in crew/handlers/task.ts where namespace is incorrectly passed as reason parameter instead of in options object
+The `namespace` parameter is arriving as `undefined` rather than `"alpha"`. Possible reasons:
+1. `params.crew` isn't being passed correctly through the call chain
+2. TypeScript type casting `(params as NamespaceParams)` is hiding a type mismatch
+3. The parameter isn't in the tool schema (though it should be)
+
+### Recommended Debug Steps
+
+1. **Add logging** at `crew/handlers/task.ts:40` to see what `resolveCrewNamespace(params)` actually returns
+2. **Verify task-16.json** actually contains `"namespace": "beta"` on disk
+3. **Check params object** - log `params.crew` at the handler entry point
+
+The filtering logic itself is sound - the issue is upstream in parameter resolution.
+
+✅ DONE: Traced task.list namespace filtering bug. Root cause: namespace parameter likely undefined at isTaskInNamespace, triggering show-all branch. Findings written to context.md with code flow, hypothesis, and debug recommendations.
