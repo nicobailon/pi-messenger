@@ -83,6 +83,7 @@ export interface MessengerState {
   customStatus: boolean;
   registryFlushTimer: ReturnType<typeof setTimeout> | null;
   sessionStartedAt: string;
+  registrationContextSent: boolean;
 }
 
 export interface Dirs {

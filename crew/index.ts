@@ -209,6 +209,26 @@ export async function executeCrewAction(
       }
     }
 
+    case 'spawn': {
+      try {
+        const collabHandler = await import("./handlers/collab.js");
+        return collabHandler.executeSpawn(params, state, dirs, ctx);
+      } catch (e) {
+        return result(`Error: spawn handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "spawn", error: "handler_error" });
+      }
+    }
+
+    case 'dismiss': {
+      try {
+        const collabHandler = await import("./handlers/collab.js");
+        return collabHandler.executeDismiss(params, state, dirs, ctx);
+      } catch (e) {
+        return result(`Error: dismiss handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "dismiss", error: "handler_error" });
+      }
+    }
+
     case 'crew': {
       if (!op) {
         return result("Error: crew action requires operation (e.g., 'crew.status', 'crew.agents').",

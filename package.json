@@ -1,6 +1,6 @@
 {
   "name": "pi-messenger",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Inter-agent messaging and file reservation system for pi coding agent",
   "type": "module",
   "author": "Nico Bailon",
@@ -26,11 +26,13 @@
     "cli"
   ],
   "bin": {
-    "pi-messenger": "install.mjs"
+    "pi-messenger": "install.mjs",
+    "pi-messenger-cli": "cli/index.ts"
   },
   "files": [
     "*.ts",
     "*.mjs",
+    "cli/**",
     "crew/**",
     "skills/**",
     "README.md",
