@@ -21,6 +21,7 @@ import { getAvailableLobbyWorkers, assignTaskToLobbyWorker, cleanupUnassignedAli
 import { logFeedEvent } from "../../feed.js";
 import { clearHeartbeat } from "../heartbeat.js";
 import { checkStaleHeartbeats } from "../lobby.js";
+import { recordReviewOutcome, getReviewIntensity } from "../credibility.js";
 
 type NamespaceParams = CrewParams & {
   crew?: string;
@@ -101,6 +102,14 @@ function spawnAdversarialReview(
 
     const output = reviewResult.output ?? "";
     const isRejected = /## Verdict:\s*REJECT/i.test(output);
+
+    // Record credibility outcome for the agent that completed the task
+    const assignedAgent = store.getTask(cwd, taskId)?.assigned_to;
+    if (assignedAgent) {
+      const cred = recordReviewOutcome(assignedAgent, !isRejected);
+      store.appendTaskProgress(cwd, taskId, "system",
+        `Credibility updated for ${assignedAgent}: score=${cred.credibilityScore}`);
+    }
 
     store.appendTaskProgress(cwd, taskId, "adversarial-reviewer",
       isRejected
@@ -429,8 +438,16 @@ export async function execute(
           spawnAdversarialReview(taskId, task.title, task.summary, task.base_commit, cwd, config, dirs);
         }
         // Post-completion integration test (async/non-blocking)
+        // Skip for high-credibility agents (light review intensity)
         if (config.review?.autoIntegrationTest !== false && task) {
-          spawnIntegrationTest(taskId, task.title, task.base_commit, cwd, config, dirs);
+          const agentName = task.assigned_to;
+          const intensity = agentName ? getReviewIntensity(agentName) : "standard";
+          if (intensity !== "light") {
+            spawnIntegrationTest(taskId, task.title, task.base_commit, cwd, config, dirs);
+          } else {
+            store.appendTaskProgress(cwd, taskId, "system",
+              `Integration test skipped: ${agentName} has light review intensity (high credibility)`);
+          }
         }
       } else if (task?.status === "blocked") {
         blocked.push(taskId);
@@ -451,8 +468,16 @@ export async function execute(
             spawnAdversarialReview(taskId, task.title, task.summary, task.base_commit, cwd, config, dirs);
           }
           // Post-completion integration test (async/non-blocking)
+          // Skip for high-credibility agents (light review intensity)
           if (config.review?.autoIntegrationTest !== false && task) {
-            spawnIntegrationTest(taskId, task.title, task.base_commit, cwd, config, dirs);
+            const agentName = task.assigned_to;
+            const intensity = agentName ? getReviewIntensity(agentName) : "standard";
+            if (intensity !== "light") {
+              spawnIntegrationTest(taskId, task.title, task.base_commit, cwd, config, dirs);
+            } else {
+              store.appendTaskProgress(cwd, taskId, "system",
+                `Integration test skipped: ${agentName} has light review intensity (high credibility)`);
+            }
           }
         } else if (task?.status === "blocked") {
           blocked.push(taskId);
