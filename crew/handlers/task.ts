@@ -11,6 +11,18 @@ import type { CrewParams, Task, TaskEvidence } from "../types.js";
 import { result } from "../utils/result.js";
 import { loadCrewConfig } from "../utils/config.js";
 import * as store from "../store.js";
+
+// =============================================================================
+// Namespace helpers
+// =============================================================================
+
+type NamespaceParams = { crew?: string };
+
+function resolveCrewNamespace(params: NamespaceParams): string | undefined {
+  const ns = params.crew;
+  if (!ns || ns === "shared") return undefined;
+  return ns;
+}
 import { logFeedEvent } from "../../feed.js";
 import { executeTaskAction } from "../task-actions.js";
 import { taskRevise, taskReviseTree } from "./revise.js";
@@ -23,30 +35,31 @@ export async function execute(
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
+  const crewNamespace = resolveCrewNamespace(params as unknown as NamespaceParams);
 
   switch (op) {
     case "create":
-      return taskCreate(cwd, params);
+      return taskCreate(cwd, params, crewNamespace);
     case "split":
-      return taskSplit(cwd, params, state);
+      return taskSplit(cwd, params, state, crewNamespace);
     case "show":
-      return taskShow(cwd, params);
+      return taskShow(cwd, params, crewNamespace);
     case "list":
-      return taskList(cwd);
+      return taskList(cwd, crewNamespace);
     case "start":
-      return taskStart(cwd, params, state);
+      return taskStart(cwd, params, state, crewNamespace);
     case "done":
-      return taskDone(cwd, params, state);
+      return taskDone(cwd, params, state, crewNamespace);
     case "block":
-      return taskBlock(cwd, params, state);
+      return taskBlock(cwd, params, state, crewNamespace);
     case "unblock":
-      return taskUnblock(cwd, params, state);
+      return taskUnblock(cwd, params, state, crewNamespace);
     case "ready":
-      return taskReady(cwd);
+      return taskReady(cwd, crewNamespace);
     case "reset":
-      return taskReset(cwd, params, state);
+      return taskReset(cwd, params, state, crewNamespace);
     case "progress":
-      return taskProgress(cwd, params, state);
+      return taskProgress(cwd, params, state, crewNamespace);
     case "revise":
       return taskRevise(cwd, params, state);
     case "revise-tree":
@@ -60,7 +73,7 @@ export async function execute(
 // task.create
 // =============================================================================
 
-function taskCreate(cwd: string, params: CrewParams) {
+function taskCreate(cwd: string, params: CrewParams, crewNamespace?: string) {
   if (!params.title) {
     return result("Error: title required for task.create", { mode: "task.create", error: "missing_title" });
   }
@@ -76,14 +89,14 @@ function taskCreate(cwd: string, params: CrewParams) {
   // Validate dependencies exist
   if (params.dependsOn && params.dependsOn.length > 0) {
     for (const depId of params.dependsOn) {
-      const dep = store.getTask(cwd, depId);
+      const dep = store.getTask(cwd, depId, crewNamespace);
       if (!dep) {
         return result(`Error: Dependency ${depId} not found`, { mode: "task.create", error: "dependency_not_found", dependency: depId });
       }
     }
   }
 
-  const task = store.createTask(cwd, params.title, params.content, params.dependsOn);
+  const task = store.createTask(cwd, params.title, params.content, params.dependsOn, crewNamespace);
 
   const depsText = task.depends_on.length > 0 
     ? `\n**Depends on:** ${task.depends_on.join(", ")}`
@@ -107,13 +120,13 @@ Start with: \`pi_messenger({ action: "task.start", id: "${task.id}" })\``;
   });
 }
 
-function taskSplit(cwd: string, params: CrewParams, state: MessengerState) {
+function taskSplit(cwd: string, params: CrewParams, state: MessengerState, crewNamespace?: string) {
   const { id, count, subtasks } = params;
   if (!id) {
     return result("Error: id required for task.split", { mode: "task.split", error: "missing_id" });
   }
 
-  const task = store.getTask(cwd, id);
+  const task = store.getTask(cwd, id, crewNamespace);
   if (!task) {
     return result(`Error: Task ${id} not found`, { mode: "task.split", error: "not_found", id });
   }
@@ -130,7 +143,7 @@ function taskSplit(cwd: string, params: CrewParams, state: MessengerState) {
     const spec = store.getTaskSpec(cwd, id);
     const progress = store.getTaskProgress(cwd, id);
     const suggestedCount = count ?? 2;
-    const allTasks = store.getTasks(cwd);
+    const allTasks = store.getTasks(cwd, crewNamespace);
     const dependents = allTasks.filter(t => t.depends_on.includes(id));
     const depsText = task.depends_on.length > 0 ? task.depends_on.join(", ") : "(none)";
     const dependentsText = dependents.length > 0
@@ -196,7 +209,7 @@ The parent becomes a milestone that auto-completes when all subtasks are done.`;
     created.push(newTask);
   }
 
-  const allTasks = store.getTasks(cwd);
+  const allTasks = store.getTasks(cwd, crewNamespace);
   const subtaskIds = created.map(t => t.id);
   for (const t of allTasks) {
     if (t.id !== id && t.depends_on.includes(id) && !subtaskIds.includes(t.id)) {
@@ -240,13 +253,13 @@ The parent becomes a milestone that auto-completes when all subtasks are done.`;
 // task.show
 // =============================================================================
 
-function taskShow(cwd: string, params: CrewParams) {
+function taskShow(cwd: string, params: CrewParams, crewNamespace?: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.show", { mode: "task.show", error: "missing_id" });
   }
 
-  const task = store.getTask(cwd, id);
+  const task = store.getTask(cwd, id, crewNamespace);
   if (!task) {
     return result(`Error: Task ${id} not found`, { mode: "task.show", error: "not_found", id });
   }
@@ -308,12 +321,12 @@ ${statusIcon} **Status:** ${task.status}${statusDetails}
   });
 }
 
-function taskProgress(cwd: string, params: CrewParams, state: MessengerState) {
+function taskProgress(cwd: string, params: CrewParams, state: MessengerState, crewNamespace?: string) {
   const { id, message } = params;
   if (!id) return result("Error: id required for task.progress", { mode: "task.progress", error: "missing_id" });
   if (!message) return result("Error: message required for task.progress", { mode: "task.progress", error: "missing_message" });
 
-  const task = store.getTask(cwd, id);
+  const task = store.getTask(cwd, id, crewNamespace);
   if (!task) return result(`Error: Task ${id} not found`, { mode: "task.progress", error: "not_found", id });
 
   store.appendTaskProgress(cwd, id, state.agentName || "unknown", message);
@@ -324,7 +337,7 @@ function taskProgress(cwd: string, params: CrewParams, state: MessengerState) {
 // task.list
 // =============================================================================
 
-function taskList(cwd: string) {
+function taskList(cwd: string, crewNamespace?: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
     return result("No plan found. Create one with: pi_messenger({ action: \"plan\" })", { 
@@ -332,7 +345,7 @@ function taskList(cwd: string) {
     });
   }
 
-  const tasks = store.getTasks(cwd);
+  const tasks = store.getTasks(cwd, crewNamespace);
   if (tasks.length === 0) {
     return result(`No tasks in plan. Create with: \`pi_messenger({ action: "task.create", title: "..." })\``, {
       mode: "task.list",
@@ -369,7 +382,7 @@ function taskList(cwd: string) {
 // task.start
 // =============================================================================
 
-function taskStart(cwd: string, params: CrewParams, state: MessengerState) {
+function taskStart(cwd: string, params: CrewParams, state: MessengerState, crewNamespace?: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.start", { mode: "task.start", error: "missing_id" });
@@ -419,13 +432,13 @@ If blocked: \`pi_messenger({ action: "task.block", id: "${id}", reason: "..." })
 // task.done
 // =============================================================================
 
-function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
+function taskDone(cwd: string, params: CrewParams, state: MessengerState, crewNamespace?: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.done", { mode: "task.done", error: "missing_id" });
   }
 
-  const task = store.getTask(cwd, id);
+  const task = store.getTask(cwd, id, crewNamespace);
   if (!task) {
     return result(`Error: Task ${id} not found`, { mode: "task.done", error: "not_found", id });
   }
@@ -447,7 +460,7 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
   logFeedEvent(cwd, state.agentName || "unknown", "task.done", id, summary);
 
   const plan = store.getPlan(cwd);
-  const tasks = store.getTasks(cwd);
+  const tasks = store.getTasks(cwd, crewNamespace);
   const remaining = tasks.filter(t => t.status !== "done");
 
   let nextSteps = "";
@@ -455,7 +468,7 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
     nextSteps = `\n\n🎉 **All tasks complete!** Plan is finished.`;
   } else {
     const config = loadCrewConfig(store.getCrewDir(cwd));
-    const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
+    const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
     if (ready.length > 0) {
       nextSteps = `\n\n**Ready tasks:** ${ready.map(t => t.id).join(", ")}`;
     }
@@ -485,7 +498,7 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
 // task.block
 // =============================================================================
 
-function taskBlock(cwd: string, params: CrewParams, state: MessengerState) {
+function taskBlock(cwd: string, params: CrewParams, state: MessengerState, crewNamespace?: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.block", { mode: "task.block", error: "missing_id" });
@@ -526,7 +539,7 @@ Unblock with: \`pi_messenger({ action: "task.unblock", id: "${id}" })\``;
 // task.unblock
 // =============================================================================
 
-function taskUnblock(cwd: string, params: CrewParams, state: MessengerState) {
+function taskUnblock(cwd: string, params: CrewParams, state: MessengerState, crewNamespace?: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.unblock", { mode: "task.unblock", error: "missing_id" });
@@ -560,7 +573,7 @@ Task is now ready to start: \`pi_messenger({ action: "task.start", id: "${id}" }
 // task.ready
 // =============================================================================
 
-function taskReady(cwd: string) {
+function taskReady(cwd: string, crewNamespace?: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
     return result("No plan found. Create one with: pi_messenger({ action: \"plan\" })", { 
@@ -569,10 +582,10 @@ function taskReady(cwd: string) {
   }
 
   const config = loadCrewConfig(store.getCrewDir(cwd));
-  const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
+  const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
 
   if (ready.length === 0) {
-    const tasks = store.getTasks(cwd);
+    const tasks = store.getTasks(cwd, crewNamespace);
     const inProgress = tasks.filter(t => t.status === "in_progress");
     const blocked = tasks.filter(t => t.status === "blocked");
     const done = tasks.filter(t => t.status === "done");
@@ -615,7 +628,7 @@ function taskReady(cwd: string) {
 // task.reset
 // =============================================================================
 
-function taskReset(cwd: string, params: CrewParams, state: MessengerState) {
+function taskReset(cwd: string, params: CrewParams, state: MessengerState, crewNamespace?: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.reset", { mode: "task.reset", error: "missing_id" });

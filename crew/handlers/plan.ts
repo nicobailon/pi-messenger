@@ -28,6 +28,18 @@ import {
 import { getLiveWorkers } from "../live-progress.js";
 import * as store from "../store.js";
 
+// =============================================================================
+// Namespace helpers
+// =============================================================================
+
+type NamespaceParams = { crew?: string };
+
+function resolveCrewNamespace(params: NamespaceParams): string | undefined {
+  const ns = params.crew;
+  if (!ns || ns === "shared") return undefined;
+  return ns;
+}
+
 const PRD_PATTERNS = [
   "PRD.md", "prd.md",
   "SPEC.md", "spec.md",
@@ -169,10 +181,10 @@ function setPlanningOutline(cwd: string, content: string): void {
   fs.writeFileSync(outlinePath, content);
 }
 
-function pruneTransitiveDeps(cwd: string, taskIds: string[]): void {
+function pruneTransitiveDeps(cwd: string, taskIds: string[], crewNamespace?: string): void {
   const idDeps = new Map<string, string[]>();
   for (const id of taskIds) {
-    const task = store.getTask(cwd, id);
+    const task = store.getTask(cwd, id, crewNamespace);
     if (task) idDeps.set(id, [...task.depends_on]);
   }
 
@@ -204,13 +216,14 @@ export async function execute(
   onProgress?: () => void,
 ) {
   const cwd = ctx.cwd ?? process.cwd();
+  const crewNamespace = resolveCrewNamespace(params as unknown as NamespaceParams);
   const { prd, prompt } = params;
   const reportProgress = () => onProgress?.();
   resetPlanningCancellation();
 
   const existingPlan = store.getPlan(cwd);
   if (existingPlan) {
-    const existingTasks = store.getTasks(cwd);
+    const existingTasks = store.getTasks(cwd, crewNamespace);
     const planningActive = isPlanningForCwd(cwd);
 
     if (planningActive) {
@@ -441,7 +454,7 @@ export async function execute(
 
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i];
-    const created = store.createTask(cwd, task.title, task.description);
+    const created = store.createTask(cwd, task.title, task.description, undefined, crewNamespace);
     createdTasks.push({ id: created.id, title: task.title, dependsOn: task.dependsOn, skills: task.skills });
     titleToId.set(task.title.toLowerCase(), created.id);
     titleToId.set(`task ${i + 1}`, created.id);
@@ -467,7 +480,7 @@ export async function execute(
     }
   }
 
-  pruneTransitiveDeps(cwd, createdTasks.map(t => t.id));
+  pruneTransitiveDeps(cwd, createdTasks.map(t => t.id), crewNamespace);
 
   store.setPlanSpec(cwd, lastPlannerOutput);
 

@@ -15,11 +15,24 @@ import { loadCrewConfig } from "../utils/config.js";
 import { parseVerdict, type ParsedReview } from "../utils/verdict.js";
 import * as store from "../store.js";
 
+// =============================================================================
+// Namespace helpers
+// =============================================================================
+
+type NamespaceParams = { crew?: string };
+
+function resolveCrewNamespace(params: NamespaceParams): string | undefined {
+  const ns = params.crew;
+  if (!ns || ns === "shared") return undefined;
+  return ns;
+}
+
 export async function execute(
   params: CrewParams,
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
+  const crewNamespace = resolveCrewNamespace(params as unknown as NamespaceParams);
   const { target, type } = params;
   const config = loadCrewConfig(store.getCrewDir(cwd));
   const reviewerModel = config.models?.reviewer;
@@ -45,9 +58,9 @@ export async function execute(
   const reviewType = type ?? (target.startsWith("task-") ? "impl" : "plan");
 
   if (reviewType === "impl") {
-    return reviewImplementation(cwd, target, reviewerModel);
+    return reviewImplementation(cwd, target, reviewerModel, crewNamespace);
   } else {
-    return reviewPlan(cwd, reviewerModel);
+    return reviewPlan(cwd, reviewerModel, crewNamespace);
   }
 }
 
@@ -55,8 +68,8 @@ export async function execute(
 // Implementation Review
 // =============================================================================
 
-async function reviewImplementation(cwd: string, taskId: string, modelOverride?: string) {
-  const task = store.getTask(cwd, taskId);
+async function reviewImplementation(cwd: string, taskId: string, modelOverride?: string, crewNamespace?: string) {
+  const task = store.getTask(cwd, taskId, crewNamespace);
   if (!task) {
     return result(`Error: Task ${taskId} not found.`, {
       mode: "review",
@@ -174,7 +187,7 @@ ${verdict.verdict === "SHIP" ? "✅ Ready to merge!" : verdict.verdict === "NEED
 // Plan Review
 // =============================================================================
 
-async function reviewPlan(cwd: string, modelOverride?: string) {
+async function reviewPlan(cwd: string, modelOverride?: string, crewNamespace?: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
     return result("Error: No plan found.", {
@@ -184,7 +197,7 @@ async function reviewPlan(cwd: string, modelOverride?: string) {
   }
 
   const planSpec = store.getPlanSpec(cwd);
-  const tasks = store.getTasks(cwd);
+  const tasks = store.getTasks(cwd, crewNamespace);
 
   // Build task overview
   const taskOverview = tasks.map(t => {

@@ -10,6 +10,18 @@ import { getLiveWorkers } from "../live-progress.js";
 import { isAutonomousForCwd, isPlanningForCwd } from "../state.js";
 import { loadCrewConfig } from "../utils/config.js";
 
+// =============================================================================
+// Namespace helpers
+// =============================================================================
+
+type NamespaceParams = { crew?: string };
+
+function resolveCrewNamespace(params: NamespaceParams): string | undefined {
+  const ns = params.crew;
+  if (!ns || ns === "shared") return undefined;
+  return ns;
+}
+
 export interface ReviseResult {
   success: boolean;
   message: string;
@@ -24,8 +36,9 @@ export async function executeRevise(
   taskId: string,
   prompt: string | undefined,
   agentName: string,
+  crewNamespace?: string,
 ): Promise<ReviseResult> {
-  const task = store.getTask(cwd, taskId);
+  const task = store.getTask(cwd, taskId, crewNamespace);
   if (!task) return { success: false, message: `Task ${taskId} not found` };
   if (task.status === "in_progress") return { success: false, message: `Task ${taskId} is in_progress` };
   if (getLiveWorkers(cwd).has("__reviser__")) return { success: false, message: "A revision is already running" };
@@ -84,7 +97,8 @@ export async function taskRevise(cwd: string, params: CrewParams, state: Messeng
   const { id, prompt } = params;
   if (!id) return result("Error: id required for task.revise", { mode: "task.revise", error: "missing_id" });
 
-  const r = await executeRevise(cwd, id, prompt ?? undefined, state.agentName || "unknown");
+  const crewNamespace = resolveCrewNamespace(params as unknown as NamespaceParams);
+  const r = await executeRevise(cwd, id, prompt ?? undefined, state.agentName || "unknown", crewNamespace);
   if (!r.success) {
     return result(`Error: ${r.message}`, { mode: "task.revise", error: "revision_failed", id });
   }
@@ -100,8 +114,9 @@ export async function executeReviseTree(
   taskId: string,
   prompt: string | undefined,
   agentName: string,
+  crewNamespace?: string,
 ): Promise<ReviseResult> {
-  const target = store.getTask(cwd, taskId);
+  const target = store.getTask(cwd, taskId, crewNamespace);
   if (!target) return { success: false, message: `Task ${taskId} not found` };
   if (getLiveWorkers(cwd).has("__reviser__")) return { success: false, message: "A revision is already running" };
   if (isPlanningForCwd(cwd)) return { success: false, message: "Cannot revise during planning" };
@@ -180,7 +195,7 @@ export async function executeReviseTree(
   }
 
   const titleToId = new Map<string, string>();
-  for (const t of store.getTasks(cwd)) {
+  for (const t of store.getTasks(cwd, crewNamespace)) {
     titleToId.set(t.title.toLowerCase(), t.id);
   }
 
@@ -227,7 +242,8 @@ export async function taskReviseTree(cwd: string, params: CrewParams, state: Mes
   const { id, prompt } = params;
   if (!id) return result("Error: id required for task.revise-tree", { mode: "task.revise-tree", error: "missing_id" });
 
-  const r = await executeReviseTree(cwd, id, prompt ?? undefined, state.agentName || "unknown");
+  const crewNamespace = resolveCrewNamespace(params as unknown as NamespaceParams);
+  const r = await executeReviseTree(cwd, id, prompt ?? undefined, state.agentName || "unknown", crewNamespace);
   if (!r.success) {
     return result(`Error: ${r.message}`, { mode: "task.revise-tree", error: "revision_failed", id });
   }

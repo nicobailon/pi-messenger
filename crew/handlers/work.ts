@@ -19,6 +19,18 @@ import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, a
 import { getAvailableLobbyWorkers, assignTaskToLobbyWorker, cleanupUnassignedAliveFiles } from "../lobby.js";
 import { logFeedEvent } from "../../feed.js";
 
+// =============================================================================
+// Namespace helpers
+// =============================================================================
+
+type NamespaceParams = { crew?: string };
+
+function resolveCrewNamespace(params: NamespaceParams): string | undefined {
+  const ns = params.crew;
+  if (!ns || ns === "shared") return undefined;
+  return ns;
+}
+
 export async function execute(
   params: CrewParams,
   dirs: Dirs,
@@ -27,6 +39,7 @@ export async function execute(
   signal?: AbortSignal
 ) {
   const cwd = ctx.cwd ?? process.cwd();
+  const crewNamespace = resolveCrewNamespace(params as unknown as NamespaceParams);
   const config = loadCrewConfig(getCrewDir(cwd));
   const { autonomous, concurrency: concurrencyOverride } = params;
 
@@ -53,7 +66,7 @@ export async function execute(
   syncCompletedCount(cwd);
 
   // Get ready tasks — auto-block any that exceeded max attempts
-  const allReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
+  const allReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
   const readyTasks: typeof allReady = [];
   for (const task of allReady) {
     if (task.attempt_count >= config.work.maxAttemptsPerTask) {
@@ -70,7 +83,7 @@ export async function execute(
   }
 
   if (readyTasks.length === 0) {
-    const tasks = store.getTasks(cwd);
+    const tasks = store.getTasks(cwd, crewNamespace);
     const inProgress = tasks.filter(t => t.status === "in_progress");
     const blocked = tasks.filter(t => t.status === "blocked");
     const done = tasks.filter(t => t.status === "done");
@@ -239,8 +252,8 @@ export async function execute(
       stopAutonomous("manual");
       appendEntry("crew-state", autonomousState);
     } else {
-      const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
-      const allTasks = store.getTasks(cwd);
+      const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
+      const allTasks = store.getTasks(cwd, crewNamespace);
       const allDone = allTasks.every(t => t.status === "done");
       const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");
 
@@ -283,7 +296,7 @@ export async function execute(
   if (failed.length > 0) statusText += `\n❌ Failed: ${failed.join(", ")}`;
   if (blocked.length > 0) statusText += `\n🚫 Blocked: ${blocked.join(", ")}`;
 
-  const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
+  const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
   const nextText = nextReady.length > 0
     ? `\n\n**Ready for next wave:** ${nextReady.map(t => t.id).join(", ")}`
     : "";
