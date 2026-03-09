@@ -259,6 +259,23 @@ function questionAnswer(cwd: string, params: CrewParams, state: MessengerState) 
 
   logFeedEvent(cwd, from, "question.answer", questionId, answer);
 
+  // Deliver answer to the asking worker's inbox
+  const askedBy = entry.from;
+  const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", askedBy);
+  fs.mkdirSync(inboxDir, { recursive: true });
+  const ts = Date.now();
+  const random = Math.random().toString(36).substring(2, 8);
+  const inboxFile = path.join(inboxDir, `${ts}-answer-${questionId}.json`);
+  const inboxMsg = {
+    type: "question.answer",
+    questionId,
+    question: entry.question,
+    answer,
+    from,
+    timestamp: new Date(ts).toISOString(),
+  };
+  fs.writeFileSync(inboxFile, JSON.stringify(inboxMsg, null, 2));
+
   // Append answer to asking task's progress log (if taskId known)
   // Timeout sweep is implemented via sweepTimeouts() in the questions list handler,
   // but it is passive — timeouts are only evaluated when the question list is fetched,

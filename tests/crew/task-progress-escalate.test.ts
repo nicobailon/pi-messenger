@@ -243,6 +243,64 @@ describe("task.escalate", () => {
     expect(progress).toContain("ping the team");
   });
 
+  it("pushes an inbox message to helios for severity=block", async () => {
+    const { cwd } = createTempCrewDirs();
+    store.createPlan(cwd, "docs/PRD.md");
+    const task = store.createTask(cwd, "My Task");
+    store.startTask(cwd, task.id, "TestAgent");
+
+    await execute("escalate", { id: task.id, reason: "Build server down", severity: "block", suggestion: "retry later" }, makeState(), makeCtx(cwd));
+
+    const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", "helios");
+    expect(fs.existsSync(inboxDir)).toBe(true);
+
+    const inboxFiles = fs.readdirSync(inboxDir).filter(f => f.includes("escalate-") && f.endsWith(".json"));
+    expect(inboxFiles.length).toBe(1);
+
+    const msg = JSON.parse(fs.readFileSync(path.join(inboxDir, inboxFiles[0]), "utf-8"));
+    expect(msg.type).toBe("task.escalate");
+    expect(msg.taskId).toBe(task.id);
+    expect(msg.severity).toBe("block");
+    expect(msg.reason).toBe("Build server down");
+    expect(msg.suggestion).toBe("retry later");
+  });
+
+  it("pushes an inbox message to helios for severity=critical", async () => {
+    const { cwd } = createTempCrewDirs();
+    store.createPlan(cwd, "docs/PRD.md");
+    const task = store.createTask(cwd, "My Task");
+    store.startTask(cwd, task.id, "TestAgent");
+
+    await execute("escalate", { id: task.id, reason: "Data corruption", severity: "critical" }, makeState(), makeCtx(cwd));
+
+    const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", "helios");
+    expect(fs.existsSync(inboxDir)).toBe(true);
+
+    const inboxFiles = fs.readdirSync(inboxDir).filter(f => f.includes("escalate-") && f.endsWith(".json"));
+    expect(inboxFiles.length).toBe(1);
+
+    const msg = JSON.parse(fs.readFileSync(path.join(inboxDir, inboxFiles[0]), "utf-8"));
+    expect(msg.severity).toBe("critical");
+  });
+
+  it("does NOT push inbox message to helios for severity=warn", async () => {
+    const { cwd } = createTempCrewDirs();
+    store.createPlan(cwd, "docs/PRD.md");
+    const task = store.createTask(cwd, "My Task");
+    store.startTask(cwd, task.id, "TestAgent");
+
+    await execute("escalate", { id: task.id, reason: "Minor warning", severity: "warn" }, makeState(), makeCtx(cwd));
+
+    const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", "helios");
+    const inboxExists = fs.existsSync(inboxDir);
+    if (inboxExists) {
+      const inboxFiles = fs.readdirSync(inboxDir).filter(f => f.includes("escalate-") && f.endsWith(".json"));
+      expect(inboxFiles.length).toBe(0);
+    } else {
+      expect(inboxExists).toBe(false);
+    }
+  });
+
   it("rejects invalid severity values", async () => {
     const { cwd } = createTempCrewDirs();
     store.createPlan(cwd, "docs/PRD.md");

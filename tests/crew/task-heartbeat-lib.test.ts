@@ -174,3 +174,60 @@ describe("lib.ts heartbeat infrastructure", () => {
     });
   });
 });
+
+// ── FIX 3: API heartbeat detected by BOTH mechanisms ───────────────────────
+
+describe("FIX 3: task.heartbeat API bridges in-memory + file-based mechanisms", () => {
+  let storeMod: typeof import("../../crew/store.js");
+
+  beforeEach(async () => {
+    storeMod = await import("../../crew/store.js");
+  });
+
+  it("task.heartbeat API updates heartbeatTimestamps AND writes a heartbeat file", async () => {
+    const { cwd } = createTempCrewDirs();
+    heartbeatTimestamps.clear();
+
+    const { execute } = await import("../../crew/handlers/task.js");
+    const { getHeartbeats } = await import("../../crew/heartbeat.js");
+
+    const state = { agentName: "worker-1" } as any;
+    const ctx = { cwd, ui: { notify: () => {} } } as any;
+
+    storeMod.createPlan(cwd, "docs/PRD.md");
+    const task = storeMod.createTask(cwd, "Heartbeat Task");
+
+    await execute("heartbeat", { id: task.id }, state, ctx);
+
+    // Check in-memory Map
+    expect(heartbeatTimestamps.has(task.id)).toBe(true);
+
+    // Check file-based mechanism
+    const fileHeartbeats = getHeartbeats(cwd);
+    const found = fileHeartbeats.find(h => h.taskId === task.id);
+    expect(found).toBeDefined();
+    expect(found?.agentName).toBe("worker-1");
+  });
+
+  it("getStaleAgents does NOT flag task after API heartbeat (file written)", async () => {
+    const { cwd } = createTempCrewDirs();
+    heartbeatTimestamps.clear();
+
+    const { execute } = await import("../../crew/handlers/task.js");
+    const { getStaleAgents } = await import("../../crew/heartbeat.js");
+
+    const state = { agentName: "worker-2" } as any;
+    const ctx = { cwd, ui: { notify: () => {} } } as any;
+
+    storeMod.createPlan(cwd, "docs/PRD.md");
+    const task = storeMod.createTask(cwd, "Fresh Task");
+
+    // Emit a heartbeat via API
+    await execute("heartbeat", { id: task.id }, state, ctx);
+
+    // Should NOT be stale immediately after heartbeat
+    const stale = getStaleAgents(cwd, 120_000);
+    const staleTask = stale.find(h => h.taskId === task.id);
+    expect(staleTask).toBeUndefined();
+  });
+});

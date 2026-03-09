@@ -77,6 +77,9 @@ export interface Task {
   /** NEW: Worker ID holding current lease */
   worker_id?: string;
 
+  /** Latest progress percentage (0-100), persisted so it survives restarts */
+  progressPct?: number;
+
   /** NEW: How many times this task has been reset/retried */
   retry_count?: number;
   spawn_failure_count?: number;  // How many times the spawned process failed to start (ENOENT/EACCES/etc.)

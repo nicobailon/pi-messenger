@@ -121,6 +121,38 @@ describe("crew/question handler", () => {
   });
 
   describe("answer action", () => {
+    it("delivers answer to the asking worker's inbox", async () => {
+      // First create a question
+      const askResponse = await questionHandler.execute(
+        "ask",
+        { to: "AgentB", question: "What format?" },
+        createState("AgentA"),
+        createMockContext(cwd),
+      );
+      const questionId = askResponse.details.questionId as string;
+
+      // Now answer it
+      await questionHandler.execute(
+        "answer",
+        { questionId, answer: "Use JSON" },
+        createState("AgentB"),
+        createMockContext(cwd),
+      );
+
+      // The ASKING worker (AgentA) should have an inbox file with the answer
+      const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", "AgentA");
+      expect(fs.existsSync(inboxDir)).toBe(true);
+
+      const inboxFiles = fs.readdirSync(inboxDir).filter(f => f.includes("answer-") && f.endsWith(".json"));
+      expect(inboxFiles.length).toBe(1);
+
+      const msg = JSON.parse(fs.readFileSync(path.join(inboxDir, inboxFiles[0]), "utf-8"));
+      expect(msg.type).toBe("question.answer");
+      expect(msg.questionId).toBe(questionId);
+      expect(msg.answer).toBe("Use JSON");
+      expect(msg.question).toBe("What format?");
+    });
+
     it("updates a pending question with an answer", async () => {
       // First create a question
       const askResponse = await questionHandler.execute(
