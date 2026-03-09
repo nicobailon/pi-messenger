@@ -32,6 +32,7 @@ describe("handoff brief injection", () => {
     const handoffContent = `# Handoff: ${dep.id}\n\n## Changes\n- Created schema.sql\n\n## Assumptions\n- Using PostgreSQL 15`;
     fs.writeFileSync(path.join(artifactsDir, `${dep.id}-handoff.md`), handoffContent);
     store.completeTask(cwd, dep.id, "DB schema created", { commits: ["abc123"], tests: ["test-db"] });
+    store.acceptTask(cwd, dep.id);
 
     // Create dependent task
     const task = store.createTask(cwd, "Build API", "Create REST endpoints", [dep.id]);
@@ -76,11 +77,13 @@ describe("handoff brief injection", () => {
     store.startTask(cwd, dep1.id, "w1");
     fs.writeFileSync(path.join(artifactsDir, `${dep1.id}-handoff.md`), "Auth handoff content");
     store.completeTask(cwd, dep1.id, "Auth done", { commits: ["a1"], tests: ["t1"] });
+    store.acceptTask(cwd, dep1.id);
 
     const dep2 = store.createTask(cwd, "DB module", "DB");
     store.startTask(cwd, dep2.id, "w2");
     fs.writeFileSync(path.join(artifactsDir, `${dep2.id}-handoff.md`), "DB handoff content");
     store.completeTask(cwd, dep2.id, "DB done", { commits: ["a2"], tests: ["t2"] });
+    store.acceptTask(cwd, dep2.id);
 
     const task = store.createTask(cwd, "API layer", "Depends on both", [dep1.id, dep2.id]);
     const prompt = buildWorkerPrompt(task, "docs/PRD.md", cwd, defaultConfig, []);

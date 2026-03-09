@@ -389,8 +389,10 @@ describe("crew/graceful shutdown", () => {
 
     store.startTask(dirs.cwd, t1.id, "WorkerA");
     store.completeTask(dirs.cwd, t1.id, "Done");
+    store.acceptTask(dirs.cwd, t1.id);
     store.startTask(dirs.cwd, t2.id, "WorkerB");
     store.completeTask(dirs.cwd, t2.id, "Done");
+    store.acceptTask(dirs.cwd, t2.id);
 
     store.updatePlan(dirs.cwd, { completed_count: 0 });
     expect(store.getPlan(dirs.cwd)?.completed_count).toBe(0);

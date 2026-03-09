@@ -25,6 +25,16 @@ vi.mock("../../crew/agents.js", () => ({
       agentModel?: string,
     ) => taskModel ?? paramModel ?? configModel ?? agentModel,
   ),
+  resolveModelForTaskRole: vi.fn(
+    (
+      _role: string,
+      taskModel?: string,
+      paramModel?: string,
+      _models?: unknown,
+      agentModel?: string,
+    ) => taskModel ?? paramModel ?? agentModel,
+  ),
+  selectCrewAgentForRole: vi.fn(() => undefined),
   spawnAgents: vi.fn(),
 }));
 
