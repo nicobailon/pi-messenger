@@ -1,0 +1,76 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-03-09T20:15:55.367Z
+session: "pi-messenger-3-pr9-hardening-implementation"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-3"
+---
+
+goal: "Harden PR #9 for upstream submission — address all 8 adversarial review findings (R0-R8) to produce a clean, reviewable contribution to nicobailon/pi-messenger"
+now: "All 8 requirements implemented, 6 bisectable commits force-pushed, PR #9 updated with clean description, 421 tests passing, awaiting upstream review"
+
+done_this_session:
+  - "R3: Replaced 6 `as any` casts with HandlerContext structural subtyping (lib.ts, handlers.ts, store.ts, task.ts, cli/index.ts)"
+  - "R4: Extracted stuck detection to shared createStuckTimer() utility with lazy taskId getter for lobby workers"
+  - "R5: Added activeWorkerCount guard — multi-worker + no reservedPaths skips repo-wide inference"
+  - "R6: Updated nonce JSDoc and comments to 'defense-in-depth identity verification'"
+  - "R7: Reset and restaged 23 commits into 6 bisectable commits (each passes tsc + npm test)"
+  - "R1/R2: Excluded personal data (JSONL) and process artifacts (specs/) from PR via selective staging"
+  - "R8: Validated CodexAdapter against 3 real Codex tasks (57 events), expanded skip comment with rationale"
+  - "R0: Updated PR #9 description with accurate stats, design rationale (CLI over MCP), backward compat"
+  - "Used FileReservation type import (caught by navigator QuickRaven)"
+  - "Fixed stuck-timer lazy getter regression (caught by navigator QuickRaven)"
+
+decisions:
+  - "HandlerContext includes optional model? field — store.updateRegistration uses ctx.model?.id"
+  - "Widening parameter types (ExtensionContext → HandlerContext) is backward-compatible, not a breaking API change"
+  - "stuck-timer taskId accepts string | (() => string) for lazy resolution in lobby workers"
+  - "FileReservation type used instead of inline { pattern: string } for stronger type safety"
+  - "git add -p NOT needed for commit 5 — all hunks in agents.ts/lobby.ts were stuck-timer related"
+  - "Codex turn.failed not tested (couldn't trigger) — documented as acceptable gap"
+
+findings:
+  - "Navigator caught FileReservation fix not staged in commit 1 after fixup-rebase (pattern: apply fix, stage, commit, but fix was applied AFTER initial staging)"
+  - "Navigator caught stuck-timer eager taskId capture — lobby.assignedTaskId is null at timer creation, must use lazy getter"
+  - "Pre-existing tsc errors in collab.ts and lobby.ts (FeedEventType) — not introduced by our changes"
+  - "Codex exec --json emits thread.started and turn.started lifecycle events not documented in Codex docs"
+
+next:
+  - "Await Nico's review of PR #9 on nicobailon/pi-messenger"
+  - "If Nico requests changes, iterate on the PR"
+  - "Consider submitting specs/ as a separate PR or discussion"
+
+test:
+  result: "421 passed, 0 failed"
+  files: 30
+  new_tests: 2
+  details: "Added multi-worker inference guard tests (activeWorkerCount=3 returns false, activeWorkerCount=1 preserves behavior)"
+
+files:
+  - "lib.ts — HandlerContext interface"
+  - "handlers.ts — executeReserve/executeRelease widened to HandlerContext"
+  - "store.ts — updateRegistration widened to HandlerContext"
+  - "crew/handlers/task.ts — execute widened to HandlerContext"
+  - "cli/index.ts — 6 as-any casts removed, nonce JSDoc updated"
+  - "crew/completion-inference.ts — activeWorkerCount guard"
+  - "crew/lobby.ts — activeWorkerCount caller, FileReservation import, stuck-timer integration"
+  - "crew/handlers/work.ts — activeWorkerCount caller, FileReservation import"
+  - "crew/agents.ts — nonce comment, stuck-timer integration"
+  - "crew/utils/stuck-timer.ts — NEW shared utility"
+  - "crew/utils/adapters/codex.ts — expanded skip comment"
+  - "tests/crew/completion-inference.test.ts — 2 new multi-worker tests"
+  - "tests/crew/lobby.test.ts — getTasks mock added"
+
+git:
+  branch: "feat/002-multi-runtime-support"
+  commit: "4d9c443bc7eeafe9cc2229756ee8c31ecbcc2fe9"
+  remote: "https://github.com/carmandale/pi-messenger.git"
+  pr: "https://github.com/nicobailon/pi-messenger/pull/9"
+  commits:
+    - "36ca3ae feat(crew): add RuntimeAdapter interface and unified spawn engine"
+    - "d8119b3 feat(cli): add pi-messenger-cli for non-pi runtimes"
+    - "b155ccf feat(crew): add Claude Code adapter with prompt injection"
+    - "a5f6aab feat(crew): add Codex CLI adapter"
+    - "8919396 refactor(crew): extract stuck detection to shared utility"
+    - "4d9c443 docs: add multi-runtime configuration guide"
