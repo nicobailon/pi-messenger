@@ -268,45 +268,9 @@ export async function execute(
     logFeedEvent(cwd, agentName, feedType, target, preview);
   };
 
-  const existingPlan = store.getPlan(cwd);
-  if (existingPlan) {
-    const existingTasks = store.getTasks(cwd, crewNamespace);
-    const planningActive = isPlanningActiveForNamespace();
-
-    if (planningActive) {
-      return result("Planning is already in progress.", { mode: "plan", error: "planning_active" });
-    }
-
-    if (existingTasks.length > 0 && !prompt) {
-      const planRef = existingPlan.prompt
-        ? `"${store.getPlanLabel(existingPlan)}"`
-        : existingPlan.prd;
-      return result(`A plan already exists for ${planRef}.\n\nTo re-plan with a steering prompt:\n  pi_messenger({ action: "plan", prompt: "focus on..." })`, {
-        mode: "plan",
-        error: "plan_exists",
-        existingPrd: existingPlan.prd,
-      });
-    }
-
-    if (existingTasks.length > 0 && prompt) {
-      const liveWorkers = getLiveWorkers(cwd);
-      const inProgress = existingTasks.filter(t => (
-        t.status === "in_progress" || liveWorkers.has(namespacedTaskId(t.id, crewNamespace))
-      ));
-      if (inProgress.length > 0) {
-        return result(`Cannot re-plan: ${inProgress.length} task(s) in progress (${inProgress.map(t => t.id).join(", ")}). Stop or complete them first.`, {
-          mode: "plan",
-          error: "tasks_in_progress",
-          inProgress: inProgress.map(t => t.id),
-        });
-      }
-      wipeTasks(cwd);
-    }
-
-    if (existingTasks.length === 0 && !prompt) {
-      const crewDir = store.getCrewDir(cwd);
-      try { fs.rmSync(crewDir, { recursive: true, force: true }); } catch {}
-    }
+  const planningActive = isPlanningActiveForNamespace();
+  if (planningActive) {
+    return result("Planning is already in progress.", { mode: "plan", error: "planning_active" });
   }
 
   let prdPath: string;
@@ -347,6 +311,62 @@ export async function execute(
   }
 
   const isPromptBased = prdPath === "(prompt)";
+  const requestedSourceKey = store.computePlanSourceKey(prdPath, isPromptBased ? prompt : undefined);
+
+  const existingPlan = store.getPlan(cwd);
+  if (existingPlan) {
+    const existingTasks = store.getTasks(cwd, crewNamespace);
+    const liveWorkers = getLiveWorkers(cwd);
+    const inProgress = existingTasks.filter(t => (
+      t.status === "in_progress" || t.status === "starting" || liveWorkers.has(namespacedTaskId(t.id, crewNamespace))
+    ));
+    const existingSourceKey = existingPlan.source_key ?? store.computePlanSourceKey(existingPlan.prd, existingPlan.prompt);
+    const sameSource = existingSourceKey === requestedSourceKey;
+
+    if (sameSource && existingTasks.length > 0 && !prompt) {
+      const planRef = existingPlan.prompt
+        ? `"${store.getPlanLabel(existingPlan)}"`
+        : existingPlan.prd;
+      return result(`A plan already exists for ${planRef}.
+
+To re-plan with a steering prompt:
+  pi_messenger({ action: "plan", prompt: "focus on..." })`, {
+        mode: "plan",
+        error: "plan_exists",
+        existingPrd: existingPlan.prd,
+        runId: existingPlan.run_id ?? "legacy",
+      });
+    }
+
+    if (sameSource && existingTasks.length > 0 && prompt) {
+      if (inProgress.length > 0) {
+        return result(`Cannot re-plan: ${inProgress.length} task(s) in progress (${inProgress.map(t => t.id).join(", ")}). Stop or complete them first.`, {
+          mode: "plan",
+          error: "tasks_in_progress",
+          inProgress: inProgress.map(t => t.id),
+        });
+      }
+      wipeTasks(cwd);
+    }
+
+    if (!sameSource) {
+      if (inProgress.length > 0) {
+        return result(`Cannot start a new run: ${inProgress.length} task(s) from run ${existingPlan.run_id ?? "legacy"} are still in progress (${inProgress.map(t => t.id).join(", ")}). Block, reset, or complete them first.`, {
+          mode: "plan",
+          error: "tasks_in_progress",
+          inProgress: inProgress.map(t => t.id),
+          existingRunId: existingPlan.run_id ?? "legacy",
+        });
+      }
+
+      const archivedRunId = store.archiveActiveRun(cwd, `new plan requested: ${requestedSourceKey}`);
+      logFeedEvent(cwd, agentName, "plan.archive", prdPath, `archived prior run ${archivedRunId ?? "legacy"}`);
+      notify(ctx, `Archived previous run ${archivedRunId ?? "legacy"} and started a fresh run for ${isPromptBased ? "prompt" : path.basename(prdPath)}`, "info");
+    } else if (existingTasks.length === 0 && !prompt) {
+      store.deletePlan(cwd);
+    }
+  }
+
 
   const availableAgents = discoverCrewAgents(cwd);
 
@@ -367,14 +387,14 @@ export async function execute(
     ? (prompt!.length > 60 ? prompt!.slice(0, 57) + "..." : prompt!)
     : prdPath;
 
-  store.createPlan(cwd, prdPath, isPromptBased ? prompt : undefined);
+  const activePlan = store.createPlan(cwd, prdPath, isPromptBased ? prompt : undefined, { sourceKey: requestedSourceKey });
   startRunInProgress(cwd, runLabel);
   if (prompt && !isPromptBased) injectSteeringPrompt(cwd, prompt);
   if (isSharedNamespace) {
     startPlanningRun(cwd, maxPasses);
     setPlanningPhaseForNamespace("read-prd", 0);
   }
-  logFeedEvent(cwd, agentName, "plan.start", prdPath, `max passes ${maxPasses}`);
+  logFeedEvent(cwd, agentName, "plan.start", prdPath, `run ${activePlan.run_id ?? "legacy"} • max passes ${maxPasses}`);
   notify(ctx, `Planning started: ${isPromptBased ? runLabel : path.basename(prdPath)} (${maxPasses} pass${maxPasses === 1 ? "" : "es"})`, "info");
   reportProgress();
 

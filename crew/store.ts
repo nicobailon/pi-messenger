@@ -1,11 +1,13 @@
 /**
  * Crew - Store Operations
  * 
- * Simplified PRD-based storage: plan.json + tasks/*.json
+ * Active-run storage: plan.json + tasks/*.json
+ * Archived runs: runs/<run_id>/...
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
 import type { Plan, Task, TaskEvidence } from "./types.js";
 import { allocateTaskId } from "./id-allocator.js";
@@ -53,6 +55,14 @@ function getBlocksDir(cwd: string): string {
   return path.join(getCrewDir(cwd), "blocks");
 }
 
+function getRunsDir(cwd: string): string {
+  return path.join(getCrewDir(cwd), "runs");
+}
+
+export function computePlanSourceKey(prdPath: string, prompt?: string): string {
+  return prompt ? `prompt:${prompt.trim()}` : `prd:${prdPath}`;
+}
+
 export function cleanupBlockFiles(cwd: string, taskId: string): void {
   try { fs.unlinkSync(path.join(getBlocksDir(cwd), `${taskId}.md`)); } catch {}
 }
@@ -98,13 +108,23 @@ function writeText(filePath: string, content: string): void {
 // =============================================================================
 
 export function getPlan(cwd: string): Plan | null {
-  return readJson<Plan>(path.join(getCrewDir(cwd), "plan.json"));
+  const plan = readJson<Plan>(path.join(getCrewDir(cwd), "plan.json"));
+  if (!plan) return null;
+  return {
+    ...plan,
+    run_id: plan.run_id ?? "legacy",
+    source_key: plan.source_key ?? computePlanSourceKey(plan.prd, plan.prompt),
+  } as Plan;
 }
 
-export function createPlan(cwd: string, prdPath: string, prompt?: string): Plan {
+export function createPlan(cwd: string, prdPath: string, prompt?: string, options?: { runId?: string; sourceKey?: string }): Plan {
   const now = new Date().toISOString();
-  
+  const runId = options?.runId ?? randomUUID().slice(0, 12);
+  const sourceKey = options?.sourceKey ?? computePlanSourceKey(prdPath, prompt);
+
   const plan: Plan = {
+    run_id: runId,
+    source_key: sourceKey,
     prd: prdPath,
     ...(prompt ? { prompt } : {}),
     created_at: now,
@@ -138,39 +158,72 @@ export function updatePlan(cwd: string, updates: Partial<Plan>): Plan | null {
   return updated;
 }
 
+export function archiveActiveRun(cwd: string, reason?: string): string | null {
+  const plan = getPlan(cwd);
+  if (!plan) return null;
+
+  const runId = plan.run_id ?? randomUUID().slice(0, 12);
+  const crewDir = getCrewDir(cwd);
+  const runDir = path.join(getRunsDir(cwd), runId);
+  ensureDir(runDir);
+
+  const copyIfExists = (src: string, dest: string) => {
+    if (!fs.existsSync(src)) return;
+    ensureDir(path.dirname(dest));
+    const stat = fs.statSync(src);
+    if (stat.isDirectory()) {
+      fs.cpSync(src, dest, { recursive: true });
+    } else {
+      fs.copyFileSync(src, dest);
+    }
+  };
+
+  copyIfExists(path.join(crewDir, "plan.json"), path.join(runDir, "plan.json"));
+  copyIfExists(path.join(crewDir, "plan.md"), path.join(runDir, "plan.md"));
+  copyIfExists(path.join(crewDir, "tasks"), path.join(runDir, "tasks"));
+  copyIfExists(path.join(crewDir, "blocks"), path.join(runDir, "blocks"));
+  copyIfExists(path.join(crewDir, "artifacts"), path.join(runDir, "artifacts"));
+  copyIfExists(path.join(crewDir, "planning-progress.md"), path.join(runDir, "planning-progress.md"));
+  copyIfExists(path.join(crewDir, "planning-outline.md"), path.join(runDir, "planning-outline.md"));
+
+  writeJson(path.join(runDir, "manifest.json"), {
+    run_id: runId,
+    archived_at: new Date().toISOString(),
+    reason: reason ?? null,
+    prd: plan.prd,
+    prompt: plan.prompt ?? null,
+    source_key: plan.source_key ?? computePlanSourceKey(plan.prd, plan.prompt),
+    task_count: plan.task_count,
+    completed_count: plan.completed_count,
+  });
+
+  deletePlan(cwd);
+  return runId;
+}
+
 export function deletePlan(cwd: string): boolean {
-  const planPath = path.join(getCrewDir(cwd), "plan.json");
-  const planMdPath = path.join(getCrewDir(cwd), "plan.md");
+  const crewDir = getCrewDir(cwd);
+  const planPath = path.join(crewDir, "plan.json");
+  const planMdPath = path.join(crewDir, "plan.md");
+  const progressPath = path.join(crewDir, "planning-progress.md");
+  const outlinePath = path.join(crewDir, "planning-outline.md");
   const tasksDir = getTasksDir(cwd);
-  
+  const blocksDir = getBlocksDir(cwd);
+  const artifactsDir = path.join(crewDir, "artifacts");
+
   let deleted = false;
-  
-  // Delete plan.json
+
   if (fs.existsSync(planPath)) {
     fs.unlinkSync(planPath);
     deleted = true;
   }
-  
-  // Delete plan.md
-  if (fs.existsSync(planMdPath)) {
-    fs.unlinkSync(planMdPath);
-  }
-  
-  // Delete all task files
-  if (fs.existsSync(tasksDir)) {
-    for (const file of fs.readdirSync(tasksDir)) {
-      fs.unlinkSync(path.join(tasksDir, file));
-    }
-  }
+  if (fs.existsSync(planMdPath)) fs.unlinkSync(planMdPath);
+  if (fs.existsSync(progressPath)) fs.unlinkSync(progressPath);
+  if (fs.existsSync(outlinePath)) fs.unlinkSync(outlinePath);
+  if (fs.existsSync(tasksDir)) fs.rmSync(tasksDir, { recursive: true, force: true });
+  if (fs.existsSync(blocksDir)) fs.rmSync(blocksDir, { recursive: true, force: true });
+  if (fs.existsSync(artifactsDir)) fs.rmSync(artifactsDir, { recursive: true, force: true });
 
-  // Delete all block files
-  const blocksDir = getBlocksDir(cwd);
-  if (fs.existsSync(blocksDir)) {
-    for (const file of fs.readdirSync(blocksDir)) {
-      fs.unlinkSync(path.join(blocksDir, file));
-    }
-  }
-  
   return deleted;
 }
 

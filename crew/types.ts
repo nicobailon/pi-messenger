@@ -13,6 +13,8 @@ import type { CrewAgentConfig } from "./utils/discover.js";
 // =============================================================================
 
 export interface Plan {
+  run_id?: string;               // Immutable run identifier for active/archived plan lineage
+  source_key?: string;           // Stable source identity (prd:<path> | prompt:<text>)
   prd: string;                   // Path to PRD file (relative to cwd)
   prompt?: string;               // Inline prompt text (when no PRD file)
   created_at: string;            // ISO timestamp
