@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "esModuleInterop": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "outDir": "dist/cli",
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false,
+    "paths": {
+      "@mariozechner/pi-coding-agent": ["/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/dist/index.d.ts"],
+      "@mariozechner/pi-tui": ["/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/@mariozechner/pi-tui/dist/index.d.ts"],
+      "@sinclair/typebox": ["/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/@sinclair/typebox/build/esm/index.d.mts"]
+    },
+    "baseUrl": "."
+  },
+  "include": ["cli/index.ts", "**/*.ts"],
+  "exclude": ["tests/**", "dist/**", "node_modules/**"]
+}

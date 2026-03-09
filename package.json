@@ -26,11 +26,13 @@
     "cli"
   ],
   "bin": {
-    "pi-messenger": "install.mjs"
+    "pi-messenger": "install.mjs",
+    "pi-messenger-cli": "cli/index.ts"
   },
   "files": [
     "*.ts",
     "*.mjs",
+    "cli/**",
     "crew/**",
     "skills/**",
     "README.md",
