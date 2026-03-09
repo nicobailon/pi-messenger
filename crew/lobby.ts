@@ -23,6 +23,7 @@ import {
 import { buildRuntimeSpawn } from "./runtime-spawn.js";
 import { resolveRuntime } from "./utils/adapters/index.js";
 import { updateLiveWorker, removeLiveWorker } from "./live-progress.js";
+import { createStuckTimer } from "./utils/stuck-timer.js";
 import * as store from "./store.js";
 import { getMessengerRegistryDir, registerSpawnedWorker } from "../store.js";
 import { inferTaskCompletion } from "./completion-inference.js";
@@ -154,24 +155,17 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   const progress = createProgress("crew-worker");
 
-  // Stuck detection: track last output timestamp, fire warning if silent too long
-  let lastOutputTimestamp = Date.now();
-  let stuckWarned = false;
-  const stuckCheckInterval = config.work.stuckTimeoutMs > 0 ? setInterval(() => {
-    const silentMs = Date.now() - lastOutputTimestamp;
-    if (silentMs >= config.work.stuckTimeoutMs && !stuckWarned) {
-      stuckWarned = true;
-      const displayId = worker.assignedTaskId ?? taskId;
-      store.appendTaskProgress(cwd, displayId, "system",
-        `Worker appears stuck (no output for ${Math.round(silentMs / 1000)}s)`);
-      logFeedEvent(cwd, name, "stuck", displayId, "No output detected");
-    }
-  }, Math.min(config.work.stuckTimeoutMs, 60_000)) : null;
+  // Stuck detection via shared utility (getter for lazy taskId — assignedTaskId is null at creation)
+  const stuckTimer = createStuckTimer({
+    stuckTimeoutMs: config.work.stuckTimeoutMs,
+    cwd,
+    workerName: name,
+    taskId: () => worker.assignedTaskId ?? taskId,
+  });
 
   let jsonlBuffer = "";
   proc.stdout?.on("data", (data) => {
-    lastOutputTimestamp = Date.now();
-    stuckWarned = false; // Reset on new output
+    stuckTimer.onOutput();
     try {
       jsonlBuffer += data.toString();
       const lines = jsonlBuffer.split("\n");
@@ -202,7 +196,7 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   });
 
   proc.on("close", (exitCode) => {
-    if (stuckCheckInterval) clearInterval(stuckCheckInterval);
+    stuckTimer.clear();
     const displayId = worker.assignedTaskId ?? taskId;
     removeLiveWorker(cwd, displayId);
     unregisterWorker(cwd, taskId);

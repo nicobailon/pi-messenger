@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverCrewAgents, type CrewAgentConfig } from "./utils/discover.js";
 import { truncateOutput } from "./utils/truncate.js";
+import { createStuckTimer } from "./utils/stuck-timer.js";
 import {
   createProgress,
   parseJsonlLine,
@@ -247,27 +248,19 @@ async function runAgent(
     let gracefulShutdownRequested = false;
     let discoveredWorkerName: string | null = null;
 
-    // Stuck detection: track last output, fire warning after timeout
-    let lastOutputTimestamp = Date.now();
-    let stuckWarned = false;
-    const stuckCheckInterval = config.work.stuckTimeoutMs > 0 ? setInterval(() => {
-      const silentMs = Date.now() - lastOutputTimestamp;
-      if (silentMs >= config.work.stuckTimeoutMs && !stuckWarned) {
-        stuckWarned = true;
-        if (task.taskId) {
-          store.appendTaskProgress(cwd, task.taskId, "system",
-            `Worker appears stuck (no output for ${Math.round(silentMs / 1000)}s)`);
-        }
-        logFeedEvent(cwd, workerName, "stuck", task.taskId ?? "", "No output detected");
-      }
-    }, Math.min(config.work.stuckTimeoutMs, 60_000)) : null;
+    // Stuck detection via shared utility
+    const stuckTimer = createStuckTimer({
+      stuckTimeoutMs: config.work.stuckTimeoutMs,
+      cwd,
+      workerName,
+      taskId: task.taskId ?? "",
+    });
 
     let jsonlBuffer = "";
     const events: PiEvent[] = [];
 
     proc.stdout?.on("data", (data) => {
-      lastOutputTimestamp = Date.now();
-      stuckWarned = false; // Reset on new output
+      stuckTimer.onOutput();
       try {
         jsonlBuffer += data.toString();
         const lines = jsonlBuffer.split("\n");
@@ -308,7 +301,7 @@ async function runAgent(
     proc.stderr?.on("data", (data) => { stderr += data.toString(); });
 
     proc.on("close", (code) => {
-      if (stuckCheckInterval) clearInterval(stuckCheckInterval);
+      stuckTimer.clear();
       if (task.taskId) {
         removeLiveWorker(cwd, task.taskId);
         unregisterWorker(cwd, task.taskId);
