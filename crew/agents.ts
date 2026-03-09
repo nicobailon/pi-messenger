@@ -78,6 +78,27 @@ export function resolveModel(
   return taskModel ?? paramModel ?? configModel ?? agentModel;
 }
 
+export function parseModelCandidates(model: string | undefined): string[] {
+  if (!model) return [];
+  return model
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
+function isRetryableProviderError(error: string | undefined): boolean {
+  if (!error) return false;
+  return /429|rate[_ -]?limit|overload|overloaded|capacity|try again later/i.test(error);
+}
+
+function expandFailoverAttempts(candidates: string[]): string[] {
+  const out: string[] = [];
+  for (const candidate of candidates) {
+    out.push(candidate, candidate);
+  }
+  return out;
+}
+
 
 export function getConfigModelForRole(
   role: CrewRole,
@@ -233,7 +254,7 @@ export async function spawnAgents(
     while (running.length < autonomousState.concurrency && queue.length > 0) {
       if (options.signal?.aborted) break;
       const { task, index } = queue.shift()!;
-      const promise = runAgent(task, index, cwd, agents, config, runId, artifactsDir, options)
+      const promise = runAgentWithFailover(task, index, cwd, agents, config, runId, artifactsDir, options)
         .then(result => {
           results.push(result);
           running.splice(running.indexOf(promise), 1);
@@ -248,6 +269,63 @@ export async function spawnAgents(
   }
 
   return results;
+}
+
+async function runAgentWithFailover(
+  task: AgentTask,
+  index: number,
+  cwd: string,
+  agents: CrewAgentConfig[],
+  config: CrewConfig,
+  runId: string,
+  artifactsDir: string,
+  options: SpawnOptions,
+): Promise<AgentResult> {
+  const agentConfig = agents.find(a => a.name === task.agent);
+  const requestedModel = task.modelOverride ?? agentConfig?.model;
+  const candidates = parseModelCandidates(requestedModel);
+  if (candidates.length <= 1) {
+    return runAgent(task, index, cwd, agents, config, runId, artifactsDir, options);
+  }
+
+  const attempts = expandFailoverAttempts(candidates);
+  const failoverPath: string[] = [];
+  let lastResult: AgentResult | null = null;
+
+  for (const candidate of attempts) {
+    failoverPath.push(candidate);
+    const result = await runAgent(
+      { ...task, modelOverride: candidate },
+      index,
+      cwd,
+      agents,
+      config,
+      runId,
+      artifactsDir,
+      options,
+    );
+    lastResult = result;
+
+    if (!isRetryableProviderError(result.error)) {
+      if (failoverPath.length > 1) {
+        result.error = result.error
+          ? `${result.error}
+Failover path: ${failoverPath.join(' -> ')}`
+          : `Failover path: ${failoverPath.join(' -> ')}`;
+      }
+      return result;
+    }
+  }
+
+  if (lastResult) {
+    lastResult.error = lastResult.error
+      ? `${lastResult.error}
+Failover path: ${failoverPath.join(' -> ')}`
+      : `Failover exhausted. Path: ${failoverPath.join(' -> ')}`;
+    return lastResult;
+  }
+
+  return runAgent(task, index, cwd, agents, config, runId, artifactsDir, options);
 }
 
 async function runAgent(

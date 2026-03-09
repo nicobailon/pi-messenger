@@ -696,13 +696,25 @@ export async function execute(
 
   if (readyTasks.length === 0) {
     const tasks = store.getTasks(cwd, crewNamespace);
-    const inProgress = tasks.filter(t => t.status === "in_progress");
+    const inProgress = tasks.filter(t => t.status === "in_progress" || t.status === "starting");
+    const pendingGateTasks = tasks.filter(t => t.status === "pending_review" || t.status === "pending_integration");
     const blocked = tasks.filter(t => t.status === "blocked");
     const done = tasks.filter(t => t.status === "done");
 
     let reason = "";
     if (done.length === tasks.length) {
       reason = "🎉 All tasks are done! Plan is complete.";
+    } else if (pendingGateTasks.length > 0) {
+      reason = `${pendingGateTasks.length} task(s) waiting on review/integration gates: ${pendingGateTasks.map(t => `${t.id} (${t.status})`).join(", ")}`;
+      if (sharedAutonomous && isAutonomousForCwd(cwd)) {
+        appendEntry("crew-state", autonomousState);
+        appendEntry("crew_wave_continue", {
+          prd: plan.prd,
+          nextWave: autonomousState.waveNumber,
+          readyTasks: [],
+          pendingGateTasks: pendingGateTasks.map(t => t.id),
+        });
+      }
     } else if (inProgress.length > 0) {
       reason = `${inProgress.length} task(s) in progress: ${inProgress.map(t => t.id).join(", ")}`;
     } else if (blocked.length > 0) {
@@ -711,12 +723,15 @@ export async function execute(
       reason = "All remaining tasks have unmet dependencies.";
     }
 
-    return result(`No ready tasks.\n\n${reason}`, {
+    return result(`No ready tasks.
+
+${reason}`, {
       mode: "work",
       prd: plan.prd,
       ready: [],
       reason,
       inProgress: inProgress.map(t => t.id),
+      pendingGateTasks: pendingGateTasks.map(t => t.id),
       blocked: blocked.map(t => t.id)
     });
   }
@@ -1082,7 +1097,8 @@ export async function execute(
       const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
       const allTasks = store.getTasks(cwd, crewNamespace);
       const allDone = allTasks.every(t => t.status === "done");
-      const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked" || t.status === "pending_review" || t.status === "pending_integration");
+      const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");
+      const pendingGates = allTasks.filter(t => t.status === "pending_review" || t.status === "pending_integration");
 
       if (allDone) {
         stopAutonomous("completed");
@@ -1092,6 +1108,14 @@ export async function execute(
           status: "completed",
           totalWaves: currentWave,
           totalTasks: allTasks.length
+        });
+      } else if (pendingGates.length > 0) {
+        appendEntry("crew-state", autonomousState);
+        appendEntry("crew_wave_continue", {
+          prd: plan.prd,
+          nextWave: autonomousState.waveNumber,
+          readyTasks: nextReady.map(t => t.id),
+          pendingGateTasks: pendingGates.map(t => t.id)
         });
       } else if (allBlockedOrDone || nextReady.length === 0) {
         stopAutonomous("blocked");

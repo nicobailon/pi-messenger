@@ -2,7 +2,7 @@
 name: crew-worker
 description: Implements a single crew task with mesh coordination
 tools: read, write, edit, bash, pi_messenger
-model: anthropic/claude-opus-4-6
+model: anthropic/claude-opus-4-6, openai-codex/gpt-5.3-codex, google/gemini-3.1-pro-preview
 crewRole: worker
 maxOutput: { bytes: 204800, lines: 5000 }
 parallel: true
