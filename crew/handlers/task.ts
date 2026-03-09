@@ -374,6 +374,7 @@ function taskProgress(cwd: string, params: CrewParams, state: MessengerState, na
     });
 
     const phaseStr = phase ? ` [${phase}]` : "";
+    store.appendTaskProgress(cwd, id, state.agentName || "unknown", `${percentage}%${phaseStr} — ${detail}`);
     return result(`Progress updated for ${id}: ${percentage}%${phaseStr} — ${detail}`, {
       mode: "task.progress",
       id,
@@ -419,6 +420,13 @@ function taskEscalate(cwd: string, params: CrewParams, state: MessengerState, na
     preview: `[${severity}] ${reason}`,
     escalation: { reason, severity, suggestion },
   });
+
+  const suggestionLogStr = suggestion ? ` — suggestion: ${suggestion}` : "";
+  store.appendTaskProgress(cwd, id, state.agentName || "unknown", `[escalate:${severity}] ${reason}${suggestionLogStr}`);
+
+  if (severity === "block" || severity === "critical") {
+    store.blockTask(cwd, id, reason);
+  }
 
   const suggestionStr = suggestion ? `\n**Suggestion:** ${suggestion}` : "";
   return result(`🚨 Escalated ${id} [${severity}]: ${reason}${suggestionStr}`, {

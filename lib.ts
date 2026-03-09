@@ -4,6 +4,7 @@
 
 import type * as fs from "node:fs";
 import { basename, isAbsolute, resolve, relative } from "node:path";
+import { appendFeedEvent } from "./feed.js";
 
 // =============================================================================
 // Types
@@ -650,12 +651,9 @@ export function startHeartbeat(
   // (feed.ts imports nothing from lib.ts, but lib.ts is used widely)
   function emitHeartbeatEvent(): void {
     try {
-      // Dynamic require is intentional here for lazy loading
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const feedModule = require("./feed.js") as typeof import("./feed.js");
       const ts = new Date().toISOString();
       heartbeatTimestamps.set(taskId, ts);
-      feedModule.appendFeedEvent(cwd, {
+      appendFeedEvent(cwd, {
         ts,
         agent: agentName,
         type: "task.heartbeat",
@@ -712,9 +710,7 @@ export function checkStaleHeartbeats(
     if (age > thresholdMs) {
       stale.push(taskId);
       try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const feedModule = require("./feed.js") as typeof import("./feed.js");
-        feedModule.appendFeedEvent(cwd, {
+        appendFeedEvent(cwd, {
           ts: new Date().toISOString(),
           agent: agentName,
           type: "heartbeat.stale",

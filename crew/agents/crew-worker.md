@@ -71,13 +71,36 @@ Before marking done, verify:
 ### Anti-pattern: Confident Wrong Answers
 If you've done deep analysis and feel highly confident, PAUSE. Re-read the error message literally. The most dangerous bugs are the ones where thorough analysis leads to a plausible but wrong conclusion. (Ref: py_5 — deep analysis led to wrong fix with high confidence.)
 
-**Progress Logging:** After each significant step above, log what you did:
+**Progress Logging:** After each significant step above, log what you did using the structured API:
 
+```typescript
+// Milestone progress at 25%, 50%, 75%, and 100%
+pi_messenger({ action: "task.progress", id: "<TASK_ID>", percentage: 25, detail: "Completed initial implementation", phase: "impl" })
+pi_messenger({ action: "task.progress", id: "<TASK_ID>", percentage: 50, detail: "Tests written and passing", phase: "testing" })
+pi_messenger({ action: "task.progress", id: "<TASK_ID>", percentage: 75, detail: "Build passing, final polish underway", phase: "review" })
+```
+
+For quick freeform notes you can still use the legacy message form:
 ```typescript
 pi_messenger({ action: "task.progress", id: "<TASK_ID>", message: "Added JWT validation to src/auth/middleware.ts" })
 ```
 
 Keep entries concise — one line per step. This helps the next agent pick up where you left off if the task gets interrupted.
+
+**Escalation:** If you hit a genuine blocker (missing dependency, build broken, unclear requirement that cannot be resolved locally), escalate rather than guessing:
+
+```typescript
+// Warning — non-blocking, informational
+pi_messenger({ action: "task.escalate", id: "<TASK_ID>", severity: "warn", reason: "External API rate-limited; may slow progress" })
+
+// Block — task is blocked, requires Helios or human intervention
+pi_messenger({ action: "task.escalate", id: "<TASK_ID>", severity: "block", reason: "Cannot proceed: build server unreachable", suggestion: "Check CI status and retry in 30 min" })
+
+// Critical — data corruption or security concern
+pi_messenger({ action: "task.escalate", id: "<TASK_ID>", severity: "critical", reason: "Detected conflicting schema migration" })
+```
+
+Severity `block` and `critical` automatically mark the task blocked so Helios is alerted. Use `task.escalate` only when genuinely stuck — not as a substitute for trying to solve the problem yourself.
 
 ## Phase 5: Commit
 
