@@ -284,18 +284,6 @@ function questionAnswer(cwd: string, params: CrewParams, state: MessengerState) 
     store.appendTaskProgress(cwd, entry.taskId, "system", `Answer from ${from}: ${answer}`);
   }
 
-  // Deliver answer to the asking worker's inbox so they see it immediately
-  const askedBy = entry.from;
-  const answerInboxDir = path.join(cwd, ".pi", "messenger", "inbox", askedBy);
-  fs.mkdirSync(answerInboxDir, { recursive: true });
-  const answerInboxFile = path.join(answerInboxDir, `${Date.now()}-answer-${questionId}.json`);
-  fs.writeFileSync(answerInboxFile, JSON.stringify({
-    type: "question.answer",
-    questionId,
-    question: entry.question,
-    answer,
-  }));
-
   return result(
     `Answered question \`${questionId}\` from **${entry.from}**:\n> ${entry.question}\n\n**Answer:** ${answer}`,
     {
