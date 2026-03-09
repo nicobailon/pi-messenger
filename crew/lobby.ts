@@ -11,18 +11,21 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
-import { generateMemorableName } from "../lib.js";
-import { resolveThinking, modelHasThinkingSuffix, pushModelArgs } from "./agents.js";
+import { randomUUID, createHash } from "node:crypto";
+import { generateMemorableName, type FileReservation } from "../lib.js";
+import { resolveThinking } from "./utils/model.js";
 import { discoverCrewAgents } from "./utils/discover.js";
 import { loadCrewConfig, type CrewConfig } from "./utils/config.js";
 import {
   createProgress,
-  parseJsonlLine,
-  updateProgress,
+  updateProgressFromEvent,
 } from "./utils/progress.js";
+import { buildRuntimeSpawn } from "./runtime-spawn.js";
+import { resolveRuntime } from "./utils/adapters/index.js";
 import { updateLiveWorker, removeLiveWorker } from "./live-progress.js";
 import * as store from "./store.js";
+import { getMessengerRegistryDir, registerSpawnedWorker } from "../store.js";
+import { inferTaskCompletion } from "./completion-inference.js";
 import { logFeedEvent } from "../feed.js";
 import {
   registerWorker,
@@ -36,8 +39,6 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const EXTENSION_DIR = path.resolve(__dirname, "..");
-const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
-
 export const LOBBY_TOKEN_BUDGETS: Record<string, number> = {
   none: 10_000,
   minimal: 20_000,
@@ -58,6 +59,12 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   const crewDir = store.getCrewDir(cwd);
   const config = loadCrewConfig(crewDir);
+
+  // Non-pi lobby guard: lobby prompt uses pi_messenger typed tool calls
+  // which non-pi runtimes can't execute. They spawn on-demand via spawnAgents() instead.
+  const runtime = resolveRuntime(config, "worker");
+  if (runtime !== "pi") return null;
+
   const id = randomUUID().slice(0, 6);
   let name = generateMemorableName();
   for (let i = 0; i < 5; i++) {
@@ -68,52 +75,62 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   }
   const prompt = promptOverride ?? buildLobbyPrompt(cwd, config);
 
-  const args = ["--mode", "json", "--no-session", "-p"];
+  // Build spawn args via runtime adapter (V1.7 — unified spawn engine)
+  // runtime already resolved above for the lobby guard
   const model = config.models?.worker ?? workerConfig.model;
-  if (model) pushModelArgs(args, model);
-
   const thinking = resolveThinking(
     config.thinking?.worker,
     workerConfig.thinking,
   );
-  if (thinking && !modelHasThinkingSuffix(model)) {
-    args.push("--thinking", thinking);
-  }
-
-  if (workerConfig.tools?.length) {
-    const builtinTools: string[] = [];
-    const extensionPaths: string[] = [];
-    for (const tool of workerConfig.tools) {
-      if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
-        extensionPaths.push(tool);
-      } else if (BUILTIN_TOOLS.has(tool)) {
-        builtinTools.push(tool);
-      }
-    }
-    if (builtinTools.length > 0) args.push("--tools", builtinTools.join(","));
-    for (const ext of extensionPaths) args.push("--extension", ext);
-  }
-
-  args.push("--extension", EXTENSION_DIR);
 
   let promptTmpDir: string | null = null;
+  let systemPromptPath: string | undefined;
+  let systemPrompt: string | undefined;
   if (workerConfig.systemPrompt) {
+    systemPrompt = workerConfig.systemPrompt;
     promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-lobby-"));
-    const promptPath = path.join(promptTmpDir, "crew-worker.md");
-    fs.writeFileSync(promptPath, workerConfig.systemPrompt, { mode: 0o600 });
-    args.push("--append-system-prompt", promptPath);
+    systemPromptPath = path.join(promptTmpDir, "crew-worker.md");
+    fs.writeFileSync(systemPromptPath, workerConfig.systemPrompt, { mode: 0o600 });
   }
 
-  args.push(prompt);
+  const spawnResult = buildRuntimeSpawn(
+    runtime,
+    { prompt, systemPrompt, systemPromptPath },
+    {
+      model,
+      thinking,
+      tools: workerConfig.tools,
+      extensionDir: EXTENSION_DIR,
+    },
+    { ...process.env as Record<string, string>, ...(config.work.env ?? {}), PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id },
+  );
 
-  const envOverrides = config.work.env ?? {};
-  const env = { ...process.env, ...envOverrides, PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id };
+  // R5 compliance: log warnings for unsupported features
+  for (const warning of spawnResult.warnings) {
+    logFeedEvent(cwd, "system", warning);
+  }
 
-  const proc = spawn("pi", args, {
+  // Generate worker nonce for identity verification (non-pi only)
+  let workerNonce: string | undefined;
+  if (runtime !== "pi") {
+    workerNonce = randomUUID();
+    spawnResult.env.PI_CREW_NONCE = workerNonce;
+  }
+
+  const proc = spawn(spawnResult.command, spawnResult.args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
-    env,
+    env: spawnResult.env,
   });
+
+  // Pre-register non-pi workers (they can't self-register via extension)
+  if (runtime !== "pi" && proc.pid) {
+    const registryDir = getMessengerRegistryDir();
+    const nonceHash = workerNonce
+      ? createHash("sha256").update(workerNonce).digest("hex")
+      : undefined;
+    registerSpawnedWorker(registryDir, cwd, name, proc.pid, model ?? "unknown", `crew-${id}`, nonceHash);
+  }
 
   const aliveFile = path.join(crewDir, `lobby-${id}.alive`);
   try { fs.writeFileSync(aliveFile, "", { mode: 0o600 }); } catch {}
@@ -137,16 +154,33 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   const progress = createProgress("crew-worker");
 
+  // Stuck detection: track last output timestamp, fire warning if silent too long
+  let lastOutputTimestamp = Date.now();
+  let stuckWarned = false;
+  const stuckCheckInterval = config.work.stuckTimeoutMs > 0 ? setInterval(() => {
+    const silentMs = Date.now() - lastOutputTimestamp;
+    if (silentMs >= config.work.stuckTimeoutMs && !stuckWarned) {
+      stuckWarned = true;
+      const displayId = worker.assignedTaskId ?? taskId;
+      store.appendTaskProgress(cwd, displayId, "system",
+        `Worker appears stuck (no output for ${Math.round(silentMs / 1000)}s)`);
+      logFeedEvent(cwd, name, "stuck", displayId, "No output detected");
+    }
+  }, Math.min(config.work.stuckTimeoutMs, 60_000)) : null;
+
   let jsonlBuffer = "";
   proc.stdout?.on("data", (data) => {
+    lastOutputTimestamp = Date.now();
+    stuckWarned = false; // Reset on new output
     try {
       jsonlBuffer += data.toString();
       const lines = jsonlBuffer.split("\n");
       jsonlBuffer = lines.pop() ?? "";
       for (const line of lines) {
-        const event = parseJsonlLine(line);
-        if (event) {
-          updateProgress(progress, event, worker.startedAt);
+        // Use adapter for normalized progress tracking
+        const progressEvent = spawnResult.adapter.parseProgressEvent(line);
+        if (progressEvent) {
+          updateProgressFromEvent(progress, progressEvent, worker.startedAt);
           const displayId = worker.assignedTaskId ?? taskId;
           updateLiveWorker(cwd, displayId, {
             taskId: displayId,
@@ -168,6 +202,7 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   });
 
   proc.on("close", (exitCode) => {
+    if (stuckCheckInterval) clearInterval(stuckCheckInterval);
     const displayId = worker.assignedTaskId ?? taskId;
     removeLiveWorker(cwd, displayId);
     unregisterWorker(cwd, taskId);
@@ -180,19 +215,44 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
     if (worker.assignedTaskId) {
       const task = store.getTask(cwd, worker.assignedTaskId);
       if (task && task.status === "in_progress" && task.assigned_to === worker.name) {
-        const config = loadCrewConfig(store.getCrewDir(cwd));
-        if (task.attempt_count >= config.work.maxAttemptsPerTask) {
-          store.updateTask(cwd, worker.assignedTaskId, {
-            status: "blocked",
-            blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
-            assigned_to: undefined,
-          });
-          logFeedEvent(cwd, worker.name, "task.block", worker.assignedTaskId, `Max attempts reached`);
-        } else {
-          store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
-          store.appendTaskProgress(cwd, worker.assignedTaskId, "system",
-            `Lobby worker ${worker.name} exited (code ${exitCode ?? "unknown"}), reset to todo`);
-          logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, "worker exited");
+        // Read worker's reserved file paths for scoped attribution.
+        // Cannot use getActiveAgents() — worker PID is dead, registration
+        // would be filtered out. Read registration file directly.
+        const regDir = getMessengerRegistryDir();
+        const regPath = path.join(regDir, `${worker.name}.json`);
+        let reservedPaths: string[] = [];
+        try {
+          const reg = JSON.parse(fs.readFileSync(regPath, "utf-8"));
+          reservedPaths = (reg.reservations ?? []).map((r: FileReservation) => r.pattern);
+        } catch { /* registration already cleaned up — fall back to repo-wide */ }
+
+        // Try completion inference before falling through to reset
+        const activeWorkerCount = store.getTasks(cwd).filter(t => t.status === "in_progress").length;
+        const inferred = inferTaskCompletion({
+          cwd,
+          taskId: worker.assignedTaskId,
+          workerName: worker.name,
+          exitCode,
+          baseCommit: task.base_commit,
+          reservedPaths,
+          activeWorkerCount,
+        });
+
+        if (!inferred) {
+          const config = loadCrewConfig(store.getCrewDir(cwd));
+          if (task.attempt_count >= config.work.maxAttemptsPerTask) {
+            store.updateTask(cwd, worker.assignedTaskId, {
+              status: "blocked",
+              blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
+              assigned_to: undefined,
+            });
+            logFeedEvent(cwd, worker.name, "task.block", worker.assignedTaskId, `Max attempts reached`);
+          } else {
+            store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
+            store.appendTaskProgress(cwd, worker.assignedTaskId, "system",
+              `Lobby worker ${worker.name} exited (code ${exitCode ?? "unknown"}), reset to todo`);
+            logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, "worker exited");
+          }
         }
       }
     } else {

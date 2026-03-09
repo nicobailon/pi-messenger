@@ -4,6 +4,7 @@
 
 import { existsSync } from "node:fs";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { HandlerContext } from "./lib.js";
 import {
   type MessengerState,
   type Dirs,
@@ -384,7 +385,7 @@ export function executeSend(
 export function executeReserve(
   state: MessengerState,
   dirs: Dirs,
-  ctx: ExtensionContext,
+  ctx: HandlerContext,
   patterns: string[],
   reason?: string
 ) {
@@ -418,7 +419,7 @@ export function executeReserve(
 export function executeRelease(
   state: MessengerState,
   dirs: Dirs,
-  ctx: ExtensionContext,
+  ctx: HandlerContext,
   release: string[] | true
 ) {
   if (!state.registered) {

@@ -11,6 +11,8 @@ import type { CrewSkillInfo } from "./utils/discover.js";
 import * as store from "./store.js";
 import { buildDependencySection, buildCoordinationContext, buildCoordinationInstructions } from "./handlers/coordination.js";
 
+export type AssignmentMode = "pre-claimed" | "unclaimed";
+
 export function buildWorkerPrompt(
   task: Task,
   prdPath: string,
@@ -18,6 +20,8 @@ export function buildWorkerPrompt(
   config: CrewConfig,
   concurrentTasks: Task[],
   skills?: CrewSkillInfo[],
+  runtime?: string,
+  assignmentMode?: AssignmentMode,
 ): string {
   const taskSpec = store.getTaskSpec(cwd, task.id);
   const planSpec = store.getPlanSpec(cwd);
@@ -110,12 +114,71 @@ ${truncatedSpec}
     prompt += coordInstructions;
   }
 
+  // CLI instructions for non-pi runtimes
+  const cliInstructions = buildCliInstructions(runtime, assignmentMode);
+  if (cliInstructions) {
+    prompt += cliInstructions;
+  }
+
   const skillsSection = buildSkillsSection(skills, task.skills);
   if (skillsSection) {
     prompt += skillsSection;
   }
 
   return prompt;
+}
+
+/**
+ * Build CLI usage instructions for non-pi runtimes.
+ * These instructions tell the worker how to interact with the mesh
+ * via pi-messenger-cli instead of pi_messenger tool calls.
+ */
+export function buildCliInstructions(
+  runtime?: string,
+  assignmentMode?: AssignmentMode,
+): string | null {
+  if (!runtime || runtime === "pi") return null;
+
+  let section = `## Mesh Communication (CLI)
+
+You are running as a **${runtime}** worker. Use \`pi-messenger-cli\` for mesh operations:
+
+`;
+
+  if (assignmentMode === "pre-claimed") {
+    section += `**Task is already started for you — do NOT call task.start.**
+
+`;
+  } else {
+    section += `**You must start the task first:**
+\`\`\`bash
+pi-messenger-cli task.start <task-id>
+\`\`\`
+
+`;
+  }
+
+  section += `**When you're done:**
+\`\`\`bash
+pi-messenger-cli task.done <task-id> --summary "Brief description of what was implemented"
+\`\`\`
+
+**File reservations:**
+\`\`\`bash
+pi-messenger-cli reserve --paths src/myfile.ts src/other.ts
+pi-messenger-cli release --paths src/myfile.ts
+\`\`\`
+
+**Communication:**
+\`\`\`bash
+pi-messenger-cli send --to <agent-name> --message "your message"
+pi-messenger-cli list
+pi-messenger-cli feed
+\`\`\`
+
+`;
+
+  return section;
 }
 
 function buildSkillsSection(

@@ -5,8 +5,7 @@
  * Simplified: tasks belong to the plan, not an epic
  */
 
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { MessengerState } from "../../lib.js";
+import type { HandlerContext, MessengerState } from "../../lib.js";
 import type { CrewParams, Task, TaskEvidence } from "../types.js";
 import { result } from "../utils/result.js";
 import { loadCrewConfig } from "../utils/config.js";
@@ -20,7 +19,7 @@ export async function execute(
   op: string,
   params: CrewParams,
   state: MessengerState,
-  ctx: ExtensionContext
+  ctx: HandlerContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
 

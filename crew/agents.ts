@@ -5,7 +5,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,10 +15,12 @@ import { truncateOutput } from "./utils/truncate.js";
 import {
   createProgress,
   parseJsonlLine,
-  updateProgress,
+  updateProgressFromEvent,
   getFinalOutput,
   type PiEvent,
 } from "./utils/progress.js";
+import { buildRuntimeSpawn } from "./runtime-spawn.js";
+import { resolveRuntime } from "./utils/adapters/index.js";
 import {
   getArtifactPaths,
   ensureArtifactsDir,
@@ -32,11 +34,22 @@ import { autonomousState, waitForConcurrencyChange } from "./state.js";
 import { registerWorker, unregisterWorker, killAll } from "./registry.js";
 import type { AgentTask, AgentResult } from "./types.js";
 import { generateMemorableName } from "../lib.js";
+import {
+  pushModelArgs,
+  resolveModel,
+  resolveThinking,
+  modelHasThinkingSuffix,
+} from "./utils/model.js";
+import { getMessengerRegistryDir, registerSpawnedWorker } from "../store.js";
+import * as store from "./store.js";
+import { logFeedEvent } from "../feed.js";
+
+// Re-export for backward compatibility (tests, lobby.ts, collab.ts import from here)
+export { pushModelArgs, resolveModel, resolveThinking, modelHasThinkingSuffix };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const EXTENSION_DIR = path.resolve(__dirname, "..");
-const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
 export interface SpawnOptions {
   onProgress?: (results: AgentResult[]) => void;
@@ -47,42 +60,6 @@ export interface SpawnOptions {
 
 export function shutdownAllWorkers(): void {
   killAll();
-}
-
-export function resolveModel(
-  taskModel?: string,
-  paramModel?: string,
-  configModel?: string,
-  agentModel?: string,
-): string | undefined {
-  return taskModel ?? paramModel ?? configModel ?? agentModel;
-}
-
-export function pushModelArgs(args: string[], model: string): void {
-  const slashIdx = model.indexOf("/");
-  if (slashIdx !== -1) {
-    args.push("--provider", model.substring(0, slashIdx), "--model", model.substring(slashIdx + 1));
-  } else {
-    args.push("--model", model);
-  }
-}
-
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
-
-export function resolveThinking(
-  configThinking?: string,
-  agentThinking?: string,
-): string | undefined {
-  const resolved = configThinking ?? agentThinking;
-  if (!resolved || resolved === "off") return undefined;
-  return resolved;
-}
-
-export function modelHasThinkingSuffix(model: string | undefined): boolean {
-  if (!model) return false;
-  const colonIdx = model.lastIndexOf(":");
-  if (colonIdx === -1) return false;
-  return THINKING_LEVELS.has(model.substring(colonIdx + 1));
 }
 
 export function raceTimeout(promise: Promise<void>, ms: number): Promise<boolean> {
@@ -201,100 +178,127 @@ async function runAgent(
   }
 
   return new Promise((resolve) => {
-    // Build args for pi command
-    const args = ["--mode", "json", "--no-session", "-p"];
+    // Build spawn args via runtime adapter (V1.6 — unified spawn engine)
+    const runtime = resolveRuntime(config, role);
     const model = task.modelOverride ?? config.models?.[role] ?? agentConfig?.model;
-    if (model) pushModelArgs(args, model);
-
     const thinking = resolveThinking(
       config.thinking?.[role],
       agentConfig?.thinking,
     );
-    if (thinking && !modelHasThinkingSuffix(model)) {
-      args.push("--thinking", thinking);
-    }
-
-    if (agentConfig?.tools?.length) {
-      const builtinTools: string[] = [];
-      const extensionPaths: string[] = [];
-      for (const tool of agentConfig.tools) {
-        if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
-          extensionPaths.push(tool);
-        } else if (BUILTIN_TOOLS.has(tool)) {
-          builtinTools.push(tool);
-        }
-      }
-
-      if (builtinTools.length > 0) {
-        args.push("--tools", builtinTools.join(","));
-      }
-      for (const extensionPath of extensionPaths) {
-        args.push("--extension", extensionPath);
-      }
-    }
-
-    // Pass extension so workers can use pi_messenger
-    args.push("--extension", EXTENSION_DIR);
 
     let promptTmpDir: string | null = null;
-    if (agentConfig?.systemPrompt) {
+    let systemPromptPath: string | undefined;
+    const systemPrompt = agentConfig?.systemPrompt;
+    if (systemPrompt) {
       promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-agent-"));
-      const promptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.md`);
-      fs.writeFileSync(promptPath, agentConfig.systemPrompt, { mode: 0o600 });
-      args.push("--append-system-prompt", promptPath);
+      systemPromptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.md`);
+      fs.writeFileSync(systemPromptPath, systemPrompt, { mode: 0o600 });
     }
 
-    args.push(task.task);
+    const spawnResult = buildRuntimeSpawn(
+      runtime,
+      { prompt: task.task, systemPrompt, systemPromptPath },
+      {
+        model,
+        thinking,
+        tools: agentConfig?.tools,
+        extensionDir: EXTENSION_DIR,
+      },
+      (() => {
+        const envOverrides = config.work.env ?? {};
+        const workerFlag = role === "worker"
+          ? { PI_CREW_WORKER: "1", PI_AGENT_NAME: workerName }
+          : {};
+        return { ...process.env as Record<string, string>, ...envOverrides, ...workerFlag };
+      })(),
+    );
 
-    const envOverrides = config.work.env ?? {};
-    const workerFlag = role === "worker"
-      ? { PI_CREW_WORKER: "1", PI_AGENT_NAME: workerName }
-      : {};
-    const env = Object.keys(envOverrides).length > 0 || role === "worker"
-      ? { ...process.env, ...envOverrides, ...workerFlag }
-      : undefined;
+    // R5 compliance: log warnings for unsupported features
+    for (const warning of spawnResult.warnings) {
+      // Will be wired to logFeedEvent when feed is available in this context
+      console.warn(`[crew] ${warning}`);
+    }
 
-    const proc = spawn("pi", args, {
+    // Defense-in-depth nonce: prevents accidental cross-talk between crew sessions
+    let workerNonce: string | undefined;
+    if (runtime !== "pi") {
+      workerNonce = randomUUID();
+      spawnResult.env.PI_CREW_NONCE = workerNonce;
+    }
+
+    const proc = spawn(spawnResult.command, spawnResult.args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      ...(env ? { env } : {}),
+      env: spawnResult.env,
     });
     if (task.taskId) {
       registerWorker({ type: "worker", proc, name: workerName, cwd, taskId: task.taskId });
     }
+
+    // Pre-register non-pi workers (they can't self-register via extension)
+    if (runtime !== "pi" && proc.pid) {
+      const registryDir = options.messengerDirs?.registry ?? getMessengerRegistryDir();
+      const nonceHash = workerNonce
+        ? createHash("sha256").update(workerNonce).digest("hex")
+        : undefined;
+      registerSpawnedWorker(registryDir, cwd, workerName, proc.pid, model ?? "unknown", `crew-${randomUUID().slice(0, 6)}`, nonceHash);
+    }
+
     let gracefulShutdownRequested = false;
     let discoveredWorkerName: string | null = null;
+
+    // Stuck detection: track last output, fire warning after timeout
+    let lastOutputTimestamp = Date.now();
+    let stuckWarned = false;
+    const stuckCheckInterval = config.work.stuckTimeoutMs > 0 ? setInterval(() => {
+      const silentMs = Date.now() - lastOutputTimestamp;
+      if (silentMs >= config.work.stuckTimeoutMs && !stuckWarned) {
+        stuckWarned = true;
+        if (task.taskId) {
+          store.appendTaskProgress(cwd, task.taskId, "system",
+            `Worker appears stuck (no output for ${Math.round(silentMs / 1000)}s)`);
+        }
+        logFeedEvent(cwd, workerName, "stuck", task.taskId ?? "", "No output detected");
+      }
+    }, Math.min(config.work.stuckTimeoutMs, 60_000)) : null;
 
     let jsonlBuffer = "";
     const events: PiEvent[] = [];
 
     proc.stdout?.on("data", (data) => {
+      lastOutputTimestamp = Date.now();
+      stuckWarned = false; // Reset on new output
       try {
         jsonlBuffer += data.toString();
         const lines = jsonlBuffer.split("\n");
         jsonlBuffer = lines.pop() ?? "";
 
         for (const line of lines) {
-          const event = parseJsonlLine(line);
-          if (event) {
-            events.push(event);
-            updateProgress(progress, event, startTime);
-            if (artifactPaths) {
-              try { appendJsonl(artifactPaths.jsonlPath, line); }
-              catch { artifactPaths = undefined; }
-            }
-            if (task.taskId) {
-              updateLiveWorker(cwd, task.taskId, {
-                taskId: task.taskId,
-                agent: task.agent,
-                name: workerName,
-                progress: {
-                  ...progress,
-                  recentTools: progress.recentTools.map(tool => ({ ...tool })),
-                },
-                startedAt: startTime,
-              });
-            }
+          // Store raw events for getFinalOutput (pi-specific, needed for output extraction)
+          const rawEvent = parseJsonlLine(line);
+          if (rawEvent) events.push(rawEvent);
+
+          // Use adapter for normalized progress tracking
+          const progressEvent = spawnResult.adapter.parseProgressEvent(line);
+          if (progressEvent) {
+            updateProgressFromEvent(progress, progressEvent, startTime);
+          }
+
+          if (rawEvent && artifactPaths) {
+            try { appendJsonl(artifactPaths.jsonlPath, line); }
+            catch { artifactPaths = undefined; }
+          }
+          if ((rawEvent || progressEvent) && task.taskId) {
+            updateLiveWorker(cwd, task.taskId, {
+              taskId: task.taskId,
+              agent: task.agent,
+              name: workerName,
+              progress: {
+                ...progress,
+                recentTools: progress.recentTools.map(tool => ({ ...tool })),
+              },
+              startedAt: startTime,
+            });
           }
         }
       } catch {}
@@ -304,6 +308,7 @@ async function runAgent(
     proc.stderr?.on("data", (data) => { stderr += data.toString(); });
 
     proc.on("close", (code) => {
+      if (stuckCheckInterval) clearInterval(stuckCheckInterval);
       if (task.taskId) {
         removeLiveWorker(cwd, task.taskId);
         unregisterWorker(cwd, task.taskId);

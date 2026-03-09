@@ -9,6 +9,18 @@ import { basename, isAbsolute, resolve, relative } from "node:path";
 // Types
 // =============================================================================
 
+/**
+ * Minimal context for handler functions callable from both the pi extension
+ * and the standalone CLI. Uses structural subtyping — ExtensionContext
+ * satisfies this interface, so existing pi callers work unchanged.
+ */
+export interface HandlerContext {
+  cwd: string;
+  hasUI: boolean;
+  /** Optional model info — present in pi extension context, absent in CLI */
+  model?: { id: string };
+}
+
 export interface FileReservation {
   pattern: string;
   reason?: string;
@@ -41,6 +53,8 @@ export interface AgentRegistration {
   session: AgentSession;
   activity: AgentActivity;
   statusMessage?: string;
+  /** SHA-256 hash of PI_CREW_NONCE — optional for backward compat with pre-nonce registrations */
+  nonceHash?: string;
 }
 
 export interface AgentMailMessage {

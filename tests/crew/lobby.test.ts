@@ -24,6 +24,7 @@ vi.mock("../../crew/store.js", () => ({
   getPlan: vi.fn(() => ({ prd: "docs/PRD.md" })),
   getCrewDir: vi.fn((cwd: string) => `${cwd}/.pi/messenger/crew`),
   getTask: vi.fn(() => null),
+  getTasks: vi.fn(() => []),
   getBaseCommit: vi.fn(() => "abc1234"),
   updateTask: vi.fn(),
   appendTaskProgress: vi.fn(),
