@@ -6,6 +6,7 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { createHash } from "node:crypto";
 import { generateMemorableName, type Dirs } from "../../lib.js";
 import type { CrewParams, AppendEntryFn, AgentResult } from "../types.js";
 import { result } from "../utils/result.js";
@@ -52,6 +53,45 @@ function fromNamespacedTaskId(taskId: string | undefined, crewNamespace: string)
   return taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
 }
 
+function buildIdentityFingerprint(parts: Record<string, string | undefined>): string {
+  const serialized = Object.entries(parts)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value?.trim() ?? ""}`)
+    .join("|");
+  return createHash("sha256").update(serialized).digest("hex").slice(0, 12);
+}
+
+function resolveStableModelIdentity(parts: {
+  modelOverride?: string;
+  taskModel?: string;
+  paramsModel?: string;
+  configRoleModel?: string;
+  agentModel?: string;
+  role?: string;
+  agentName?: string;
+}): string {
+  const normalizedModel = parts.modelOverride?.trim()
+    || parts.taskModel?.trim()
+    || parts.paramsModel?.trim()
+    || parts.configRoleModel?.trim()
+    || parts.agentModel?.trim();
+
+  if (normalizedModel) {
+    return `model:${normalizedModel}`;
+  }
+
+  const fingerprint = buildIdentityFingerprint({
+    role: parts.role,
+    agent: parts.agentName,
+    taskModel: parts.taskModel,
+    paramsModel: parts.paramsModel,
+    configRoleModel: parts.configRoleModel,
+    agentModel: parts.agentModel,
+  });
+
+  return `config:${fingerprint}`;
+}
+
 const FEYNMAN_ROLES: CrewRole[] = ["scout", "planner", "worker", "reviewer", "verifier", "auditor", "researcher", "analyst"];
 
 const ROLE_KEYWORDS: Array<{ role: CrewRole; patterns: RegExp[] }> = [
@@ -94,7 +134,7 @@ ${spec ?? ""}`;
  * The reviewer examines the task diff and spec, producing an APPROVE/REJECT verdict.
  * If rejected, the task is reset to "todo" with reviewer feedback in progress.
  */
-function spawnAdversarialReview(
+async function runAdversarialReview(
   taskId: string,
   taskTitle: string,
   taskSummary: string | undefined,
@@ -102,7 +142,7 @@ function spawnAdversarialReview(
   cwd: string,
   config: ReturnType<typeof loadCrewConfig>,
   dirs: Dirs,
-): void {
+): Promise<"approved" | "rejected" | "error"> {
   const reviewPrompt = [
     `## Adversarial Review: ${taskId}`,
     ``,
@@ -123,9 +163,8 @@ function spawnAdversarialReview(
     `Adversarial review spawned for ${taskId}`);
   logFeedEvent(cwd, "adversarial-reviewer", "message", taskId, `Adversarial review started for ${taskTitle}`);
 
-  // Spawn asynchronously — do not await
   const reviewModel = resolveModel(config.models?.reviewer);
-  spawnAgents(
+  const results = await spawnAgents(
     [{
       agent: "adversarial-reviewer",
       task: reviewPrompt,
@@ -134,19 +173,21 @@ function spawnAdversarialReview(
     }],
     cwd,
     { messengerDirs: { registry: dirs.registry, inbox: dirs.inbox } },
-  ).then((results) => {
-    const reviewResult = results[0];
-    if (!reviewResult) return;
+  );
 
-    const output = reviewResult.output ?? "";
-    const isRejected = /## Verdict:\s*REJECT/i.test(output);
+  const reviewResult = results[0];
+  if (!reviewResult) return "error";
+
+  const output = reviewResult.output ?? "";
+  const isRejected = /## Verdict:\s*REJECT/i.test(output);
 
     // Record credibility outcome for the agent that completed the task
-    const assignedAgent = store.getTask(cwd, taskId)?.assigned_to;
-    if (assignedAgent) {
-      const cred = recordReviewOutcome(assignedAgent, !isRejected);
+    const taskRecord = store.getTask(cwd, taskId);
+    const reviewIdentity = taskRecord?.model_identity ?? taskRecord?.assigned_to;
+    if (reviewIdentity) {
+      const cred = recordReviewOutcome(reviewIdentity, !isRejected);
       store.appendTaskProgress(cwd, taskId, "system",
-        `Credibility updated for ${assignedAgent}: score=${cred.credibilityScore}`);
+        `Credibility updated for ${reviewIdentity}: score=${cred.credibilityScore}`);
     }
 
     store.appendTaskProgress(cwd, taskId, "adversarial-reviewer",
@@ -156,31 +197,29 @@ function spawnAdversarialReview(
     logFeedEvent(cwd, "adversarial-reviewer", isRejected ? "task.reset" : "task.done",
       taskId, isRejected ? "Adversarial review: REJECTED" : "Adversarial review: APPROVED");
 
-    if (isRejected) {
-      // Extract issues from output for feedback
-      const issueMatches = output.match(/### Issue \d+:.*?(?=### Issue \d+:|## Summary|<\/adversarial_verdict>)/gs);
-      const issues = issueMatches
-        ? issueMatches.map(m => m.trim()).slice(0, 5)
-        : ["See full adversarial review output for details"];
+  if (isRejected) {
+    // Extract issues from output for feedback
+    const issueMatches = output.match(/### Issue \d+:.*?(?=### Issue \d+:|## Summary|<\/adversarial_verdict>)/gs);
+    const issues = issueMatches
+      ? issueMatches.map(m => m.trim()).slice(0, 5)
+      : ["See full adversarial review output for details"];
 
-      store.updateTask(cwd, taskId, {
-        status: "todo",
-        assigned_to: undefined,
-        last_review: {
-          verdict: "NEEDS_WORK",
-          summary: "Adversarial review rejected the completion",
-          issues,
-          suggestions: [],
-          reviewed_at: new Date().toISOString(),
-        },
-      });
-      store.appendTaskProgress(cwd, taskId, "system",
-        `Task reset to todo after adversarial review rejection`);
-    }
-  }).catch((err) => {
+    store.rejectTaskReview(cwd, taskId);
+    store.updateTask(cwd, taskId, {
+      last_review: {
+        verdict: "NEEDS_WORK",
+        summary: "Adversarial review rejected the completion",
+        issues,
+        suggestions: [],
+        reviewed_at: new Date().toISOString(),
+      },
+    });
     store.appendTaskProgress(cwd, taskId, "system",
-      `Adversarial review failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
-  });
+      `Task reset to todo after adversarial review rejection`);
+    return "rejected";
+  }
+
+  return "approved";
 }
 
 /**
@@ -188,14 +227,14 @@ function spawnAdversarialReview(
  * Runs test suite, linting, and type-checking. If any check fails, the task
  * is blocked with failure details.
  */
-function spawnIntegrationTest(
+async function runIntegrationTest(
   taskId: string,
   taskTitle: string,
   baseCommit: string | undefined,
   cwd: string,
   config: ReturnType<typeof loadCrewConfig>,
   dirs: Dirs,
-): void {
+): Promise<"passed" | "failed" | "error"> {
   const testPrompt = [
     `## Integration Test: ${taskId}`,
     ``,
@@ -217,9 +256,8 @@ function spawnIntegrationTest(
     `Integration test spawned for ${taskId}`);
   logFeedEvent(cwd, "integration-tester", "message", taskId, `Integration test started for ${taskTitle}`);
 
-  // Spawn asynchronously — do not await
   const testModel = resolveModel(config.models?.reviewer);
-  spawnAgents(
+  const results = await spawnAgents(
     [{
       agent: "integration-tester",
       task: testPrompt,
@@ -228,12 +266,13 @@ function spawnIntegrationTest(
     }],
     cwd,
     { messengerDirs: { registry: dirs.registry, inbox: dirs.inbox } },
-  ).then((results) => {
-    const testResult = results[0];
-    if (!testResult) return;
+  );
 
-    const output = testResult.output ?? "";
-    const isFail = /## Verdict:\s*FAIL/i.test(output);
+  const testResult = results[0];
+  if (!testResult) return "error";
+
+  const output = testResult.output ?? "";
+  const isFail = /## Verdict:\s*FAIL/i.test(output);
 
     store.appendTaskProgress(cwd, taskId, "integration-tester",
       isFail
@@ -242,21 +281,83 @@ function spawnIntegrationTest(
     logFeedEvent(cwd, "integration-tester", isFail ? "task.block" : "task.done",
       taskId, isFail ? "Integration tests: FAILED" : "Integration tests: PASSED");
 
-    if (isFail) {
-      // Extract failure details from report
-      const failSections = output.match(/### (?:Test Suite|Linting|Type Checking)[\s\S]*?(?=###|## Verdict|<\/integration_test_report>)/g);
-      const failures = failSections
-        ? failSections.filter(s => /Status:\s*FAIL/i.test(s)).map(s => s.trim()).slice(0, 5)
-        : ["See full integration test output for details"];
+  if (isFail) {
+    // Extract failure details from report
+    const failSections = output.match(/### (?:Test Suite|Linting|Type Checking)[\s\S]*?(?=###|## Verdict|<\/integration_test_report>)/g);
+    const failures = failSections
+      ? failSections.filter(s => /Status:\s*FAIL/i.test(s)).map(s => s.trim()).slice(0, 5)
+      : ["See full integration test output for details"];
 
-      store.blockTask(cwd, taskId, `Integration test failures:\n${failures.join("\n")}`);
-      store.appendTaskProgress(cwd, taskId, "system",
-        `Task blocked after integration test failure`);
-    }
-  }).catch((err) => {
+    store.blockTask(cwd, taskId, `Integration test failures:\n${failures.join("\n")}`);
     store.appendTaskProgress(cwd, taskId, "system",
-      `Integration test failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
-  });
+      `Task blocked after integration test failure`);
+    return "failed";
+  }
+
+  return "passed";
+}
+
+
+async function finalizePendingAcceptance(
+  task: import("../types.js").Task,
+  cwd: string,
+  config: ReturnType<typeof loadCrewConfig>,
+  dirs: Dirs,
+): Promise<"succeeded" | "failed" | "blocked"> {
+  if (task.status !== "pending_review") {
+    return task.status === "blocked" ? "blocked" : task.status === "done" ? "succeeded" : "failed";
+  }
+
+  const reviewEnabled = config.review?.autoAdversarial !== false;
+  let reviewResult: "approved" | "rejected" | "error" = "approved";
+
+  if (reviewEnabled) {
+    reviewResult = await runAdversarialReview(task.id, task.title, task.summary, task.base_commit, cwd, config, dirs);
+  }
+
+  if (reviewResult === "rejected") return "failed";
+  if (reviewResult === "error") return "failed";
+
+  const latestAfterReview = store.getTask(cwd, task.id);
+  if (!latestAfterReview || latestAfterReview.status !== "pending_review") {
+    if (latestAfterReview?.status === "done") return "succeeded";
+    if (latestAfterReview?.status === "blocked") return "blocked";
+    return "failed";
+  }
+
+  const integrationEnabled = config.review?.autoIntegrationTest !== false;
+  const agentName = latestAfterReview.assigned_to;
+  const intensity = agentName ? getReviewIntensity(agentName) : "standard";
+  const shouldRunIntegration = integrationEnabled && intensity !== "light";
+
+  if (!shouldRunIntegration) {
+    if (integrationEnabled && intensity === "light") {
+      store.appendTaskProgress(cwd, task.id, "system",
+        `Integration test skipped: ${agentName} has light review intensity (high credibility)`);
+    }
+    const accepted = store.acceptTask(cwd, task.id);
+    return accepted ? "succeeded" : "failed";
+  }
+
+  store.transitionTaskToPendingIntegration(cwd, task.id);
+  const latestBeforeIntegration = store.getTask(cwd, task.id);
+  if (!latestBeforeIntegration) return "failed";
+
+  const integrationResult = await runIntegrationTest(
+    task.id,
+    task.title,
+    task.base_commit,
+    cwd,
+    config,
+    dirs,
+  );
+
+  if (integrationResult !== "passed") {
+    return integrationResult === "failed" ? "blocked" : "failed";
+  }
+
+  const accepted = store.acceptTask(cwd, task.id);
+  return accepted ? "succeeded" : "failed";
 }
 
 /**
@@ -493,10 +594,11 @@ async function spawnDualWorkers(
   params: CrewParams,
   primaryAgentName: string,
   otherTasks: import("../types.js").Task[],
+  modelOverride: string | undefined,
+  modelIdentity: string,
 ): Promise<{ results: AgentResult[]; workerNames: [string, string] }> {
   const workerNameA = `${generateMemorableName()}-A`;
   const workerNameB = `${generateMemorableName()}-B`;
-  const modelOverride = resolveModel(task.model, params.model, config.models?.worker);
 
   const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, otherTasks);
 
@@ -505,6 +607,8 @@ async function spawnDualWorkers(
     started_at: new Date().toISOString(),
     base_commit: store.getBaseCommit(cwd),
     assigned_to: `${workerNameA},${workerNameB}`,
+    model_identity: modelIdentity,
+    model_identity_dual: [modelIdentity],
     attempt_count: task.attempt_count + 1,
   });
 
@@ -646,15 +750,25 @@ export async function execute(
 
     const others = readyTasks.filter(t => t.id !== task.id);
     const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
+    const modelIdentity = resolveStableModelIdentity({
+      taskModel: currentTask.model,
+      paramsModel: params.model,
+      configRoleModel: config.models?.worker,
+      role: "worker",
+      agentName: lobbyWorker.name,
+    });
+
     store.updateTask(cwd, task.id, {
       status: "in_progress",
       started_at: new Date().toISOString(),
       base_commit: store.getBaseCommit(cwd),
       assigned_to: lobbyWorker.name,
+      model_identity: modelIdentity,
+      model_identity_dual: undefined,
       attempt_count: task.attempt_count + 1,
     });
     if (!assignTaskToLobbyWorker(lobbyWorker, task.id, prompt, dirs.inbox)) {
-      store.updateTask(cwd, task.id, { status: "todo", assigned_to: undefined });
+      store.updateTask(cwd, task.id, { status: "todo", assigned_to: undefined, model_identity: undefined, model_identity_dual: undefined });
       continue;
     }
     store.appendTaskProgress(cwd, task.id, "system", `Assigned to lobby worker ${lobbyWorker.name} (attempt ${task.attempt_count + 1})`);
@@ -673,6 +787,7 @@ export async function execute(
     agentName: string;
     routedRole: CrewRole;
     modelOverride: string | undefined;
+    modelIdentity: string;
   }> = [];
 
   for (const task of remainingTasks) {
@@ -681,14 +796,6 @@ export async function execute(
     if (!currentTask || currentTask.status !== "todo" || hasActiveWorker(cwd, namespacedId)) continue;
 
     const workerName = generateMemorableName();
-    const updatedTask = store.updateTask(cwd, task.id, {
-      status: "in_progress",
-      started_at: new Date().toISOString(),
-      base_commit: store.getBaseCommit(cwd),
-      assigned_to: workerName,
-      attempt_count: currentTask.attempt_count + 1,
-    });
-    if (!updatedTask) continue;
 
     const preferredRole = (currentTask as { preferred_role?: string; crew_role?: string; role?: string }).preferred_role
       ?? (currentTask as { preferred_role?: string; crew_role?: string; role?: string }).crew_role
@@ -697,21 +804,43 @@ export async function execute(
     const routedRole = classifyTaskToFeynmanRole(task.title, spec, preferredRole);
     const routedAgent = selectCrewAgentForRole(availableAgents, routedRole);
     const agentName = routedAgent?.name ?? "crew-worker";
+    const modelOverride = resolveModelForTaskRole(
+      routedRole,
+      task.model,
+      params.model,
+      config.models,
+      routedAgent?.model,
+    );
+    const modelIdentity = resolveStableModelIdentity({
+      modelOverride,
+      taskModel: task.model,
+      paramsModel: params.model,
+      configRoleModel: config.models?.[routedRole],
+      agentModel: routedAgent?.model,
+      role: routedRole,
+      agentName,
+    });
+
+    const updatedTask = store.updateTask(cwd, task.id, {
+      status: "in_progress",
+      started_at: new Date().toISOString(),
+      base_commit: store.getBaseCommit(cwd),
+      assigned_to: workerName,
+      model_identity: modelIdentity,
+      model_identity_dual: undefined,
+      attempt_count: currentTask.attempt_count + 1,
+    });
+    if (!updatedTask) continue;
 
     pendingAssignments.push({
       task: currentTask,
       workerName,
       agentName,
       routedRole,
-      modelOverride: resolveModelForTaskRole(
-        routedRole,
-        task.model,
-        params.model,
-        config.models,
-        routedAgent?.model,
-      ),
+      modelOverride,
+      modelIdentity,
     });
-    store.appendTaskProgress(cwd, task.id, "system", `Assigned to ${workerName} via ${agentName} [${routedRole}] (attempt ${currentTask.attempt_count + 1})`);
+    store.appendTaskProgress(cwd, task.id, "system", `Assigned to ${workerName} via ${agentName} [${routedRole}] (attempt ${currentTask.attempt_count + 1}, identity=${modelIdentity})`);
   }
 
   // Separate critical tasks for dual-worker verification
@@ -733,13 +862,13 @@ export async function execute(
   // Spawn dual workers for critical tasks (async, processed after normal workers)
   const criticalPromises: Promise<CriticalTaskOutcome>[] = [];
   for (const assignment of criticalAssignments) {
-    const { task: assignedTask, agentName } = assignment;
+    const { task: assignedTask, agentName, modelOverride, modelIdentity } = assignment;
     const freshTask = store.getTask(cwd, assignedTask.id);
     if (!freshTask) continue;
 
     const others = pendingAssignments.map(a => a.task).filter(o => o.id !== assignedTask.id);
     const promise = spawnDualWorkers(
-      freshTask, prdLabel, cwd, config, dirs, crewNamespace, params, agentName, others,
+      freshTask, prdLabel, cwd, config, dirs, crewNamespace, params, agentName, others, modelOverride, modelIdentity,
     ).then(({ results: dualResults, workerNames }) => {
       const [resultA, resultB] = dualResults;
       const outputA = resultA?.output ?? "";
@@ -833,79 +962,48 @@ export async function execute(
     }
     const task = store.getTask(cwd, taskId);
 
-    if (r.exitCode === 0) {
+    const completedOrGraceful = r.exitCode === 0 || r.wasGracefullyShutdown;
+
+    if (completedOrGraceful) {
       if (task?.status === "done") {
-        // Create post-task checkpoint for rollback (async, best-effort)
         import("../utils/checkpoint.js").then(({ createCheckpoint }) => {
           createCheckpoint(cwd, taskId, "post", `post: ${task.title}`);
         }).catch(() => {});
         succeeded.push(taskId);
-
-        // Post-completion adversarial review (async/non-blocking)
-        if (config.review?.autoAdversarial !== false && task) {
-          spawnAdversarialReview(taskId, task.title, task.summary, task.base_commit, cwd, config, dirs);
-        }
-        // Post-completion integration test (async/non-blocking)
-        // Skip for high-credibility agents (light review intensity)
-        if (config.review?.autoIntegrationTest !== false && task) {
-          const agentName = task.assigned_to;
-          const intensity = agentName ? getReviewIntensity(agentName) : "standard";
-          if (intensity !== "light") {
-            spawnIntegrationTest(taskId, task.title, task.base_commit, cwd, config, dirs);
-          } else {
-            store.appendTaskProgress(cwd, taskId, "system",
-              `Integration test skipped: ${agentName} has light review intensity (high credibility)`);
-          }
+      } else if (task?.status === "pending_review") {
+        const acceptance = await finalizePendingAcceptance(task, cwd, config, dirs);
+        if (acceptance === "succeeded") {
+          import("../utils/checkpoint.js").then(({ createCheckpoint }) => {
+            createCheckpoint(cwd, taskId, "post", `post: ${task.title}`);
+          }).catch(() => {});
+          succeeded.push(taskId);
+        } else if (acceptance === "blocked") {
+          blocked.push(taskId);
+        } else {
+          failed.push(taskId);
         }
       } else if (task?.status === "blocked") {
         blocked.push(taskId);
       } else if (task?.status === "in_progress") {
         store.appendTaskProgress(cwd, taskId, "system",
           r.wasGracefullyShutdown ? "Task interrupted (shutdown), reset to todo" : "Worker exited without completing task, reset to todo");
-        store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
+        store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined, model_identity: undefined, model_identity_dual: undefined });
         failed.push(taskId);
       } else {
         failed.push(taskId);
       }
+      continue;
+    }
+
+    if (sharedAutonomous && task?.status === "in_progress") {
+      store.appendTaskProgress(cwd, taskId, "system", `Worker crashed: ${r.error ?? "Unknown error"}`);
+      store.blockTask(cwd, taskId, `Worker failed: ${r.error ?? "Unknown error"}`);
+      blocked.push(taskId);
     } else {
-      if (r.wasGracefullyShutdown) {
-        if (task?.status === "done") {
-          succeeded.push(taskId);
-          // Post-completion adversarial review (async/non-blocking)
-          if (config.review?.autoAdversarial !== false && task) {
-            spawnAdversarialReview(taskId, task.title, task.summary, task.base_commit, cwd, config, dirs);
-          }
-          // Post-completion integration test (async/non-blocking)
-          // Skip for high-credibility agents (light review intensity)
-          if (config.review?.autoIntegrationTest !== false && task) {
-            const agentName = task.assigned_to;
-            const intensity = agentName ? getReviewIntensity(agentName) : "standard";
-            if (intensity !== "light") {
-              spawnIntegrationTest(taskId, task.title, task.base_commit, cwd, config, dirs);
-            } else {
-              store.appendTaskProgress(cwd, taskId, "system",
-                `Integration test skipped: ${agentName} has light review intensity (high credibility)`);
-            }
-          }
-        } else if (task?.status === "blocked") {
-          blocked.push(taskId);
-        } else if (task?.status === "in_progress") {
-          store.appendTaskProgress(cwd, taskId, "system", "Task interrupted (shutdown), reset to todo");
-          store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
-          failed.push(taskId);
-        } else {
-          failed.push(taskId);
-        }
-      } else if (sharedAutonomous && task?.status === "in_progress") {
-        store.appendTaskProgress(cwd, taskId, "system", `Worker crashed: ${r.error ?? "Unknown error"}`);
-        store.blockTask(cwd, taskId, `Worker failed: ${r.error ?? "Unknown error"}`);
-        blocked.push(taskId);
-      } else {
-        if (task?.status === "in_progress") {
-          store.appendTaskProgress(cwd, taskId, "system", `Worker failed: ${r.error ?? "Unknown error"}`);
-        }
-        failed.push(taskId);
+      if (task?.status === "in_progress") {
+        store.appendTaskProgress(cwd, taskId, "system", `Worker failed: ${r.error ?? "Unknown error"}`);
       }
+      failed.push(taskId);
     }
   }
 
@@ -916,6 +1014,11 @@ export async function execute(
 
     if (task?.status === "done") {
       succeeded.push(taskId);
+    } else if (task?.status === "pending_review") {
+      const acceptance = await finalizePendingAcceptance(task, cwd, config, dirs);
+      if (acceptance === "succeeded") succeeded.push(taskId);
+      else if (acceptance === "blocked") blocked.push(taskId);
+      else failed.push(taskId);
     } else if (task?.status === "blocked") {
       blocked.push(taskId);
     } else if (task?.status === "in_progress") {
@@ -925,7 +1028,7 @@ export async function execute(
           ? "Critical dual-worker failed before completion, reset to todo"
           : "Critical task exited without final completion, reset to todo";
       store.appendTaskProgress(cwd, taskId, "system", interruptionMessage);
-      store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
+      store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined, model_identity: undefined, model_identity_dual: undefined });
       failed.push(taskId);
     } else {
       failed.push(taskId);
@@ -943,7 +1046,7 @@ export async function execute(
       const duration = task.started_at
         ? Date.now() - new Date(task.started_at).getTime()
         : 0;
-      const modelUsed = task.assigned_to ?? "unknown";
+      const modelUsed = task.model_identity ?? task.assigned_to ?? "unknown";
       recordTaskOutcome(modelUsed, taskType, succeeded.includes(taskId), duration);
     }
   }
@@ -979,7 +1082,7 @@ export async function execute(
       const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
       const allTasks = store.getTasks(cwd, crewNamespace);
       const allDone = allTasks.every(t => t.status === "done");
-      const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");
+      const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked" || t.status === "pending_review" || t.status === "pending_integration");
 
       if (allDone) {
         stopAutonomous("completed");

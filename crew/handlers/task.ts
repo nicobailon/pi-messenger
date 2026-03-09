@@ -277,6 +277,14 @@ function taskShow(cwd: string, params: CrewParams, namespace: string) {
       statusDetails = `\n**Assigned to:** ${task.assigned_to ?? "unknown"}\n**Started:** ${task.started_at}`;
       if (task.base_commit) statusDetails += `\n**Base commit:** ${task.base_commit.slice(0, 8)}`;
       break;
+    case "pending_review":
+      statusDetails = `\n**Gate:** waiting for review approval`;
+      if (task.summary) statusDetails += `\n**Summary:** ${task.summary}`;
+      break;
+    case "pending_integration":
+      statusDetails = `\n**Gate:** review approved, waiting for integration checks`;
+      if (task.summary) statusDetails += `\n**Summary:** ${task.summary}`;
+      break;
     case "done":
       statusDetails = `\n**Completed:** ${task.completed_at}`;
       if (task.summary) statusDetails += `\n**Summary:** ${task.summary}`;
@@ -309,6 +317,8 @@ function taskShow(cwd: string, params: CrewParams, namespace: string) {
   const statusIcon = {
     todo: "⬜",
     in_progress: "🔄",
+    pending_review: "🕵️",
+    pending_integration: "🧪",
     done: "✅",
     blocked: "🚫",
   }[task.status];
@@ -366,7 +376,7 @@ function taskList(cwd: string, namespace: string) {
   const lines: string[] = [`# Tasks for ${store.getPlanLabel(plan)}\n`];
   
   for (const task of tasks) {
-    const icon = { todo: "⬜", in_progress: "🔄", done: "✅", blocked: "🚫" }[task.status];
+    const icon = { todo: "⬜", in_progress: "🔄", pending_review: "🕵️", pending_integration: "🧪", done: "✅", blocked: "🚫" }[task.status];
     const deps = task.depends_on.length > 0 ? ` → deps: ${task.depends_on.join(", ")}` : "";
     const assignee = task.assigned_to ? ` [${task.assigned_to}]` : "";
     lines.push(`${icon} **${task.id}**: ${task.title}${assignee}${deps}`);
@@ -519,9 +529,10 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState, namesp
     }
   }
 
-  const text = `✅ Completed task **${id}**
+  const text = `✅ Submitted task **${id}** for acceptance gates
 
 **Summary:** ${summary}
+**Status:** ${completed.status}
 **Progress:** ${plan?.completed_count}/${plan?.task_count}${nextSteps}`;
 
   return result(text, {
@@ -631,7 +642,7 @@ function taskReady(cwd: string, namespace: string) {
 
   if (ready.length === 0) {
     const tasks = store.getTasks(cwd, namespace);
-    const inProgress = tasks.filter(t => t.status === "in_progress");
+    const inProgress = tasks.filter(t => t.status === "in_progress" || t.status === "pending_review" || t.status === "pending_integration");
     const blocked = tasks.filter(t => t.status === "blocked");
     const done = tasks.filter(t => t.status === "done");
 

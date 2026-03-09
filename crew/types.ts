@@ -35,6 +35,8 @@ export type TaskStatus =
   | "assigned"       // worker allocated, not yet spawned
   | "starting"       // process spawned, awaiting first heartbeat
   | "in_progress"    // heartbeat received, actively working
+  | "pending_review" // worker submitted completion; awaiting review gate
+  | "pending_integration" // review approved; awaiting integration/test gate
   | "done"
   | "blocked";
 
@@ -58,6 +60,8 @@ export interface Task {
   completed_at?: string;         // When task.done was called
   base_commit?: string;          // Git commit SHA at task.start
   assigned_to?: string;          // Agent name currently working on it
+  model_identity?: string;      // Stable provider/model or config fingerprint for metrics
+  model_identity_dual?: string[]; // Dual-worker identity set for critical tasks
   summary?: string;              // Completion summary from task.done
   evidence?: TaskEvidence;       // Evidence from task.done
   blocked_reason?: string;       // Reason from task.block

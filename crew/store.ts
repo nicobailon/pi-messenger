@@ -444,15 +444,32 @@ export function completeTask(
   const task = getTask(cwd, taskId);
   if (!task || task.status !== "in_progress") return null;
 
+  return updateTask(cwd, taskId, {
+    status: "pending_review",
+    summary,
+    evidence,
+  });
+}
+
+export function transitionTaskToPendingIntegration(cwd: string, taskId: string): Task | null {
+  const task = getTask(cwd, taskId);
+  if (!task || task.status !== "pending_review") return null;
+
+  return updateTask(cwd, taskId, {
+    status: "pending_integration",
+  });
+}
+
+export function acceptTask(cwd: string, taskId: string): Task | null {
+  const task = getTask(cwd, taskId);
+  if (!task || (task.status !== "pending_review" && task.status !== "pending_integration")) return null;
+
   const updated = updateTask(cwd, taskId, {
     status: "done",
     completed_at: new Date().toISOString(),
-    summary,
-    evidence,
     assigned_to: undefined,
   });
 
-  // Update plan completed count
   if (updated) {
     const plan = getPlan(cwd);
     if (plan) {
@@ -461,8 +478,17 @@ export function completeTask(
   }
 
   autoCompleteMilestones(cwd);
-
   return updated;
+}
+
+export function rejectTaskReview(cwd: string, taskId: string): Task | null {
+  const task = getTask(cwd, taskId);
+  if (!task || task.status !== "pending_review") return null;
+
+  return updateTask(cwd, taskId, {
+    status: "todo",
+    assigned_to: undefined,
+  });
 }
 
 export function blockTask(cwd: string, taskId: string, reason: string): Task | null {

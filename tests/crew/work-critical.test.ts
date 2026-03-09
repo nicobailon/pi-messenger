@@ -26,6 +26,11 @@ vi.mock("../../crew/conflict-detector.js", () => ({
   checkWaveConflicts: vi.fn(() => []),
 }));
 
+vi.mock("../../crew/credibility.js", () => ({
+  recordReviewOutcome: vi.fn(() => ({ credibilityScore: 75 })),
+  getReviewIntensity: vi.fn(() => "standard"),
+}));
+
 function writeWorkerAgent(cwd: string): void {
   const filePath = path.join(cwd, ".pi", "messenger", "crew", "agents", "crew-worker.md");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -38,13 +43,13 @@ You are a worker.
 `);
 }
 
-function writeConfig(cwd: string): void {
+function writeConfig(cwd: string, options?: { autoAdversarial?: boolean; autoIntegrationTest?: boolean }): void {
   const configPath = path.join(cwd, ".pi", "messenger", "crew", "config.json");
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, JSON.stringify({
     review: {
-      autoAdversarial: false,
-      autoIntegrationTest: false,
+      autoAdversarial: options?.autoAdversarial ?? false,
+      autoIntegrationTest: options?.autoIntegrationTest ?? false,
     },
   }, null, 2));
 }
@@ -127,7 +132,7 @@ describe("crew/work critical dual-worker accounting", () => {
     expect(response.details.succeeded).toEqual([task.id]);
     expect(response.details.failed).toEqual([]);
     expect(response.details.blocked).toEqual([]);
-    expect(recordTaskOutcome).toHaveBeenCalledWith("critical-worker", "implementation", true, expect.any(Number));
+    expect(recordTaskOutcome).toHaveBeenCalledWith(expect.stringMatching(/^model:/), "implementation", true, expect.any(Number));
   });
 
   it("counts judge-rejected divergent critical tasks as failed and resets task state", async () => {
@@ -162,5 +167,137 @@ describe("crew/work critical dual-worker accounting", () => {
     expect(updatedTask?.status).toBe("todo");
     expect(response.details.succeeded).toEqual([]);
     expect(response.details.failed).toEqual([task.id]);
+  });
+});
+
+describe("crew/work review and integration gate sequencing", () => {
+  let workHandler: typeof import("../../crew/handlers/work.js");
+  let store: typeof import("../../crew/store.js");
+  let spawnAgents: ReturnType<typeof vi.fn>;
+  let cwd: string;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const dirs = createTempCrewDirs();
+    cwd = dirs.cwd;
+    writeWorkerAgent(cwd);
+    writeConfig(cwd, { autoAdversarial: true, autoIntegrationTest: true });
+
+    store = await import("../../crew/store.js");
+    store.createPlan(cwd, "docs/PRD.md");
+
+    workHandler = await import("../../crew/handlers/work.js");
+    const agents = await import("../../crew/agents.js");
+    spawnAgents = agents.spawnAgents as ReturnType<typeof vi.fn>;
+  });
+
+  it("approve then integration pass marks task done and succeeds wave", async () => {
+    const task = store.createTask(cwd, "Gate success path", "Ensure sequencing");
+
+    const calls: string[] = [];
+    spawnAgents.mockImplementation(async (tasks: Array<{ taskId?: string }>) => {
+      const firstTaskId = tasks[0]?.taskId ?? "";
+      calls.push(firstTaskId);
+
+      if (firstTaskId === task.id) {
+        store.updateTask(cwd, task.id, { status: "pending_review", assigned_to: "worker-A" });
+        return [makeResult(task.id, "worker complete")] as any;
+      }
+
+      if (firstTaskId === `review-${task.id}`) {
+        return [makeResult(firstTaskId, "## Verdict: APPROVE")] as any;
+      }
+
+      if (firstTaskId === `integration-${task.id}`) {
+        return [makeResult(firstTaskId, "## Verdict: PASS")] as any;
+      }
+
+      return [] as any;
+    });
+
+    const response = await workHandler.execute(
+      { action: "work" } as any,
+      createDirs(cwd),
+      createMockContext(cwd),
+      () => {},
+    );
+
+    expect(response.details.succeeded).toEqual([task.id]);
+    expect(response.details.failed).toEqual([]);
+    expect(response.details.blocked).toEqual([]);
+    expect(store.getTask(cwd, task.id)?.status).toBe("done");
+    expect(calls).toEqual([task.id, `review-${task.id}`, `integration-${task.id}`]);
+  });
+
+  it("review reject resets to todo and marks failed", async () => {
+    const task = store.createTask(cwd, "Gate reject path", "Ensure rejection handling");
+
+    const calls: string[] = [];
+    spawnAgents.mockImplementation(async (tasks: Array<{ taskId?: string }>) => {
+      const firstTaskId = tasks[0]?.taskId ?? "";
+      calls.push(firstTaskId);
+
+      if (firstTaskId === task.id) {
+        store.updateTask(cwd, task.id, { status: "pending_review", assigned_to: "worker-B" });
+        return [makeResult(task.id, "worker complete")] as any;
+      }
+
+      if (firstTaskId === `review-${task.id}`) {
+        return [makeResult(firstTaskId, "## Verdict: REJECT\nNeeds work")] as any;
+      }
+
+      return [] as any;
+    });
+
+    const response = await workHandler.execute(
+      { action: "work" } as any,
+      createDirs(cwd),
+      createMockContext(cwd),
+      () => {},
+    );
+
+    expect(response.details.succeeded).toEqual([]);
+    expect(response.details.failed).toEqual([task.id]);
+    expect(response.details.blocked).toEqual([]);
+    expect(store.getTask(cwd, task.id)?.status).toBe("todo");
+    expect(calls).toEqual([task.id, `review-${task.id}`]);
+  });
+
+  it("review approve then integration fail blocks task", async () => {
+    const task = store.createTask(cwd, "Gate fail path", "Ensure integration failure handling");
+
+    const calls: string[] = [];
+    spawnAgents.mockImplementation(async (tasks: Array<{ taskId?: string }>) => {
+      const firstTaskId = tasks[0]?.taskId ?? "";
+      calls.push(firstTaskId);
+
+      if (firstTaskId === task.id) {
+        store.updateTask(cwd, task.id, { status: "pending_review", assigned_to: "worker-C" });
+        return [makeResult(task.id, "worker complete")] as any;
+      }
+
+      if (firstTaskId === `review-${task.id}`) {
+        return [makeResult(firstTaskId, "## Verdict: APPROVE")] as any;
+      }
+
+      if (firstTaskId === `integration-${task.id}`) {
+        return [makeResult(firstTaskId, "## Verdict: FAIL\nType check failed")] as any;
+      }
+
+      return [] as any;
+    });
+
+    const response = await workHandler.execute(
+      { action: "work" } as any,
+      createDirs(cwd),
+      createMockContext(cwd),
+      () => {},
+    );
+
+    expect(response.details.succeeded).toEqual([]);
+    expect(response.details.failed).toEqual([]);
+    expect(response.details.blocked).toEqual([task.id]);
+    expect(store.getTask(cwd, task.id)?.status).toBe("blocked");
+    expect(calls).toEqual([task.id, `review-${task.id}`, `integration-${task.id}`]);
   });
 });

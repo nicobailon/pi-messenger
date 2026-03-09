@@ -119,9 +119,9 @@ describe("crew/task.done validation", () => {
     );
 
     expect(response.details.mode).toBe("task.done");
-    expect(response.details.task.status).toBe("done");
+    expect(response.details.task.status).toBe("pending_review");
     expect(response.details.task.summary).toBe("Implemented feature end-to-end");
-    expect(store.getTask(cwd, taskId)?.status).toBe("done");
+    expect(store.getTask(cwd, taskId)?.status).toBe("pending_review");
   });
 });
 
