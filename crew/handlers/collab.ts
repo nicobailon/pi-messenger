@@ -218,6 +218,8 @@ export async function executeSpawn(
 
   return result(
     `Collaborator "${collabName}" spawned and on the mesh. Agent: ${agentName}.\n\n` +
+    `**Wait for ${collabName}'s first message before sending anything.** ` +
+    `Initial processing takes 3–10 minutes on large codebases. Do not ping or dismiss early.\n\n` +
     `Send messages with: pi_messenger({ action: "send", to: "${collabName}", message: "..." })\n` +
     `Dismiss when done: pi_messenger({ action: "dismiss", name: "${collabName}" })`,
     { mode: "spawn", name: collabName, pid: proc.pid, agent: agentName },
