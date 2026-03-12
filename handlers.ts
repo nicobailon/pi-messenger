@@ -61,7 +61,7 @@ export function executeJoin(
   state: MessengerState,
   dirs: Dirs,
   ctx: ExtensionContext,
-  deliverFn: (msg: AgentMailMessage) => void,
+  deliverFn: (msg: AgentMailMessage) => boolean,
   updateStatusFn: (ctx: ExtensionContext) => void,
   specPath?: string,
   nameTheme?: NameThemeConfig,
@@ -456,7 +456,7 @@ export function executeRename(
   dirs: Dirs,
   ctx: ExtensionContext,
   newName: string,
-  deliverFn: (msg: AgentMailMessage) => void,
+  deliverFn: (msg: AgentMailMessage) => boolean,
   updateStatusFn: (ctx: ExtensionContext) => void
 ) {
   store.stopWatcher(state);

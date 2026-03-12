@@ -55,7 +55,7 @@ let isProcessingMessages = false;
 let pendingProcessArgs: {
   state: MessengerState;
   dirs: Dirs;
-  deliverFn: (msg: AgentMailMessage) => void;
+  deliverFn: (msg: AgentMailMessage) => boolean;
 } | null = null;
 
 // =============================================================================
@@ -484,7 +484,7 @@ export function renameAgent(
   dirs: Dirs,
   ctx: ExtensionContext,
   newName: string,
-  deliverFn: (msg: AgentMailMessage) => void
+  deliverFn: (msg: AgentMailMessage) => boolean
 ): RenameResult {
   if (!state.registered) {
     return { success: false, error: "not_registered" };
@@ -955,7 +955,7 @@ export function hasPendingMessages(state: MessengerState, dirs: Dirs): boolean {
 export function processAllPendingMessages(
   state: MessengerState,
   dirs: Dirs,
-  deliverFn: (msg: AgentMailMessage) => void
+  deliverFn: (msg: AgentMailMessage) => boolean
 ): void {
   if (!state.registered) return;
 
@@ -983,8 +983,10 @@ export function processAllPendingMessages(
       try {
         const content = fs.readFileSync(msgPath, "utf-8");
         const msg: AgentMailMessage = JSON.parse(content);
-        deliverFn(msg);
-        fs.unlinkSync(msgPath);
+        const handled = deliverFn(msg);
+        if (handled !== false) {
+          fs.unlinkSync(msgPath);
+        }
       } catch {
         // On any failure (read, parse, deliver), delete to avoid infinite retry loops
         try {
@@ -1041,7 +1043,7 @@ const WATCHER_DEBOUNCE_MS = 50;
 export function startWatcher(
   state: MessengerState,
   dirs: Dirs,
-  deliverFn: (msg: AgentMailMessage) => void
+  deliverFn: (msg: AgentMailMessage) => boolean
 ): void {
   if (!state.registered) return;
   if (state.watcher) return;
@@ -1085,6 +1087,34 @@ export function startWatcher(
   });
 
   state.watcherRetries = 0;
+}
+
+// =============================================================================
+// Chat History Helper
+// =============================================================================
+
+/**
+ * Record a message in chat history and increment unread count.
+ * Called from both the normal delivery path (deliverMessage in index.ts)
+ * and the blocking poll path (pollForCollaboratorMessage in collab.ts).
+ * Does NOT trigger overlay re-render or pi.sendMessage — the blocking
+ * poll path returns the message via tool result instead.
+ */
+export function recordMessageInHistory(
+  state: MessengerState,
+  msg: AgentMailMessage,
+  maxHistory: number = 50,
+): void {
+  let history = state.chatHistory.get(msg.from);
+  if (!history) {
+    history = [];
+    state.chatHistory.set(msg.from, history);
+  }
+  history.push(msg);
+  if (history.length > maxHistory) history.shift();
+
+  const current = state.unreadCounts.get(msg.from) ?? 0;
+  state.unreadCounts.set(msg.from, current + 1);
 }
 
 export function stopWatcher(state: MessengerState): void {

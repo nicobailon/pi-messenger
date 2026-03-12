@@ -106,6 +106,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     registryFlushTimer: null,
     sessionStartedAt: new Date().toISOString(),
     registrationContextSent: false,
+    blockingCollaborators: new Set(),
   };
 
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
@@ -121,19 +122,15 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   // Message Delivery
   // ===========================================================================
 
-  function deliverMessage(msg: AgentMailMessage): void {
-    // Store in chat history (keyed by sender)
-    let history = state.chatHistory.get(msg.from);
-    if (!history) {
-      history = [];
-      state.chatHistory.set(msg.from, history);
+  function deliverMessage(msg: AgentMailMessage): boolean {
+    // If this sender is being blocked for a collaborator exchange,
+    // leave the file for the blocking poll to consume
+    if (state.blockingCollaborators.has(msg.from)) {
+      return false;
     }
-    history.push(msg);
-    if (history.length > MAX_CHAT_HISTORY) history.shift();
 
-    // Increment unread count
-    const current = state.unreadCounts.get(msg.from) ?? 0;
-    state.unreadCounts.set(msg.from, current + 1);
+    // Store in chat history + increment unread count
+    store.recordMessageInHistory(state, msg, MAX_CHAT_HISTORY);
 
     // Trigger overlay re-render if open
     overlayTui?.requestRender();
@@ -176,6 +173,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       { customType: "agent_message", content, display: true, details: msg },
       { triggerTurn: true, deliverAs: "steer" }
     );
+
+    return true;
   }
 
   // ===========================================================================

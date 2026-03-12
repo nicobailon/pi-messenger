@@ -13,7 +13,7 @@ import { result } from "./utils/result.js";
 import { isPlanningForCwd, cancelPlanningRun } from "./state.js";
 import { logFeedEvent } from "../feed.js";
 
-type DeliverFn = (msg: AgentMailMessage) => void;
+type DeliverFn = (msg: AgentMailMessage) => boolean;
 type UpdateStatusFn = (ctx: ExtensionContext) => void;
 
 export interface CrewActionConfig {
