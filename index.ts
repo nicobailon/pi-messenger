@@ -437,7 +437,7 @@ Usage (action-based API - preferred):
 
       // Bridge pi SDK's AgentToolUpdateCallback to a simple string callback
       const updateBridge = onUpdate
-        ? (msg: string) => onUpdate({ content: [{ type: "text", text: msg }] })
+        ? (msg: string) => onUpdate({ content: [{ type: "text", text: msg }], details: undefined })
         : undefined;
 
       const result = await executeCrewAction(

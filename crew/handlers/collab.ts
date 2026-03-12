@@ -422,17 +422,20 @@ export async function executeSpawn(
     });
 
     if (!pollResult.ok) {
+      // Extract error details — TypeScript may lose narrowing after await
+      const errResult = pollResult as { ok: false; error: string; exitCode?: number; logTail?: string };
+      const { error, exitCode, logTail } = errResult;
       // Collaborator never established contact — dismiss
       await gracefulDismiss(entry);
 
-      if (pollResult.error === "crashed") {
+      if (error === "crashed") {
         return result(
-          `Error: Collaborator "${collabName}" crashed (exit code ${pollResult.exitCode ?? "unknown"}).` +
-          (pollResult.logTail ? `\n\nLog tail:\n${pollResult.logTail}` : ""),
-          { mode: "spawn", error: "collaborator_crashed", name: collabName, exitCode: pollResult.exitCode, logTail: pollResult.logTail },
+          `Error: Collaborator "${collabName}" crashed (exit code ${exitCode ?? "unknown"}).` +
+          (logTail ? `\n\nLog tail:\n${logTail}` : ""),
+          { mode: "spawn", error: "collaborator_crashed", name: collabName, exitCode, logTail },
         );
       }
-      if (pollResult.error === "cancelled") {
+      if (error === "cancelled") {
         return result(
           `Spawn cancelled — collaborator "${collabName}" dismissed.`,
           { mode: "spawn", error: "cancelled", name: collabName },

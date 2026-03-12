@@ -365,16 +365,19 @@ export async function executeSend(
         const remaining = budget - messagesSentThisSession;
 
         if (!pollResult.ok) {
+          // Extract error details — TypeScript may lose narrowing after await
+          const errResult = pollResult as { ok: false; error: string; exitCode?: number; logTail?: string };
+          const { error: pollError, exitCode, logTail } = errResult;
           // Send-path cancel/timeout/crash: do NOT dismiss collaborator
-          if (pollResult.error === "crashed") {
+          if (pollError === "crashed") {
             return result(
-              `Message sent to ${recipient}, but collaborator crashed (exit code ${pollResult.exitCode ?? "unknown"}).` +
-              (pollResult.logTail ? `\n\nLog tail:\n${pollResult.logTail}` : "") +
+              `Message sent to ${recipient}, but collaborator crashed (exit code ${exitCode ?? "unknown"}).` +
+              (logTail ? `\n\nLog tail:\n${logTail}` : "") +
               `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
-              { mode: "send", sent: [recipient], failed: [], error: "collaborator_crashed", exitCode: pollResult.exitCode, logTail: pollResult.logTail },
+              { mode: "send", sent: [recipient], failed: [], error: "collaborator_crashed", exitCode, logTail },
             );
           }
-          if (pollResult.error === "cancelled") {
+          if (pollError === "cancelled") {
             return result(
               `Message sent to ${recipient}, but wait for reply was cancelled. Collaborator is still running.` +
               `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
