@@ -307,7 +307,7 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
         process.exitCode = 1;
         return;
       }
-      printResult(handlers.executeSend(state, dirs, cwd, to, false, message));
+      printResult(await handlers.executeSend(state, dirs, cwd, to, false, message));
       break;
     }
 

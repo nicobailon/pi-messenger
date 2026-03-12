@@ -28,6 +28,9 @@ import * as crewStore from "./crew/store.js";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.js";
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
+import { findCollaboratorByName } from "./crew/registry.js";
+import { pollForCollaboratorMessage, SEND_REPLY_TIMEOUT_MS } from "./crew/handlers/collab.js";
+import * as path from "node:path";
 
 let messagesSentThisSession = 0;
 
@@ -256,14 +259,16 @@ export function executeList(state: MessengerState, dirs: Dirs, cwd: string = pro
   );
 }
 
-export function executeSend(
+export async function executeSend(
   state: MessengerState,
   dirs: Dirs,
   cwd: string,
   to: string | string[] | undefined,
   broadcast: boolean | undefined,
   message?: string,
-  replyTo?: string
+  replyTo?: string,
+  signal?: AbortSignal,
+  onUpdate?: (update: string) => void,
 ) {
   if (!state.registered) {
     return notRegisteredError();
@@ -322,6 +327,82 @@ export function executeSend(
     );
   }
 
+  // Check for single-recipient collaborator send → blocking path
+  if (!broadcast && recipients.length === 1) {
+    const recipient = recipients[0];
+    const collabEntry = findCollaboratorByName(recipient);
+    if (collabEntry) {
+      // Single-recipient collaborator send — block for reply
+      state.blockingCollaborators.add(recipient);
+      try {
+        if (recipient === state.agentName) {
+          return result("Error: cannot send to self.", { mode: "send", error: "send_to_self" });
+        }
+        const validation = store.validateTargetAgent(recipient, dirs);
+        if (!validation.valid) {
+          return result(`Error: collaborator "${recipient}" not found or not active.`,
+            { mode: "send", error: "collaborator_not_active", name: recipient });
+        }
+
+        const sendTimestamp = Date.now();
+        const outbound = store.sendMessageToAgent(state, dirs, recipient, message, replyTo);
+        messagesSentThisSession++;
+        const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
+        logFeedEvent(cwd, state.agentName, "message", recipient, preview);
+
+        const pollResult = await pollForCollaboratorMessage({
+          inboxDir: path.join(dirs.inbox, state.agentName),
+          collabName: recipient,
+          correlationId: outbound.id,
+          sendTimestamp,
+          entry: collabEntry,
+          signal,
+          onUpdate,
+          timeoutMs: SEND_REPLY_TIMEOUT_MS,
+          state,
+        });
+
+        const remaining = budget - messagesSentThisSession;
+
+        if (!pollResult.ok) {
+          // Send-path cancel/timeout/crash: do NOT dismiss collaborator
+          if (pollResult.error === "crashed") {
+            return result(
+              `Message sent to ${recipient}, but collaborator crashed (exit code ${pollResult.exitCode ?? "unknown"}).` +
+              (pollResult.logTail ? `\n\nLog tail:\n${pollResult.logTail}` : "") +
+              `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+              { mode: "send", sent: [recipient], failed: [], error: "collaborator_crashed", exitCode: pollResult.exitCode, logTail: pollResult.logTail },
+            );
+          }
+          if (pollResult.error === "cancelled") {
+            return result(
+              `Message sent to ${recipient}, but wait for reply was cancelled. Collaborator is still running.` +
+              `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+              { mode: "send", sent: [recipient], failed: [], error: "cancelled" },
+            );
+          }
+          // timeout
+          return result(
+            `Message sent to ${recipient}, but no reply within ${Math.round(SEND_REPLY_TIMEOUT_MS / 1000)}s. ` +
+            `Collaborator is still running — retry or dismiss.` +
+            `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+            { mode: "send", sent: [recipient], failed: [], error: "timeout" },
+          );
+        }
+
+        // Success — reply received
+        return result(
+          `Reply from ${recipient}:\n\n${pollResult.message.text}` +
+          `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+          { mode: "send", sent: [recipient], failed: [], reply: pollResult.message.text, to: recipient, delivered: true },
+        );
+      } finally {
+        state.blockingCollaborators.delete(recipient);
+      }
+    }
+  }
+
+  // Non-collaborator / multi-recipient / broadcast: existing synchronous path
   const sent: string[] = [];
   const failed: Array<{ name: string; error: string }> = [];
 
