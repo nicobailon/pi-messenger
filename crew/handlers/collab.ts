@@ -444,7 +444,8 @@ export async function executeSpawn(
       // timeout
       return result(
         `Error: Collaborator "${collabName}" did not send a first message within ${Math.round(SPAWN_FIRST_MESSAGE_TIMEOUT_MS / 1000)}s. ` +
-        `The collaborator has been dismissed. Retry with pi_messenger({ action: "spawn", ... }).`,
+        `The collaborator has been dismissed. Retry with pi_messenger({ action: "spawn", ... }). ` +
+        `Do NOT proceed without a collaborator — tell the user about the failure.`,
         { mode: "spawn", error: "timeout", name: collabName },
       );
     }

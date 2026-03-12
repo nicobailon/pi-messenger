@@ -387,7 +387,7 @@ export async function executeSend(
           // timeout
           return result(
             `Message sent to ${recipient}, but no reply within ${Math.round(SEND_REPLY_TIMEOUT_MS / 1000)}s. ` +
-            `Collaborator is still running — retry or dismiss.` +
+            `Collaborator is still running — retry sending or dismiss and re-spawn. Do NOT proceed without a collaborator.` +
             `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
             { mode: "send", sent: [recipient], failed: [], error: "timeout" },
           );
