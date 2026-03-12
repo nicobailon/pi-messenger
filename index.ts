@@ -426,7 +426,7 @@ Usage (action-based API - preferred):
       autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
     }),
 
-    async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
       const params = rawParams as CrewParams;
       latestCtx = ctx;
 
@@ -434,6 +434,11 @@ Usage (action-based API - preferred):
       if (!action) {
         return handlers.executeStatus(state, dirs, ctx.cwd ?? process.cwd());
       }
+
+      // Bridge pi SDK's AgentToolUpdateCallback to a simple string callback
+      const updateBridge = onUpdate
+        ? (msg: string) => onUpdate({ content: [{ type: "text", text: msg }] })
+        : undefined;
 
       const result = await executeCrewAction(
         action,
@@ -445,7 +450,8 @@ Usage (action-based API - preferred):
         updateStatus,
         (type, data) => pi.appendEntry(type, data),
         { stuckThreshold: config.stuckThreshold, crewEventsInFeed: config.crewEventsInFeed, nameTheme, feedRetention: config.feedRetention },
-        signal
+        signal,
+        updateBridge,
       );
 
       if (action === "join" && state.registered && config.registrationContext) {
