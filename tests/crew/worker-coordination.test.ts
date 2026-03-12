@@ -464,8 +464,12 @@ describe("executeSend broadcast filtering", () => {
   let feedModule: typeof import("../../feed.js");
   let messageDirs: { base: string; registry: string; inbox: string };
   let state: { registered: boolean; agentName: string };
+  let savedCollabEnv: string | undefined;
 
   beforeEach(async () => {
+    // Isolate from PI_CREW_COLLABORATOR in parent process (e.g. running inside a collaborator)
+    savedCollabEnv = process.env.PI_CREW_COLLABORATOR;
+    delete process.env.PI_CREW_COLLABORATOR;
     dirs = createTempCrewDirs();
     homedirMock.mockReturnValue(dirs.root);
 
@@ -502,6 +506,9 @@ describe("executeSend broadcast filtering", () => {
 
   afterEach(() => {
     delete process.env.PI_CREW_WORKER;
+    // Restore PI_CREW_COLLABORATOR to pre-test state
+    if (savedCollabEnv !== undefined) process.env.PI_CREW_COLLABORATOR = savedCollabEnv;
+    else delete process.env.PI_CREW_COLLABORATOR;
     vi.restoreAllMocks();
   });
 
@@ -560,7 +567,7 @@ describe("executeSend broadcast filtering", () => {
   it("worker direct message still delivers", async () => {
     process.env.PI_CREW_WORKER = "1";
 
-    await executeSend(
+    const result = await executeSend(
       state as any,
       messageDirs as any,
       dirs.cwd,
@@ -577,6 +584,8 @@ describe("executeSend broadcast filtering", () => {
       "Need your input",
       undefined,
     );
+    // Non-collaborator send: no reply field (immediate return, no blocking)
+    expect((result.details as any).reply).toBeUndefined();
   });
 
   it("worker broadcast increments message budget usage", async () => {
