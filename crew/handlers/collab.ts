@@ -15,10 +15,11 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { MessengerState, Dirs } from "../../lib.js";
+import type { MessengerState, Dirs, AgentMailMessage } from "../../lib.js";
 import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
 import { generateMemorableName } from "../../lib.js";
+import { recordMessageInHistory } from "../../store.js";
 import { discoverCrewAgents } from "../utils/discover.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../agents.js";
@@ -41,6 +42,192 @@ const POLL_TIMEOUT_MS = 30_000;
 const STDIN_CLOSE_GRACE_MS = 15_000;
 const SIGKILL_DELAY_MS = 5_000;
 
+const SPAWN_FIRST_MESSAGE_TIMEOUT_MS = 600_000;  // 10 minutes
+const SEND_REPLY_TIMEOUT_MS = 300_000;            // 5 minutes
+const PROGRESS_INTERVAL_MS = 30_000;              // 30 seconds
+
+// Exported for test injection
+export { SPAWN_FIRST_MESSAGE_TIMEOUT_MS, SEND_REPLY_TIMEOUT_MS };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Blocking poll for collaborator messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PollOptions {
+  inboxDir: string;
+  collabName: string;
+  correlationId?: string;
+  sendTimestamp?: number;
+  entry: CollaboratorEntry;
+  signal?: AbortSignal;
+  onUpdate?: (update: string) => void;
+  timeoutMs: number;
+  state: MessengerState;
+}
+
+export type PollResult =
+  | { ok: true; message: AgentMailMessage }
+  | { ok: false; error: "timeout" | "crashed" | "cancelled"; exitCode?: number; logTail?: string };
+
+/**
+ * Poll the spawner's inbox for a message from a specific collaborator.
+ * Used by both executeSpawn (first message) and executeSend (reply).
+ *
+ * Tiered message matching:
+ * 1. msg.replyTo === correlationId → match (strongest)
+ * 2. msg.replyTo is null AND from matches AND timestamp >= sendTimestamp → match (fallback)
+ * 3. msg.replyTo is non-null AND !== correlationId → reject (different thread)
+ * 4. spawn path (no correlationId) → from matches → match (first message)
+ */
+export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResult> {
+  const {
+    inboxDir, collabName, correlationId, sendTimestamp,
+    entry, signal, onUpdate, timeoutMs, state,
+  } = opts;
+
+  return new Promise<PollResult>((resolve) => {
+    const startTime = Date.now();
+    let lastLogSize = 0;
+    let lastProgressTime = startTime;
+
+    // Initialize log size tracking
+    if (entry.logFile) {
+      try {
+        const stat = fs.statSync(entry.logFile);
+        lastLogSize = stat.size;
+      } catch {
+        // Log file may not exist yet
+      }
+    }
+
+    function checkMessage(filePath: string): AgentMailMessage | null {
+      try {
+        const content = fs.readFileSync(filePath, "utf-8");
+        const msg: AgentMailMessage = JSON.parse(content);
+        if (msg.from !== collabName) return null;
+
+        if (correlationId) {
+          // Tier 1: exact replyTo match
+          if (msg.replyTo === correlationId) return msg;
+          // Tier 3: replyTo exists but doesn't match → reject (different thread)
+          if (msg.replyTo !== null && msg.replyTo !== undefined) return null;
+          // Tier 2: replyTo is null, check timestamp fallback
+          if (sendTimestamp !== undefined) {
+            const msgTime = Date.parse(msg.timestamp);
+            if (!isNaN(msgTime) && msgTime >= sendTimestamp) return msg;
+          }
+          return null;
+        }
+
+        // Tier 4: spawn path — no correlationId, just match on from
+        return msg;
+      } catch {
+        return null;
+      }
+    }
+
+    function readLogTail(): string {
+      if (!entry.logFile) return "";
+      try {
+        const stat = fs.statSync(entry.logFile);
+        const size = stat.size;
+        if (size === 0) return "";
+        const tailSize = Math.min(size, 2048);
+        const buf = Buffer.alloc(tailSize);
+        const fd = fs.openSync(entry.logFile, "r");
+        fs.readSync(fd, buf, 0, tailSize, size - tailSize);
+        fs.closeSync(fd);
+        return buf.toString("utf-8").trim();
+      } catch {
+        return "";
+      }
+    }
+
+    function emitProgress(): void {
+      if (!onUpdate) return;
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      let logDelta = 0;
+      if (entry.logFile) {
+        try {
+          const stat = fs.statSync(entry.logFile);
+          logDelta = stat.size - lastLogSize;
+          lastLogSize = stat.size;
+        } catch {
+          // Ignore
+        }
+      }
+      const evidence = logDelta > 0 ? ` (+${logDelta} bytes logged)` : "";
+      onUpdate(`Waiting for ${collabName}... ${elapsed}s elapsed${evidence}`);
+    }
+
+    const timer = setInterval(() => {
+      // Check cancellation
+      if (signal?.aborted) {
+        clearInterval(timer);
+        resolve({ ok: false, error: "cancelled" });
+        return;
+      }
+
+      // Check crash
+      if (entry.proc.exitCode !== null) {
+        clearInterval(timer);
+        const logTail = readLogTail();
+        resolve({
+          ok: false,
+          error: "crashed",
+          exitCode: entry.proc.exitCode,
+          logTail: logTail || undefined,
+        });
+        return;
+      }
+
+      // Check timeout
+      if (Date.now() - startTime >= timeoutMs) {
+        clearInterval(timer);
+        resolve({ ok: false, error: "timeout" });
+        return;
+      }
+
+      // Check for matching message in inbox
+      try {
+        if (!fs.existsSync(inboxDir)) return;
+        const files = fs.readdirSync(inboxDir)
+          .filter(f => f.endsWith(".json"))
+          .sort();
+
+        for (const file of files) {
+          const filePath = path.join(inboxDir, file);
+          const msg = checkMessage(filePath);
+          if (msg) {
+            clearInterval(timer);
+            try { fs.unlinkSync(filePath); } catch {}
+            recordMessageInHistory(state, msg);
+            resolve({ ok: true, message: msg });
+            return;
+          }
+        }
+      } catch {
+        // Inbox read error — try again next tick
+      }
+
+      // Emit progress at 30s intervals
+      const now = Date.now();
+      if (now - lastProgressTime >= PROGRESS_INTERVAL_MS) {
+        lastProgressTime = now;
+        emitProgress();
+      }
+    }, POLL_INTERVAL_MS);
+
+    // Also listen for abort signal to break immediately
+    if (signal) {
+      signal.addEventListener("abort", () => {
+        clearInterval(timer);
+        resolve({ ok: false, error: "cancelled" });
+      }, { once: true });
+    }
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // spawn
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,6 +237,8 @@ export async function executeSpawn(
   state: MessengerState,
   dirs: Dirs,
   ctx: ExtensionContext,
+  signal?: AbortSignal,
+  onUpdate?: (update: string) => void,
 ) {
   const agentName = params.agent ?? params.name;
   const prompt = params.prompt;
@@ -194,36 +383,80 @@ export async function executeSpawn(
 
   logFeedEvent(cwd, state.agentName, "spawn", collabName, agentName);
 
-  // Poll until collaborator appears in registry (mesh-ready)
-  const registryPath = path.join(dirs.registry, `${collabName}.json`);
-  const ready = await pollUntilReady(registryPath, proc, POLL_TIMEOUT_MS);
+  // Add to blocking filter BEFORE mesh polling (closes race window)
+  state.blockingCollaborators.add(collabName);
 
-  if (!ready) {
-    // Collaborator failed to join mesh — clean up
-    try { proc.stdin!.end(); } catch {}
-    if (proc.exitCode === null) proc.kill("SIGTERM");
-    unregisterWorker(cwd, taskId);
-    cleanupTmpDir(promptTmpDir);
+  try {
+    // Poll until collaborator appears in registry (mesh-ready)
+    const registryPath = path.join(dirs.registry, `${collabName}.json`);
+    const ready = await pollUntilReady(registryPath, proc, POLL_TIMEOUT_MS);
 
-    const exitCode = proc.exitCode;
-    const hint = exitCode !== null
-      ? ` (process exited with code ${exitCode})`
-      : " (timed out after 30s)";
+    if (!ready) {
+      // Collaborator failed to join mesh — clean up
+      try { proc.stdin!.end(); } catch {}
+      if (proc.exitCode === null) proc.kill("SIGTERM");
+      unregisterWorker(cwd, taskId);
+      cleanupTmpDir(promptTmpDir);
 
+      const exitCode = proc.exitCode;
+      const hint = exitCode !== null
+        ? ` (process exited with code ${exitCode})`
+        : " (timed out after 30s)";
+
+      return result(
+        `Error: Collaborator "${collabName}" failed to join the mesh${hint}. Check if pi is available and the agent definition is valid.`,
+        { mode: "spawn", error: "mesh_timeout", name: collabName },
+      );
+    }
+
+    // Block for the collaborator's first message
+    const pollResult = await pollForCollaboratorMessage({
+      inboxDir: path.join(dirs.inbox, state.agentName),
+      collabName,
+      // No correlationId — first message has no prior ID to correlate with
+      entry,
+      signal,
+      onUpdate,
+      timeoutMs: SPAWN_FIRST_MESSAGE_TIMEOUT_MS,
+      state,
+    });
+
+    if (!pollResult.ok) {
+      // Collaborator never established contact — dismiss
+      await gracefulDismiss(entry);
+
+      if (pollResult.error === "crashed") {
+        return result(
+          `Error: Collaborator "${collabName}" crashed (exit code ${pollResult.exitCode ?? "unknown"}).` +
+          (pollResult.logTail ? `\n\nLog tail:\n${pollResult.logTail}` : ""),
+          { mode: "spawn", error: "collaborator_crashed", name: collabName, exitCode: pollResult.exitCode, logTail: pollResult.logTail },
+        );
+      }
+      if (pollResult.error === "cancelled") {
+        return result(
+          `Spawn cancelled — collaborator "${collabName}" dismissed.`,
+          { mode: "spawn", error: "cancelled", name: collabName },
+        );
+      }
+      // timeout
+      return result(
+        `Error: Collaborator "${collabName}" did not send a first message within ${Math.round(SPAWN_FIRST_MESSAGE_TIMEOUT_MS / 1000)}s. ` +
+        `The collaborator has been dismissed. Retry with pi_messenger({ action: "spawn", ... }).`,
+        { mode: "spawn", error: "timeout", name: collabName },
+      );
+    }
+
+    // Success — first message received
     return result(
-      `Error: Collaborator "${collabName}" failed to join the mesh${hint}. Check if pi is available and the agent definition is valid.`,
-      { mode: "spawn", error: "mesh_timeout", name: collabName },
+      `Collaborator "${collabName}" spawned (${agentName}). First message:\n\n` +
+      `${pollResult.message.text}\n\n` +
+      `Send messages: pi_messenger({ action: "send", to: "${collabName}", message: "..." })\n` +
+      `Dismiss when done: pi_messenger({ action: "dismiss", name: "${collabName}" })`,
+      { mode: "spawn", name: collabName, pid: proc.pid, agent: agentName, firstMessage: pollResult.message.text },
     );
+  } finally {
+    state.blockingCollaborators.delete(collabName);
   }
-
-  return result(
-    `Collaborator "${collabName}" spawned and on the mesh. Agent: ${agentName}.\n\n` +
-    `**Wait for ${collabName}'s first message before sending anything.** ` +
-    `Initial processing takes 3–10 minutes on large codebases. Do not ping or dismiss early.\n\n` +
-    `Send messages with: pi_messenger({ action: "send", to: "${collabName}", message: "..." })\n` +
-    `Dismiss when done: pi_messenger({ action: "dismiss", name: "${collabName}" })`,
-    { mode: "spawn", name: collabName, pid: proc.pid, agent: agentName },
-  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
