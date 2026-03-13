@@ -716,6 +716,131 @@ describe("blockingCollaborators cleanup", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Handler-level dismissal semantics
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Note on executeSpawn handler tests:
+ * executeSpawn and pollForCollaboratorMessage are in the SAME ESM module
+ * (crew/handlers/collab.ts). In ESM, internal function calls use direct
+ * references — vi.mock cannot intercept them. Testing executeSpawn's
+ * dismissal semantics (stall does NOT dismiss, crash/cancel DO dismiss)
+ * would require dependency injection refactoring that is out of scope.
+ *
+ * The dismissal contract is verified by:
+ * 1. Poll-level tests above (stall/crash/cancel result shapes)
+ * 2. Code review: stall branch returns without calling gracefulDismiss
+ * 3. executeSend handler tests below (cross-module call, fully mockable)
+ */
+
+describe("executeSend handler-level behavior", () => {
+  // These tests use vi.mock to intercept cross-module calls from handlers.ts.
+  // vi.mock is hoisted by vitest, so it replaces modules before import.
+  // We use vi.resetModules() + dynamic import() per test to control mock return values.
+
+  let tmpDir: string;
+  let mockPollFn: ReturnType<typeof vi.fn>;
+  let mockFindCollab: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "handler-send-test-"));
+    fs.mkdirSync(path.join(tmpDir, "inbox", "TestSpawner"), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, "registry"), { recursive: true });
+    // Registry file needs a valid PID so validateTargetAgent's isProcessAlive check passes
+    fs.writeFileSync(
+      path.join(tmpDir, "registry", "NavAgent.json"),
+      JSON.stringify({ name: "NavAgent", agentName: "NavAgent", pid: process.pid }),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function importWithMocks(pollResult: import("../../crew/handlers/collab.js").PollResult) {
+    vi.resetModules();
+
+    mockPollFn = vi.fn().mockResolvedValue(pollResult);
+    mockFindCollab = vi.fn().mockReturnValue(makeCollabEntry({ name: "NavAgent" }));
+
+    // Mock the modules that handlers.ts imports
+    vi.doMock("../../crew/handlers/collab.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/handlers/collab.js")>();
+      return { ...original, pollForCollaboratorMessage: mockPollFn };
+    });
+    vi.doMock("../../crew/registry.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/registry.js")>();
+      return { ...original, findCollaboratorByName: mockFindCollab };
+    });
+
+    const { executeSend } = await import("../../handlers.js");
+    return executeSend;
+  }
+
+  it("executeSend stalled error includes stallDurationMs and 'stalled' in details", async () => {
+    const executeSend = await importWithMocks({
+      ok: false,
+      error: "stalled",
+      stallDurationMs: 120_000,
+    });
+
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    const result = await executeSend(
+      state, dirs, tmpDir, "NavAgent", undefined, "Review this code", undefined,
+    );
+
+    const text = result.content[0].text;
+    expect(text).toContain("120");
+    expect(text).toContain("still running");
+    expect(result.details.error).toBe("stalled");
+    expect(result.details.stallDurationMs).toBe(120_000);
+  });
+
+  it("executeSend crashed error propagates exit code and log tail", async () => {
+    const executeSend = await importWithMocks({
+      ok: false,
+      error: "crashed",
+      exitCode: 1,
+      logTail: "Segmentation fault",
+    });
+
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    const result = await executeSend(
+      state, dirs, tmpDir, "NavAgent", undefined, "Review this code", undefined,
+    );
+
+    const text = result.content[0].text;
+    expect(text).toContain("crashed");
+    expect(text).toContain("Segmentation fault");
+    expect(result.details.error).toBe("collaborator_crashed");
+    expect(result.details.exitCode).toBe(1);
+  });
+
+  it("executeSend cancelled error returns correct shape", async () => {
+    const executeSend = await importWithMocks({
+      ok: false,
+      error: "cancelled",
+    });
+
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    const result = await executeSend(
+      state, dirs, tmpDir, "NavAgent", undefined, "Review this code", undefined,
+    );
+
+    const text = result.content[0].text;
+    expect(text).toContain("cancelled");
+    expect(result.details.error).toBe("cancelled");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Watcher filter (deliverMessage behavior)
 // ─────────────────────────────────────────────────────────────────────────────
 
