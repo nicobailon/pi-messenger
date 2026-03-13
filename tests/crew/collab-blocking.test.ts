@@ -796,6 +796,7 @@ describe("executeSend handler-level behavior", () => {
     expect(text).toContain("120");
     expect(text).toContain("still running");
     expect(result.details.error).toBe("stalled");
+    expect(result.details.name).toBe("NavAgent");
     expect(result.details.stallDurationMs).toBe(120_000);
   });
 

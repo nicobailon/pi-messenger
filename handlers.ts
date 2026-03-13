@@ -397,7 +397,7 @@ export async function executeSend(
             `Message sent to ${recipient}, but no output for ${Math.round((stallDurationMs ?? 0) / 1000)}s. ` +
             `Collaborator is still running — retry sending or dismiss and re-spawn. Do NOT proceed without a collaborator.` +
             `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
-            { mode: "send", sent: [recipient], failed: [], error: "stalled", stallDurationMs },
+            { mode: "send", sent: [recipient], failed: [], error: "stalled", name: recipient, stallDurationMs },
           );
         }
 
