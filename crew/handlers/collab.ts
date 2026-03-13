@@ -42,12 +42,12 @@ const POLL_TIMEOUT_MS = 30_000;
 const STDIN_CLOSE_GRACE_MS = 15_000;
 const SIGKILL_DELAY_MS = 5_000;
 
-const SPAWN_FIRST_MESSAGE_TIMEOUT_MS = 600_000;  // 10 minutes
-const SEND_REPLY_TIMEOUT_MS = 300_000;            // 5 minutes
 const PROGRESS_INTERVAL_MS = 30_000;              // 30 seconds
 
-// Exported for test injection
-export { SPAWN_FIRST_MESSAGE_TIMEOUT_MS, SEND_REPLY_TIMEOUT_MS };
+/** Default stall threshold: 2 minutes of zero log growth before declaring stalled. */
+export const DEFAULT_STALL_THRESHOLD_MS = 120_000;
+/** Minimum allowed stall threshold — prevents instant-stall from bad config. */
+export const MIN_STALL_THRESHOLD_MS = 1_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Blocking poll for collaborator messages
@@ -61,13 +61,14 @@ export interface PollOptions {
   entry: CollaboratorEntry;
   signal?: AbortSignal;
   onUpdate?: (update: string) => void;
-  timeoutMs: number;
+  /** Stall threshold: log must grow within this interval or collaborator is considered stalled. */
+  stallThresholdMs?: number;
   state: MessengerState;
 }
 
 export type PollResult =
   | { ok: true; message: AgentMailMessage }
-  | { ok: false; error: "timeout" | "crashed" | "cancelled"; exitCode?: number; logTail?: string };
+  | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number };
 
 /**
  * Poll the spawner's inbox for a message from a specific collaborator.
@@ -82,19 +83,24 @@ export type PollResult =
 export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResult> {
   const {
     inboxDir, collabName, correlationId, sendTimestamp,
-    entry, signal, onUpdate, timeoutMs, state,
+    entry, signal, onUpdate, state,
   } = opts;
+  const resolvedStallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
 
   return new Promise<PollResult>((resolve) => {
     const startTime = Date.now();
-    let lastLogSize = 0;
+    // Separate accumulators: stall detection (100ms) vs progress reporting (30s)
+    let stallLastLogSize = 0;
+    let progressLastLogSize = 0;
+    let lastLogChangeTime = startTime;
     let lastProgressTime = startTime;
 
     // Initialize log size tracking
     if (entry.logFile) {
       try {
         const stat = fs.statSync(entry.logFile);
-        lastLogSize = stat.size;
+        stallLastLogSize = stat.size;
+        progressLastLogSize = stat.size;
       } catch {
         // Log file may not exist yet
       }
@@ -146,15 +152,17 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
     function emitProgress(): void {
       if (!onUpdate) return;
       const elapsed = Math.round((Date.now() - startTime) / 1000);
+      if (!entry.logFile) {
+        onUpdate(`Waiting for ${collabName}... ${elapsed}s elapsed (no log available)`);
+        return;
+      }
       let logDelta = 0;
-      if (entry.logFile) {
-        try {
-          const stat = fs.statSync(entry.logFile);
-          logDelta = stat.size - lastLogSize;
-          lastLogSize = stat.size;
-        } catch {
-          // Ignore
-        }
+      try {
+        const stat = fs.statSync(entry.logFile);
+        logDelta = stat.size - progressLastLogSize;
+        progressLastLogSize = stat.size;
+      } catch {
+        // Ignore
       }
       const evidence = logDelta > 0 ? ` (+${logDelta} bytes logged)` : "";
       onUpdate(`Waiting for ${collabName}... ${elapsed}s elapsed${evidence}`);
@@ -181,37 +189,57 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
         return;
       }
 
-      // Check timeout
-      if (Date.now() - startTime >= timeoutMs) {
-        clearInterval(timer);
-        resolve({ ok: false, error: "timeout" });
-        return;
-      }
-
-      // Check for matching message in inbox
+      // Check inbox BEFORE stall — a message at the stall boundary is a success
       try {
-        if (!fs.existsSync(inboxDir)) return;
-        const files = fs.readdirSync(inboxDir)
-          .filter(f => f.endsWith(".json"))
-          .sort();
+        if (fs.existsSync(inboxDir)) {
+          const files = fs.readdirSync(inboxDir)
+            .filter(f => f.endsWith(".json"))
+            .sort();
 
-        for (const file of files) {
-          const filePath = path.join(inboxDir, file);
-          const msg = checkMessage(filePath);
-          if (msg) {
-            clearInterval(timer);
-            try { fs.unlinkSync(filePath); } catch {}
-            recordMessageInHistory(state, msg);
-            resolve({ ok: true, message: msg });
-            return;
+          for (const file of files) {
+            const filePath = path.join(inboxDir, file);
+            const msg = checkMessage(filePath);
+            if (msg) {
+              clearInterval(timer);
+              try { fs.unlinkSync(filePath); } catch {}
+              recordMessageInHistory(state, msg);
+              resolve({ ok: true, message: msg });
+              return;
+            }
           }
         }
       } catch {
         // Inbox read error — try again next tick
       }
 
-      // Emit progress at 30s intervals
       const now = Date.now();
+
+      // Check stall — only when log file exists (degraded mode skips stall detection)
+      if (entry.logFile) {
+        try {
+          const stat = fs.statSync(entry.logFile);
+          if (stat.size > stallLastLogSize) {
+            stallLastLogSize = stat.size;
+            lastLogChangeTime = now;
+          }
+        } catch {
+          // Log file may have been removed
+        }
+        const stallDurationMs = now - lastLogChangeTime;
+        if (stallDurationMs >= resolvedStallThresholdMs) {
+          clearInterval(timer);
+          const logTail = readLogTail();
+          resolve({
+            ok: false,
+            error: "stalled",
+            logTail: logTail || undefined,
+            stallDurationMs,
+          });
+          return;
+        }
+      }
+
+      // Emit progress at 30s intervals
       if (now - lastProgressTime >= PROGRESS_INTERVAL_MS) {
         lastProgressTime = now;
         emitProgress();
@@ -410,6 +438,11 @@ export async function executeSpawn(
     }
 
     // Block for the collaborator's first message
+    const rawStall = config.collaboration?.stallThresholdMs;
+    const stallThresholdMs = typeof rawStall === "number" && Number.isFinite(rawStall)
+      ? Math.max(MIN_STALL_THRESHOLD_MS, rawStall)
+      : DEFAULT_STALL_THRESHOLD_MS;
+
     const pollResult = await pollForCollaboratorMessage({
       inboxDir: path.join(dirs.inbox, state.agentName),
       collabName,
@@ -417,18 +450,17 @@ export async function executeSpawn(
       entry,
       signal,
       onUpdate,
-      timeoutMs: SPAWN_FIRST_MESSAGE_TIMEOUT_MS,
+      stallThresholdMs,
       state,
     });
 
     if (!pollResult.ok) {
       // Extract error details — TypeScript may lose narrowing after await
-      const errResult = pollResult as { ok: false; error: string; exitCode?: number; logTail?: string };
-      const { error, exitCode, logTail } = errResult;
-      // Collaborator never established contact — dismiss
-      await gracefulDismiss(entry);
+      const errResult = pollResult as { ok: false; error: string; exitCode?: number; logTail?: string; stallDurationMs?: number };
+      const { error, exitCode, logTail, stallDurationMs } = errResult;
 
       if (error === "crashed") {
+        await gracefulDismiss(entry);
         return result(
           `Error: Collaborator "${collabName}" crashed (exit code ${exitCode ?? "unknown"}).` +
           (logTail ? `\n\nLog tail:\n${logTail}` : ""),
@@ -436,17 +468,18 @@ export async function executeSpawn(
         );
       }
       if (error === "cancelled") {
+        await gracefulDismiss(entry);
         return result(
           `Spawn cancelled — collaborator "${collabName}" dismissed.`,
           { mode: "spawn", error: "cancelled", name: collabName },
         );
       }
-      // timeout
+      // stalled — do NOT dismiss, collaborator may resume
       return result(
-        `Error: Collaborator "${collabName}" did not send a first message within ${Math.round(SPAWN_FIRST_MESSAGE_TIMEOUT_MS / 1000)}s. ` +
-        `The collaborator has been dismissed. Retry with pi_messenger({ action: "spawn", ... }). ` +
+        `Error: Collaborator "${collabName}" appears stalled — no output for ${Math.round((stallDurationMs ?? 0) / 1000)}s. ` +
+        `The collaborator is still running. Retry, dismiss and re-spawn, or ask the user for guidance. ` +
         `Do NOT proceed without a collaborator — tell the user about the failure.`,
-        { mode: "spawn", error: "timeout", name: collabName },
+        { mode: "spawn", error: "stalled", name: collabName, stallDurationMs },
       );
     }
 

@@ -29,7 +29,7 @@ import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } 
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
 import { findCollaboratorByName } from "./crew/registry.js";
-import { pollForCollaboratorMessage, SEND_REPLY_TIMEOUT_MS } from "./crew/handlers/collab.js";
+import { pollForCollaboratorMessage, DEFAULT_STALL_THRESHOLD_MS, MIN_STALL_THRESHOLD_MS } from "./crew/handlers/collab.js";
 import * as path from "node:path";
 
 let messagesSentThisSession = 0;
@@ -350,6 +350,14 @@ export async function executeSend(
         const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
         logFeedEvent(cwd, state.agentName, "message", recipient, preview);
 
+        // Read stall threshold from config with validation
+        const crewDir = path.join(cwd, ".pi-crew");
+        const crewConfig = loadCrewConfig(crewDir);
+        const rawStallSend = crewConfig.collaboration?.stallThresholdMs;
+        const stallThresholdMs = typeof rawStallSend === "number" && Number.isFinite(rawStallSend)
+          ? Math.max(MIN_STALL_THRESHOLD_MS, rawStallSend)
+          : DEFAULT_STALL_THRESHOLD_MS;
+
         const pollResult = await pollForCollaboratorMessage({
           inboxDir: path.join(dirs.inbox, state.agentName),
           collabName: recipient,
@@ -358,7 +366,7 @@ export async function executeSend(
           entry: collabEntry,
           signal,
           onUpdate,
-          timeoutMs: SEND_REPLY_TIMEOUT_MS,
+          stallThresholdMs,
           state,
         });
 
@@ -366,9 +374,9 @@ export async function executeSend(
 
         if (!pollResult.ok) {
           // Extract error details — TypeScript may lose narrowing after await
-          const errResult = pollResult as { ok: false; error: string; exitCode?: number; logTail?: string };
-          const { error: pollError, exitCode, logTail } = errResult;
-          // Send-path cancel/timeout/crash: do NOT dismiss collaborator
+          const errResult = pollResult as { ok: false; error: string; exitCode?: number; logTail?: string; stallDurationMs?: number };
+          const { error: pollError, exitCode, logTail, stallDurationMs } = errResult;
+          // Send-path cancel/stall/crash: do NOT dismiss collaborator
           if (pollError === "crashed") {
             return result(
               `Message sent to ${recipient}, but collaborator crashed (exit code ${exitCode ?? "unknown"}).` +
@@ -384,12 +392,12 @@ export async function executeSend(
               { mode: "send", sent: [recipient], failed: [], error: "cancelled" },
             );
           }
-          // timeout
+          // stalled
           return result(
-            `Message sent to ${recipient}, but no reply within ${Math.round(SEND_REPLY_TIMEOUT_MS / 1000)}s. ` +
+            `Message sent to ${recipient}, but no output for ${Math.round((stallDurationMs ?? 0) / 1000)}s. ` +
             `Collaborator is still running — retry sending or dismiss and re-spawn. Do NOT proceed without a collaborator.` +
             `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
-            { mode: "send", sent: [recipient], failed: [], error: "timeout" },
+            { mode: "send", sent: [recipient], failed: [], error: "stalled", stallDurationMs },
           );
         }
 

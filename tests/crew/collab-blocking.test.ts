@@ -131,7 +131,7 @@ describe("pollForCollaboratorMessage", () => {
       inboxDir,
       collabName: "TestCollab",
       entry,
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
       state,
     });
 
@@ -161,7 +161,7 @@ describe("pollForCollaboratorMessage", () => {
       correlationId: outboundId,
       sendTimestamp: Date.now() - 1000,
       entry,
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
       state,
     });
 
@@ -172,23 +172,26 @@ describe("pollForCollaboratorMessage", () => {
     }
   });
 
-  // ── Flow 3: Timeout ────────────────────────────────────────────────────
+  // ── Flow 3: Stall ───────────────────────────────────────────────────────
 
-  it("resolves with timeout when no message arrives", async () => {
+  it("resolves with stalled when log stops growing", async () => {
     const state = makeMinimalState();
-    const entry = makeCollabEntry();
+    const logFile = path.join(tmpDir, "stall-test.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
 
     const result = await pollForCollaboratorMessage({
       inboxDir,
       collabName: "TestCollab",
       entry,
-      timeoutMs: 150,
+      stallThresholdMs: 50,
       state,
     });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toBe("timeout");
+      expect(result.error).toBe("stalled");
+      expect(result.stallDurationMs).toBeGreaterThanOrEqual(50);
     }
   });
 
@@ -209,7 +212,7 @@ describe("pollForCollaboratorMessage", () => {
       inboxDir,
       collabName: "TestCollab",
       entry,
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
       state: makeMinimalState(),
     });
 
@@ -234,7 +237,7 @@ describe("pollForCollaboratorMessage", () => {
       collabName: "TestCollab",
       entry,
       signal: controller.signal,
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
       state: makeMinimalState(),
     });
 
@@ -259,7 +262,7 @@ describe("pollForCollaboratorMessage", () => {
       correlationId,
       sendTimestamp: Date.now() - 1000,
       entry,
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
       state: makeMinimalState(),
     });
 
@@ -272,9 +275,11 @@ describe("pollForCollaboratorMessage", () => {
     const correlationId = randomUUID();
     const wrongReplyTo = randomUUID();
     const msg = makeMessage({ replyTo: wrongReplyTo });
-    const entry = makeCollabEntry();
+    const logFile = path.join(tmpDir, "tier3-test.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
 
-    // Write wrong-thread message, then timeout
+    // Write wrong-thread message, then stall
     setTimeout(() => writeMessageFile(inboxDir, msg), 50);
 
     const result = await pollForCollaboratorMessage({
@@ -283,14 +288,14 @@ describe("pollForCollaboratorMessage", () => {
       correlationId,
       sendTimestamp: Date.now() - 1000,
       entry,
-      timeoutMs: 300,
+      stallThresholdMs: 200,
       state: makeMinimalState(),
     });
 
-    // Should timeout because the only message has wrong replyTo
+    // Should stall because the only message has wrong replyTo
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toBe("timeout");
+      expect(result.error).toBe("stalled");
     }
   });
 
@@ -313,7 +318,7 @@ describe("pollForCollaboratorMessage", () => {
       correlationId,
       sendTimestamp,
       entry,
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
       state: makeMinimalState(),
     });
 
@@ -328,7 +333,9 @@ describe("pollForCollaboratorMessage", () => {
       replyTo: null,
       timestamp: "not-a-date",
     });
-    const entry = makeCollabEntry();
+    const logFile = path.join(tmpDir, "nan-test.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
 
     // Write message with bad timestamp, should not match Tier 2
     setTimeout(() => writeMessageFile(inboxDir, msg), 50);
@@ -339,21 +346,23 @@ describe("pollForCollaboratorMessage", () => {
       correlationId,
       sendTimestamp: Date.now(),
       entry,
-      timeoutMs: 300,
+      stallThresholdMs: 200,
       state: makeMinimalState(),
     });
 
-    // Should timeout — bad timestamp means Tier 2 can't match
+    // Should stall — bad timestamp means Tier 2 can't match
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toBe("timeout");
+      expect(result.error).toBe("stalled");
     }
   });
 
   // ── Concurrent collaborators ──────────────────────────────────────────
 
   it("messages from wrong collaborator do not satisfy the wait", async () => {
-    const entry = makeCollabEntry({ name: "CollabA" });
+    const logFile = path.join(tmpDir, "wrong-sender.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ name: "CollabA", logFile });
     const wrongMsg = makeMessage({ from: "CollabB", text: "wrong sender" });
 
     setTimeout(() => writeMessageFile(inboxDir, wrongMsg), 50);
@@ -362,13 +371,13 @@ describe("pollForCollaboratorMessage", () => {
       inboxDir,
       collabName: "CollabA",
       entry,
-      timeoutMs: 300,
+      stallThresholdMs: 200,
       state: makeMinimalState(),
     });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toBe("timeout");
+      expect(result.error).toBe("stalled");
     }
   });
 
@@ -385,7 +394,7 @@ describe("pollForCollaboratorMessage", () => {
       inboxDir,
       collabName: "TestCollab",
       entry,
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
       state,
     });
 
@@ -414,7 +423,7 @@ describe("pollForCollaboratorMessage", () => {
       inboxDir,
       collabName: "TestCollab",
       entry,
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
       state,
     });
 
@@ -426,21 +435,82 @@ describe("pollForCollaboratorMessage", () => {
 
   it("emits progress updates at 30s intervals", async () => {
     // We can't wait 30s in a test, so just verify onUpdate is called eventually
-    // by using a very short timeout and checking it does NOT fire before 30s
+    // by using a very short stall threshold and checking it does NOT fire before 30s
     const onUpdate = vi.fn();
-    const entry = makeCollabEntry();
+    const logFile = path.join(tmpDir, "progress-test.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
 
     await pollForCollaboratorMessage({
       inboxDir,
       collabName: "TestCollab",
       entry,
       onUpdate,
-      timeoutMs: 200,
+      stallThresholdMs: 200,
       state: makeMinimalState(),
     });
 
-    // With 200ms timeout and 30s progress interval, no progress should fire
+    // With 200ms stall threshold and 30s progress interval, no progress should fire
     expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  // ── Stall detection: active log growth ────────────────────────────────
+
+  it("active log growth never triggers stall", async () => {
+    const logFile = path.join(tmpDir, "active-growth.log");
+    fs.writeFileSync(logFile, "start");
+    const entry = makeCollabEntry({ logFile });
+    const controller = new AbortController();
+
+    // Keep writing to log every 20ms — faster than the 100ms stall threshold
+    const interval = setInterval(() => {
+      fs.appendFileSync(logFile, `\nlog at ${Date.now()}`);
+    }, 20);
+
+    // Cancel after 300ms — long enough that 100ms stall would have fired
+    setTimeout(() => controller.abort(), 300);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      signal: controller.signal,
+      stallThresholdMs: 100,
+      state: makeMinimalState(),
+    });
+
+    clearInterval(interval);
+
+    // Should be cancelled, NOT stalled — log was growing the entire time
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("cancelled");
+    }
+  });
+
+  // ── Stall detection: no log file skips stall ──────────────────────────
+
+  it("no log file skips stall detection", async () => {
+    const entry = makeCollabEntry({ logFile: null });
+    const controller = new AbortController();
+
+    // Cancel after 200ms
+    setTimeout(() => controller.abort(), 200);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      signal: controller.signal,
+      stallThresholdMs: 50, // Would trigger at 50ms if stall detection was active
+      state: makeMinimalState(),
+    });
+
+    // Should be cancelled, NOT stalled — stall detection skipped for null logFile
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("cancelled");
+    }
   });
 });
 
@@ -585,24 +655,29 @@ describe("blockingCollaborators cleanup", () => {
       inboxDir,
       collabName: "TestCollab",
       entry: makeCollabEntry(),
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
     });
 
     expect(result.ok).toBe(true);
     expect(state.blockingCollaborators.size).toBe(0);
   });
 
-  it("set is empty after timeout", async () => {
+  it("set is empty after stall", async () => {
     const state = makeMinimalState();
+    const logFile = path.join(tmpDir, "cleanup-stall.log");
+    fs.writeFileSync(logFile, "started");
 
     const result = await pollWithCleanup(state, {
       inboxDir,
       collabName: "TestCollab",
-      entry: makeCollabEntry(),
-      timeoutMs: 150,
+      entry: makeCollabEntry({ logFile }),
+      stallThresholdMs: 50,
     });
 
     expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("stalled");
+    }
     expect(state.blockingCollaborators.size).toBe(0);
   });
 
@@ -615,7 +690,7 @@ describe("blockingCollaborators cleanup", () => {
       inboxDir,
       collabName: "TestCollab",
       entry: makeCollabEntry({ proc }),
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
     });
 
     expect(result.ok).toBe(false);
@@ -632,7 +707,7 @@ describe("blockingCollaborators cleanup", () => {
       collabName: "TestCollab",
       entry: makeCollabEntry(),
       signal: controller.signal,
-      timeoutMs: 2000,
+      stallThresholdMs: 2000,
     });
 
     expect(result.ok).toBe(false);
