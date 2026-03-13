@@ -1,0 +1,83 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-03-13T01:28:54.926Z
+session: "pi-messenger-2f7-deterministic-collab-stall-detection"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-2f7"
+---
+
+goal: "Replace fixed wall-clock timeouts in collaborator blocking exchange with deterministic stall detection based on log file growth"
+now: "Implementation complete. 4 commits on feat/002-multi-runtime-support. 448 tests passing. Extension installed. JadePhoenix unblocked for spec 018."
+
+done_this_session:
+  - "Spec 005: shaped, planned, Codex-reviewed (2 rounds → APPROVED), implemented, tested"
+  - "Removed SPAWN_FIRST_MESSAGE_TIMEOUT_MS (600s) and SEND_REPLY_TIMEOUT_MS (300s) constants"
+  - "Added log-growth stall detection: stallThresholdMs (default 120s, min 1s) replaces fixed timeouts"
+  - "Rewrote poll loop: cancel → crash → inbox → stall → progress ordering"
+  - "Stall does NOT auto-dismiss collaborator (crash/cancel still do)"
+  - "Added stallDurationMs to PollResult for caller error formatting"
+  - "Added collaboration.stallThresholdMs to CrewConfig with JSDoc"
+  - "Config validation: non-finite → default, < 1000ms → clamped"
+  - "Degraded mode: logFile null skips stall detection, progress says '(no log available)'"
+  - "Added name field to send-path stall result for JadePhoenix spec 018 compatibility"
+  - "Updated 6 existing tests, added 5 new tests (2 poll-level, 3 handler-level)"
+  - "Coordinated with JadePhoenix (agent-config spec 018) — confirmed API shape compatibility"
+
+final_solutions:
+  - problem: "Collaborators killed by arbitrary wall-clock timeout despite active output"
+    solution: "Replace fixed timeouts with log file size monitoring. If log grows within stallThresholdMs, collaborator continues. If log stops growing, resolve as stalled."
+    why_this_works: "Observable event (log growth) replaces arbitrary timer. Productive collaborators never killed. Stuck collaborators detected deterministically."
+  - problem: "Timeout auto-dismissed collaborator unconditionally"
+    solution: "Stall returns error without dismissing. Only crash and cancel dismiss. Caller decides recovery."
+    why_this_works: "Stalled collaborator may resume (slow model, large context). Driver agent or user chooses retry vs respawn vs escalate."
+  - problem: "Send path stall result missing collaborator name for recovery protocol"
+    solution: "Added top-level name field to send-path stall details"
+    why_this_works: "Consistent result.name across spawn and send paths enables single recovery code path in spec 018"
+
+final_decisions:
+  - decision: "Separate accumulators for stall detection (100ms) vs progress reporting (30s)"
+    rationale: "Sharing one lastLogSize variable would break progress reports — they'd show ~100ms of output instead of 30s accumulation"
+  - decision: "Poll loop order: cancel → crash → inbox → stall → progress"
+    rationale: "Inbox-before-stall ensures message at stall boundary is picked up as success"
+  - decision: "Config validation at usage site, not config loader"
+    rationale: "Keeps loader generic. Validation close to where the value is consumed."
+  - decision: "ESM limitation: executeSpawn handler-level tests deferred"
+    rationale: "pollForCollaboratorMessage called internally (same module) — can't mock without DI refactoring. Contract verified by poll-level tests + code review. executeSend handler tests work (cross-module call)."
+
+artifacts_produced:
+  - "specs/005-deterministic-collab-timeout/spec.md"
+  - "specs/005-deterministic-collab-timeout/plan.md"
+  - "specs/005-deterministic-collab-timeout/tasks.md"
+  - "specs/005-deterministic-collab-timeout/shaping.md"
+  - "specs/005-deterministic-collab-timeout/codex-review.md"
+  - "specs/005-deterministic-collab-timeout/planning-transcript.md"
+  - "specs/005-deterministic-collab-timeout/log.md"
+
+files:
+  - "crew/handlers/collab.ts"
+  - "handlers.ts"
+  - "crew/utils/config.ts"
+  - "tests/crew/collab-blocking.test.ts"
+
+test:
+  suite: "npx vitest run"
+  result: "448 passed, 0 failed, 31 files"
+  targeted: "npx vitest run tests/crew/collab-blocking.test.ts — 27 passed"
+
+next:
+  - "Merge feat/002-multi-runtime-support to main (unblocks JadePhoenix spec 018)"
+  - "JadePhoenix spec 018 (collab failure recovery protocol) builds on this stall detection"
+  - "Future: config validation test for stallThresholdMs edge cases (Codex residual note)"
+  - "Future: executeSpawn handler-level tests if DI refactoring happens"
+
+blockers: []
+
+git:
+  branch: "feat/002-multi-runtime-support"
+  commits:
+    - "2ff24f7 feat(collab): replace fixed timeouts with log-growth stall detection"
+    - "42f41d3 test(collab): add handler-level tests for stall/crash/cancel semantics"
+    - "9e352f2 docs: update spec 005 tasks and log — implementation complete"
+    - "90fb7b6 fix(collab): add name field to send-path stall result"
+  remote: "https://github.com/carmandale/pi-messenger.git"

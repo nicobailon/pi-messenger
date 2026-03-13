@@ -3,10 +3,12 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { HandlerContext } from "./lib.js";
 import {
   type AgentRegistration,
   type AgentMailMessage,
@@ -53,7 +55,7 @@ let isProcessingMessages = false;
 let pendingProcessArgs: {
   state: MessengerState;
   dirs: Dirs;
-  deliverFn: (msg: AgentMailMessage) => void;
+  deliverFn: (msg: AgentMailMessage) => boolean;
 } | null = null;
 
 // =============================================================================
@@ -415,7 +417,7 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
   return false;
 }
 
-export function updateRegistration(state: MessengerState, dirs: Dirs, ctx: ExtensionContext): void {
+export function updateRegistration(state: MessengerState, dirs: Dirs, ctx: HandlerContext): void {
   if (!state.registered) return;
 
   const regPath = getRegistrationPath(state, dirs);
@@ -482,7 +484,7 @@ export function renameAgent(
   dirs: Dirs,
   ctx: ExtensionContext,
   newName: string,
-  deliverFn: (msg: AgentMailMessage) => void
+  deliverFn: (msg: AgentMailMessage) => boolean
 ): RenameResult {
   if (!state.registered) {
     return { success: false, error: "not_registered" };
@@ -939,10 +941,21 @@ export function getMyInbox(state: MessengerState, dirs: Dirs): string {
   return join(dirs.inbox, state.agentName);
 }
 
+export function hasPendingMessages(state: MessengerState, dirs: Dirs): boolean {
+  if (!state.registered) return false;
+  const inbox = getMyInbox(state, dirs);
+  try {
+    const files = fs.readdirSync(inbox).filter(f => f.endsWith(".json"));
+    return files.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function processAllPendingMessages(
   state: MessengerState,
   dirs: Dirs,
-  deliverFn: (msg: AgentMailMessage) => void
+  deliverFn: (msg: AgentMailMessage) => boolean
 ): void {
   if (!state.registered) return;
 
@@ -970,8 +983,10 @@ export function processAllPendingMessages(
       try {
         const content = fs.readFileSync(msgPath, "utf-8");
         const msg: AgentMailMessage = JSON.parse(content);
-        deliverFn(msg);
-        fs.unlinkSync(msgPath);
+        const handled = deliverFn(msg);
+        if (handled !== false) {
+          fs.unlinkSync(msgPath);
+        }
       } catch {
         // On any failure (read, parse, deliver), delete to avoid infinite retry loops
         try {
@@ -1028,7 +1043,7 @@ const WATCHER_DEBOUNCE_MS = 50;
 export function startWatcher(
   state: MessengerState,
   dirs: Dirs,
-  deliverFn: (msg: AgentMailMessage) => void
+  deliverFn: (msg: AgentMailMessage) => boolean
 ): void {
   if (!state.registered) return;
   if (state.watcher) return;
@@ -1072,6 +1087,34 @@ export function startWatcher(
   });
 
   state.watcherRetries = 0;
+}
+
+// =============================================================================
+// Chat History Helper
+// =============================================================================
+
+/**
+ * Record a message in chat history and increment unread count.
+ * Called from both the normal delivery path (deliverMessage in index.ts)
+ * and the blocking poll path (pollForCollaboratorMessage in collab.ts).
+ * Does NOT trigger overlay re-render or pi.sendMessage — the blocking
+ * poll path returns the message via tool result instead.
+ */
+export function recordMessageInHistory(
+  state: MessengerState,
+  msg: AgentMailMessage,
+  maxHistory: number = 50,
+): void {
+  let history = state.chatHistory.get(msg.from);
+  if (!history) {
+    history = [];
+    state.chatHistory.set(msg.from, history);
+  }
+  history.push(msg);
+  if (history.length > maxHistory) history.shift();
+
+  const current = state.unreadCounts.get(msg.from) ?? 0;
+  state.unreadCounts.set(msg.from, current + 1);
 }
 
 export function stopWatcher(state: MessengerState): void {
@@ -1122,4 +1165,55 @@ export function validateTargetAgent(to: string, dirs: Dirs): TargetValidation {
   }
 
   return { valid: true };
+}
+
+// =============================================================================
+// Spawner Pre-Registration (V3 — for non-pi workers)
+// =============================================================================
+
+/**
+ * Derive the messenger registry directory.
+ * Same derivation as index.ts:113-116 — single source of truth.
+ */
+export function getMessengerRegistryDir(): string {
+  const baseDir = process.env.PI_MESSENGER_DIR || join(os.homedir(), ".pi", "agent", "messenger");
+  return join(baseDir, "registry");
+}
+
+/**
+ * Pre-register a spawned worker in the registry.
+ * Called by the spawner (lobby.ts / agents.ts) AFTER spawn() for non-pi runtimes.
+ * Non-pi workers don't self-register via the extension — the spawner does it.
+ *
+ * Uses atomic write (tmp + rename) to prevent partial reads.
+ */
+export function registerSpawnedWorker(
+  registryDir: string,
+  workerCwd: string,
+  name: string,
+  pid: number,
+  model: string,
+  sessionId: string,
+  nonceHash?: string,
+): void {
+  ensureDirSync(registryDir);
+
+  const now = new Date().toISOString();
+  const registration: import("./lib.js").AgentRegistration = {
+    name,
+    pid,
+    sessionId,
+    cwd: workerCwd,
+    model,
+    startedAt: now,
+    isHuman: false,
+    session: { toolCalls: 0, tokens: 0, filesModified: [] },
+    activity: { lastActivityAt: now },
+    ...(nonceHash ? { nonceHash } : {}),
+  };
+
+  const tmpPath = join(registryDir, `.${name}.tmp`);
+  const finalPath = join(registryDir, `${name}.json`);
+  fs.writeFileSync(tmpPath, JSON.stringify(registration, null, 2));
+  fs.renameSync(tmpPath, finalPath);
 }

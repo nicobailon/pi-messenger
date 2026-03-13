@@ -37,12 +37,19 @@ export interface CrewConfig {
     worker?: string;
     reviewer?: string;
     analyst?: string;
+    collaborator?: string;
   };
   thinking?: {
     planner?: string;
     worker?: string;
     reviewer?: string;
     analyst?: string;
+    collaborator?: string;
+  };
+  runtime?: {
+    planner?: string;
+    worker?: string;
+    reviewer?: string;
   };
   concurrency: {
     workers: number;
@@ -68,10 +75,18 @@ export interface CrewConfig {
     stopOnBlock: boolean;
     env?: Record<string, string>;
     shutdownGracePeriodMs?: number;
+    stuckTimeoutMs?: number;
   };
   dependencies: "advisory" | "strict";
   coordination: CoordinationLevel;
   messageBudgets: Record<CoordinationLevel, number>;
+  /**
+   * Collaborator blocking exchange settings.
+   * stallThresholdMs: log must grow within this interval or the collaborator is
+   * considered stalled. Different from work.stuckTimeoutMs which controls crew
+   * worker idle detection.
+   */
+  collaboration: { stallThresholdMs: number };
 }
 
 const DEFAULT_CONFIG: CrewConfig = {
@@ -90,7 +105,8 @@ const DEFAULT_CONFIG: CrewConfig = {
   planSync: { enabled: false },
   review: { enabled: true, maxIterations: 3 },
   planning: { maxPasses: 1 },
-  work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false, shutdownGracePeriodMs: 30000 },
+  work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false, shutdownGracePeriodMs: 30000, stuckTimeoutMs: 300000 },
+  collaboration: { stallThresholdMs: 120_000 },
   dependencies: "advisory",
   coordination: "chatty",
   messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },

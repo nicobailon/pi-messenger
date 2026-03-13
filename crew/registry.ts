@@ -29,7 +29,15 @@ export interface LobbyWorkerEntry extends BaseWorkerEntry {
   aliveFile: string | null;
 }
 
-export type WorkerEntry = RegularWorker | LobbyWorkerEntry;
+export interface CollaboratorEntry extends BaseWorkerEntry {
+  type: "collaborator";
+  spawnedBy: number;  // PID of spawning agent session
+  startedAt: number;
+  promptTmpDir: string | null;
+  logFile: string | null;
+}
+
+export type WorkerEntry = RegularWorker | LobbyWorkerEntry | CollaboratorEntry;
 
 const workers = new Map<string, WorkerEntry>();
 
@@ -101,6 +109,25 @@ export function getAvailableLobbyWorkers(cwd: string): LobbyWorkerEntry[] {
     if (entry.assignedTaskId) continue;
     if (entry.proc.exitCode !== null) continue;
     result.push(entry);
+  }
+  return result;
+}
+
+export function findCollaboratorByName(name: string): CollaboratorEntry | null {
+  for (const entry of workers.values()) {
+    if (entry.type === "collaborator" && entry.name === name && entry.proc.exitCode === null) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+export function getCollaboratorsBySpawner(spawnerPid: number): CollaboratorEntry[] {
+  const result: CollaboratorEntry[] = [];
+  for (const entry of workers.values()) {
+    if (entry.type === "collaborator" && entry.spawnedBy === spawnerPid && entry.proc.exitCode === null) {
+      result.push(entry);
+    }
   }
   return result;
 }

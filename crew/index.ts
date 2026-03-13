@@ -13,7 +13,7 @@ import { result } from "./utils/result.js";
 import { isPlanningForCwd, cancelPlanningRun } from "./state.js";
 import { logFeedEvent } from "../feed.js";
 
-type DeliverFn = (msg: AgentMailMessage) => void;
+type DeliverFn = (msg: AgentMailMessage) => boolean;
 type UpdateStatusFn = (ctx: ExtensionContext) => void;
 
 export interface CrewActionConfig {
@@ -38,7 +38,8 @@ export async function executeCrewAction(
   updateStatus: UpdateStatusFn,
   appendEntry: AppendEntryFn,
   config?: CrewActionConfig,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onUpdate?: (update: string) => void,
 ) {
   // Parse action: "task.show" → group="task", op="show"
   const dotIndex = action.indexOf('.');
@@ -102,10 +103,10 @@ export async function executeCrewAction(
       return handlers.executeSetSpec(state, dirs, ctx, params.spec);
 
     case 'send':
-      return handlers.executeSend(state, dirs, ctx.cwd ?? process.cwd(), params.to, false, params.message, params.replyTo);
+      return await handlers.executeSend(state, dirs, ctx.cwd ?? process.cwd(), params.to, false, params.message, params.replyTo, signal, onUpdate);
 
     case 'broadcast':
-      return handlers.executeSend(state, dirs, ctx.cwd ?? process.cwd(), undefined, true, params.message, params.replyTo);
+      return await handlers.executeSend(state, dirs, ctx.cwd ?? process.cwd(), undefined, true, params.message, params.replyTo);
 
     case 'reserve':
       if (!params.paths || params.paths.length === 0) {
@@ -206,6 +207,26 @@ export async function executeCrewAction(
       } catch (e) {
         return result(`Error: sync handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
           { mode: "sync", error: "handler_error" });
+      }
+    }
+
+    case 'spawn': {
+      try {
+        const collabHandler = await import("./handlers/collab.js");
+        return collabHandler.executeSpawn(params, state, dirs, ctx, signal, onUpdate);
+      } catch (e) {
+        return result(`Error: spawn handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "spawn", error: "handler_error" });
+      }
+    }
+
+    case 'dismiss': {
+      try {
+        const collabHandler = await import("./handlers/collab.js");
+        return collabHandler.executeDismiss(params, state, dirs, ctx);
+      } catch (e) {
+        return result(`Error: dismiss handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "dismiss", error: "handler_error" });
       }
     }
 

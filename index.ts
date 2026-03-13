@@ -65,6 +65,7 @@ import { runLegacyAgentCleanupMigration } from "./crew/utils/install.js";
 import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
 import { shutdownAllWorkers } from "./crew/agents.js";
 import { shutdownLobbyWorkers } from "./crew/lobby.js";
+import { shutdownCollaborators } from "./crew/handlers/collab.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -104,6 +105,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     customStatus: false,
     registryFlushTimer: null,
     sessionStartedAt: new Date().toISOString(),
+    registrationContextSent: false,
+    blockingCollaborators: new Set(),
   };
 
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
@@ -119,19 +122,15 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   // Message Delivery
   // ===========================================================================
 
-  function deliverMessage(msg: AgentMailMessage): void {
-    // Store in chat history (keyed by sender)
-    let history = state.chatHistory.get(msg.from);
-    if (!history) {
-      history = [];
-      state.chatHistory.set(msg.from, history);
+  function deliverMessage(msg: AgentMailMessage): boolean {
+    // If this sender is being blocked for a collaborator exchange,
+    // leave the file for the blocking poll to consume
+    if (state.blockingCollaborators.has(msg.from)) {
+      return false;
     }
-    history.push(msg);
-    if (history.length > MAX_CHAT_HISTORY) history.shift();
 
-    // Increment unread count
-    const current = state.unreadCounts.get(msg.from) ?? 0;
-    state.unreadCounts.set(msg.from, current + 1);
+    // Store in chat history + increment unread count
+    store.recordMessageInHistory(state, msg, MAX_CHAT_HISTORY);
 
     // Trigger overlay re-render if open
     overlayTui?.requestRender();
@@ -174,6 +173,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       { customType: "agent_message", content, display: true, details: msg },
       { triggerTurn: true, deliverAs: "steer" }
     );
+
+    return true;
   }
 
   // ===========================================================================
@@ -318,6 +319,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   // ===========================================================================
 
   function sendRegistrationContext(ctx: ExtensionContext): void {
+    if (state.registrationContextSent) return;
+    state.registrationContextSent = true;
     const folder = extractFolder(process.cwd());
     const locationPart = state.gitBranch
       ? `${folder} on ${state.gitBranch}`
@@ -408,7 +411,8 @@ Usage (action-based API - preferred):
       cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
       limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
-      name: Type.Optional(Type.String({ description: "New name for rename action" })),
+      name: Type.Optional(Type.String({ description: "New name for rename action, or collaborator name for dismiss action" })),
+      agent: Type.Optional(Type.String({ description: "Agent definition name for spawn action (e.g., 'crew-challenger')" })),
 
       // ═══════════════════════════════════════════════════════════════════════
       // MESSAGING & COORDINATION PARAMETERS
@@ -422,7 +426,7 @@ Usage (action-based API - preferred):
       autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
     }),
 
-    async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
       const params = rawParams as CrewParams;
       latestCtx = ctx;
 
@@ -430,6 +434,11 @@ Usage (action-based API - preferred):
       if (!action) {
         return handlers.executeStatus(state, dirs, ctx.cwd ?? process.cwd());
       }
+
+      // Bridge pi SDK's AgentToolUpdateCallback to a simple string callback
+      const updateBridge = onUpdate
+        ? (msg: string) => onUpdate({ content: [{ type: "text", text: msg }], details: undefined })
+        : undefined;
 
       const result = await executeCrewAction(
         action,
@@ -441,7 +450,8 @@ Usage (action-based API - preferred):
         updateStatus,
         (type, data) => pi.appendEntry(type, data),
         { stuckThreshold: config.stuckThreshold, crewEventsInFeed: config.crewEventsInFeed, nameTheme, feedRetention: config.feedRetention },
-        signal
+        signal,
+        updateBridge,
       );
 
       if (action === "join" && state.registered && config.registrationContext) {
@@ -763,7 +773,8 @@ Usage (action-based API - preferred):
     state.isHuman = ctx.hasUI;
     try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
 
-    const shouldAutoRegister = config.autoRegister || 
+    const isCollaborator = process.env.PI_CREW_COLLABORATOR === "1";
+    const shouldAutoRegister = isCollaborator || config.autoRegister || 
       matchesAutoRegisterPath(process.cwd(), config.autoRegisterPaths);
 
     if (!shouldAutoRegister) {
@@ -913,6 +924,7 @@ Usage (action-based API - preferred):
         }, { triggerTurn: true, deliverAs: "steer" });
       }
     }
+
     recoverWatcherIfNeeded();
     updateStatus(ctx);
 
@@ -1007,6 +1019,7 @@ Usage (action-based API - preferred):
   pi.on("session_shutdown", async () => {
     shutdownLobbyWorkers(process.cwd());
     shutdownAllWorkers();
+    await shutdownCollaborators(process.pid, dirs);
     stopStatusHeartbeat();
     overlayOpening = false;
     overlayHandle = null;

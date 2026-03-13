@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.0] - 2026-03-07
+
+### Added
+- **Agent-to-agent collaboration (`spawn`/`dismiss`)** — Agents can programmatically spawn collaborator subprocesses for two-participant workflow gates (challenge, review, shape). `pi_messenger({ action: "spawn", agent: "crew-challenger", prompt: "..." })` launches a collaborator on the mesh; `pi_messenger({ action: "dismiss", name: "..." })` shuts it down cleanly. Collaborators use RPC mode with stdin pipe for lifecycle management — no keepalive needed. Messages flow through the existing FSWatcher mesh. Budget-exempt via `PI_CREW_COLLABORATOR` env var.
+- **`crew-challenger` agent** — Built-in read-only collaborator that stress-tests proposals via `[PHASE:challenge/agree/block]` protocol. Tools: `read`, `bash`, `pi_messenger` only. Max 5 rounds with automatic conclusion.
+- **`hasPendingMessages()` store helper** — Checks if an agent has unread messages in their inbox.
+
+### Fixed
+- **Registration context interrupting parallel tool calls** — `sendRegistrationContext()` was called twice for auto-registered agents (session_start + join handler), causing pi to skip remaining tool calls in a parallel batch with "Skipped due to queued user message." Now tracks `registrationContextSent` flag — first-in wins.
+
 ## [0.13.0] - 2026-03-02
 
 ### Added

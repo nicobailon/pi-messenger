@@ -1,0 +1,89 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-03-08T10:16:58.238Z
+session: "pi-messenger-2-multi-runtime-support-implementation"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-2"
+---
+
+goal: "Implement spec 002-multi-runtime-support: RuntimeAdapter abstraction, pi-messenger-cli, ClaudeAdapter, completion inference"
+now: "PR #9 up on fork (carmandale/pi-messenger), 43/47 tasks done, 394 tests passing (was 323), 4 tasks deferred"
+
+final_solutions:
+  - "RuntimeAdapter interface (types.ts) abstracts CLI differences — buildArgs, parseProgressEvent, supportsFeature"
+  - "Unified buildRuntimeSpawn() engine in runtime-spawn.ts replaces duplicated arg construction in agents.ts and lobby.ts"
+  - "PiAdapter wraps pi --mode json flags and JSONL parsing; ClaudeAdapter wraps claude --print --output-format stream-json"
+  - "pi-messenger-cli (cli/index.ts) — standalone CLI with crew-spawned (pre-registration + retry) and external (self-register) modes"
+  - "registerSpawnedWorker() in store.ts — atomic write for non-pi worker pre-registration by spawner"
+  - "buildCliInstructions() in prompt.ts — CLI usage reference injected into non-pi worker prompts"
+  - "inferTaskCompletion() in completion-inference.ts — exit 0 + git changes → inferred done"
+  - "Non-pi lobby guard — spawnLobbyWorker returns null, overlay [w] falls back to spawnAgents"
+  - "Extracted pushModelArgs/resolveThinking to crew/utils/model.ts to break circular import cycle"
+
+final_decisions:
+  - "Shape D' (Adapter + CLI, Pi Extension Preserved) — CLI gives universal mesh access, pi keeps typed tool calls"
+  - "Pi runtime skips command validation (always available as extension) — non-pi runtimes validated via which"
+  - "CLI uses tsx shebang (#!/usr/bin/env -S npx tsx) — matches project's no-compile convention"
+  - "systemPrompt passed inline AND as file path — adapter uses whichever it supports"
+  - "resolveRuntime defaults to 'pi' — zero breaking changes for existing setups"
+  - "Deferred: nonce auth (V3.13), stuck timer (V4.5), E2E manual test (V3.16)"
+
+artifacts_produced:
+  - "PR #9: https://github.com/nicobailon/pi-messenger/pull/9"
+  - "specs/002-multi-runtime-support/ — spec.md, plan.md, tasks.md, shaping.md, codex-review.md"
+  - "11 commits on feat/002-multi-runtime-support branch"
+  - "71 new tests (394 total)"
+
+done_this_session:
+  - "V1 (10/10): RuntimeAdapter interface, PiAdapter, adapter factory, unified spawn engine, config runtime field, progress adapter, unit tests, agents.ts + lobby.ts wiring"
+  - "V2 (9/9): pi-messenger-cli with join/status/list/send/reserve/release/feed/task.* commands, crew-spawned + external bootstrap, integration tests"
+  - "V3 (12/16): ClaudeAdapter, adapter registration, registerSpawnedWorker, getMessengerRegistryDir, pre-registration in agents+lobby, lobby guard, prompt runtime/assignmentMode params, CLI instructions, all callsites updated, overlay fallback, systemPrompt inline, integration tests"
+  - "V4 (5/8): inferTaskCompletion, getChangedFiles (committed+working+untracked), wired into lobby close + work result, stuckTimeoutMs config, unit tests"
+  - "P1+P2: README multi-runtime docs, CLI usage guide, feature support matrix"
+
+next:
+  - "V3.13: Worker nonce auth (defense-in-depth for local-machine threat model)"
+  - "V3.16: E2E manual test — configure runtime.worker=claude, verify full flow"
+  - "V4.5: Stuck detection timer — track lastOutputTimestamp, fire warning after stuckTimeoutMs"
+  - "P3: Close bead pi-messenger-2 after PR merge"
+  - "Future: Codex adapter, Gemini CLI adapter (fast-follows)"
+
+files:
+  created:
+    - "crew/utils/adapters/types.ts"
+    - "crew/utils/adapters/pi.ts"
+    - "crew/utils/adapters/claude.ts"
+    - "crew/utils/adapters/index.ts"
+    - "crew/runtime-spawn.ts"
+    - "crew/utils/model.ts"
+    - "crew/completion-inference.ts"
+    - "cli/index.ts"
+    - "tsconfig.cli.json"
+    - "tests/crew/adapters.test.ts"
+    - "tests/crew/cli.test.ts"
+    - "tests/crew/claude-integration.test.ts"
+    - "tests/crew/completion-inference.test.ts"
+  modified:
+    - "crew/agents.ts"
+    - "crew/lobby.ts"
+    - "crew/prompt.ts"
+    - "crew/spawn.ts"
+    - "crew/handlers/work.ts"
+    - "crew/utils/config.ts"
+    - "crew/utils/progress.ts"
+    - "store.ts"
+    - "package.json"
+    - "README.md"
+
+test:
+  total: 394
+  new: 71
+  command: "npx vitest run"
+  status: "all passing"
+
+git:
+  branch: "feat/002-multi-runtime-support"
+  commit: "839f59b1597474292c957c5431d27e377df2e383"
+  remote: "https://github.com/carmandale/pi-messenger.git"
+  pr: "https://github.com/nicobailon/pi-messenger/pull/9"

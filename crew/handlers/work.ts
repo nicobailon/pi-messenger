@@ -6,15 +6,20 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Dirs } from "../../lib.js";
+import type { Dirs, FileReservation } from "../../lib.js";
 import type { CrewParams, AppendEntryFn } from "../types.js";
 import { result } from "../utils/result.js";
 import { resolveModel, spawnAgents } from "../agents.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { discoverCrewAgents, discoverCrewSkills } from "../utils/discover.js";
 import { buildWorkerPrompt } from "../prompt.js";
+import { resolveRuntime } from "../utils/adapters/index.js";
+import { inferTaskCompletion } from "../completion-inference.js";
 import * as store from "../store.js";
 import { getCrewDir } from "../store.js";
+import { getMessengerRegistryDir } from "../../store.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, addWaveResult, clampConcurrency } from "../state.js";
 import { getAvailableLobbyWorkers, assignTaskToLobbyWorker, cleanupUnassignedAliveFiles } from "../lobby.js";
 import { logFeedEvent } from "../../feed.js";
@@ -120,7 +125,8 @@ export async function execute(
     if (!task) break;
 
     const others = readyTasks.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
+    const workerRuntime = resolveRuntime(config, "worker");
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, workerRuntime, "pre-claimed");
     store.updateTask(cwd, task.id, {
       status: "in_progress",
       started_at: new Date().toISOString(),
@@ -146,8 +152,18 @@ export async function execute(
       params.model,
       config.models?.worker,
     );
+    // Set in_progress BEFORE building prompt (match lobby path above).
+    // Without this, task.done fails because it requires in_progress status.
+    store.updateTask(cwd, task.id, {
+      status: "in_progress",
+      started_at: new Date().toISOString(),
+      base_commit: store.getBaseCommit(cwd),
+      assigned_to: "crew-worker",
+      attempt_count: task.attempt_count + 1,
+    });
     const others = readyTasks.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
+    const workerRuntime2 = resolveRuntime(config, "worker");
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, workerRuntime2, "pre-claimed");
     store.appendTaskProgress(cwd, task.id, "system", `Assigned to crew-worker (attempt ${task.attempt_count + 1})`);
 
     return {
@@ -166,6 +182,18 @@ export async function execute(
       messengerDirs: { registry: dirs.registry, inbox: dirs.inbox },
     }
   );
+
+  // Safety net: reset any tasks we set to in_progress but got no result for
+  // (can happen if spawnAgents was interrupted or didn't process all tasks)
+  const resultTaskIds = new Set(workerResults.map(r => r.taskId).filter(Boolean));
+  for (const task of remainingTasks) {
+    if (!resultTaskIds.has(task.id)) {
+      const current = store.getTask(cwd, task.id);
+      if (current?.status === "in_progress" && current.assigned_to === "crew-worker") {
+        store.updateTask(cwd, task.id, { status: "todo", assigned_to: undefined });
+      }
+    }
+  }
 
   // Process results
   const succeeded: string[] = [];
@@ -187,10 +215,36 @@ export async function execute(
       } else if (task?.status === "blocked") {
         blocked.push(taskId);
       } else if (task?.status === "in_progress") {
-        store.appendTaskProgress(cwd, taskId, "system",
-          r.wasGracefullyShutdown ? "Task interrupted (shutdown), reset to todo" : "Worker exited without completing task, reset to todo");
-        store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
-        failed.push(taskId);
+        // Read worker's reserved file paths for scoped attribution.
+        // Read registration file directly — worker may have exited,
+        // getActiveAgents filters dead PIDs.
+        const regDir = getMessengerRegistryDir();
+        const regPath = path.join(regDir, `${r.agent}.json`);
+        let reservedPaths: string[] = [];
+        try {
+          const reg = JSON.parse(fs.readFileSync(regPath, "utf-8"));
+          reservedPaths = (reg.reservations ?? []).map((rv: FileReservation) => rv.pattern);
+        } catch { /* fall back to repo-wide */ }
+
+        // Try completion inference before resetting to todo
+        const activeWorkerCount = store.getTasks(cwd).filter(t => t.status === "in_progress").length;
+        const inferred = inferTaskCompletion({
+          cwd,
+          taskId,
+          workerName: r.agent,
+          exitCode: r.exitCode,
+          baseCommit: task.base_commit,
+          reservedPaths,
+          activeWorkerCount,
+        });
+        if (inferred) {
+          succeeded.push(taskId);
+        } else {
+          store.appendTaskProgress(cwd, taskId, "system",
+            r.wasGracefullyShutdown ? "Task interrupted (shutdown), reset to todo" : "Worker exited without completing task, reset to todo");
+          store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
+          failed.push(taskId);
+        }
       } else {
         failed.push(taskId);
       }

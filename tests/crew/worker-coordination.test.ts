@@ -464,8 +464,12 @@ describe("executeSend broadcast filtering", () => {
   let feedModule: typeof import("../../feed.js");
   let messageDirs: { base: string; registry: string; inbox: string };
   let state: { registered: boolean; agentName: string };
+  let savedCollabEnv: string | undefined;
 
   beforeEach(async () => {
+    // Isolate from PI_CREW_COLLABORATOR in parent process (e.g. running inside a collaborator)
+    savedCollabEnv = process.env.PI_CREW_COLLABORATOR;
+    delete process.env.PI_CREW_COLLABORATOR;
     dirs = createTempCrewDirs();
     homedirMock.mockReturnValue(dirs.root);
 
@@ -502,13 +506,16 @@ describe("executeSend broadcast filtering", () => {
 
   afterEach(() => {
     delete process.env.PI_CREW_WORKER;
+    // Restore PI_CREW_COLLABORATOR to pre-test state
+    if (savedCollabEnv !== undefined) process.env.PI_CREW_COLLABORATOR = savedCollabEnv;
+    else delete process.env.PI_CREW_COLLABORATOR;
     vi.restoreAllMocks();
   });
 
-  it("worker broadcast logs to feed only", () => {
+  it("worker broadcast logs to feed only", async () => {
     process.env.PI_CREW_WORKER = "1";
 
-    const result = executeSend(
+    const result = await executeSend(
       state as any,
       messageDirs as any,
       dirs.cwd,
@@ -528,10 +535,10 @@ describe("executeSend broadcast filtering", () => {
     );
   });
 
-  it("non-worker broadcast delivers to inbox recipients", () => {
+  it("non-worker broadcast delivers to inbox recipients", async () => {
     delete process.env.PI_CREW_WORKER;
 
-    executeSend(
+    await executeSend(
       state as any,
       messageDirs as any,
       dirs.cwd,
@@ -557,10 +564,10 @@ describe("executeSend broadcast filtering", () => {
     );
   });
 
-  it("worker direct message still delivers", () => {
+  it("worker direct message still delivers", async () => {
     process.env.PI_CREW_WORKER = "1";
 
-    executeSend(
+    const result = await executeSend(
       state as any,
       messageDirs as any,
       dirs.cwd,
@@ -577,16 +584,18 @@ describe("executeSend broadcast filtering", () => {
       "Need your input",
       undefined,
     );
+    // Non-collaborator send: no reply field (immediate return, no blocking)
+    expect((result.details as any).reply).toBeUndefined();
   });
 
-  it("worker broadcast increments message budget usage", () => {
+  it("worker broadcast increments message budget usage", async () => {
     process.env.PI_CREW_WORKER = "1";
     writeJson(path.join(dirs.crewDir, "config.json"), {
       coordination: "chatty",
       messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 1 },
     });
 
-    const first = executeSend(
+    const first = await executeSend(
       state as any,
       messageDirs as any,
       dirs.cwd,
@@ -594,7 +603,7 @@ describe("executeSend broadcast filtering", () => {
       true,
       "First broadcast"
     );
-    const second = executeSend(
+    const second = await executeSend(
       state as any,
       messageDirs as any,
       dirs.cwd,

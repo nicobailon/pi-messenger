@@ -324,6 +324,76 @@ Create `~/.pi/agent/pi-messenger.json`:
 
 Config priority: project `.pi/pi-messenger.json` > user `~/.pi/agent/pi-messenger.json` > `~/.pi/agent/settings.json` `"messenger"` key > defaults.
 
+## Multi-Runtime Support
+
+Pi-messenger can spawn workers using different CLI runtimes. By default, workers use `pi`, but you can configure Claude Code as an alternative.
+
+### Configuration
+
+Add a `runtime` section to your crew config (`.pi/messenger/crew/config.json`):
+
+```json
+{
+  "runtime": {
+    "worker": "claude"
+  }
+}
+```
+
+Supported runtimes: `pi` (default), `claude`
+
+### pi-messenger-cli
+
+For non-pi runtimes, workers communicate with the mesh via the `pi-messenger-cli` command-line tool:
+
+```bash
+# Join the mesh
+pi-messenger-cli join
+
+# List active agents
+pi-messenger-cli list
+
+# Complete a task
+pi-messenger-cli task.done task-3 --summary "Implemented auth module"
+
+# Send a message
+pi-messenger-cli send --to AgentName --message "Ready for review"
+
+# Reserve files
+pi-messenger-cli reserve --paths src/auth.ts src/auth.test.ts
+
+# View activity feed
+pi-messenger-cli feed --limit 10
+```
+
+**Environment variables:**
+- `PI_AGENT_NAME` — Agent name (auto-generated if not set)
+- `PI_AGENT_MODEL` — Model identifier for registration
+- `PI_CREW_WORKER=1` — Set automatically for crew-spawned workers
+- `PI_MESSENGER_DIR` — Override messenger directory (default: `~/.pi/agent/messenger`)
+
+### How It Works
+
+When a non-pi runtime is configured:
+1. The spawner builds CLI arguments via the runtime adapter (e.g., `claude --print --output-format stream-json`)
+2. The spawner pre-registers the worker in the mesh registry (since non-pi runtimes can't self-register)
+3. CLI instructions are injected into the worker's prompt, telling it to use `pi-messenger-cli` for mesh operations
+4. Progress is tracked via the adapter's JSONL parser (each runtime has different output formats)
+5. Completion inference detects when a worker exits successfully with code changes, even if it didn't explicitly call `task.done`
+
+### Feature Support by Runtime
+
+| Feature | pi | Claude Code |
+|---------|:--:|:----------:|
+| Streaming progress | ✓ | ✓ |
+| Thinking mode | ✓ | ✗ |
+| Tool restriction | ✓ | ✗ |
+| Extension loading | ✓ | ✗ |
+| System prompt (file) | ✓ | ✗ |
+| System prompt (inline) | ✓ | ✓ |
+| Lobby workers | ✓ | ✗ |
+| On-demand workers | ✓ | ✓ |
+
 ## How It Works
 
 Pi-messenger is a [pi extension](https://github.com/badlogic/pi-mono) that hooks into the agent lifecycle. It uses `pi.on("tool_call")` and `pi.on("tool_result")` to track activity — every edit, commit, and test run gets logged. `pi.on("session_start")` handles auto-registration, `pi.on("session_shutdown")` cleans up, and `pi.on("agent_end")` drives autonomous crew mode by checking for ready tasks after each agent turn.
@@ -342,3 +412,4 @@ All coordination is file-based, no daemon required. Shared state (registry, inbo
 ## License
 
 MIT
+

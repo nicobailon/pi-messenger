@@ -4,6 +4,7 @@
 
 import { existsSync } from "node:fs";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { HandlerContext } from "./lib.js";
 import {
   type MessengerState,
   type Dirs,
@@ -27,6 +28,9 @@ import * as crewStore from "./crew/store.js";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.js";
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
+import { findCollaboratorByName } from "./crew/registry.js";
+import { pollForCollaboratorMessage, DEFAULT_STALL_THRESHOLD_MS, MIN_STALL_THRESHOLD_MS } from "./crew/handlers/collab.js";
+import * as path from "node:path";
 
 let messagesSentThisSession = 0;
 
@@ -60,7 +64,7 @@ export function executeJoin(
   state: MessengerState,
   dirs: Dirs,
   ctx: ExtensionContext,
-  deliverFn: (msg: AgentMailMessage) => void,
+  deliverFn: (msg: AgentMailMessage) => boolean,
   updateStatusFn: (ctx: ExtensionContext) => void,
   specPath?: string,
   nameTheme?: NameThemeConfig,
@@ -255,14 +259,16 @@ export function executeList(state: MessengerState, dirs: Dirs, cwd: string = pro
   );
 }
 
-export function executeSend(
+export async function executeSend(
   state: MessengerState,
   dirs: Dirs,
   cwd: string,
   to: string | string[] | undefined,
   broadcast: boolean | undefined,
   message?: string,
-  replyTo?: string
+  replyTo?: string,
+  signal?: AbortSignal,
+  onUpdate?: (update: string) => void,
 ) {
   if (!state.registered) {
     return notRegisteredError();
@@ -277,7 +283,8 @@ export function executeSend(
 
   const crewDir = crewStore.getCrewDir(cwd);
   const crewConfig = loadCrewConfig(crewDir);
-  const budget = crewConfig.messageBudgets?.[crewConfig.coordination] ?? 10;
+  const isCollaborator = process.env.PI_CREW_COLLABORATOR === "1";
+  const budget = isCollaborator ? Infinity : (crewConfig.messageBudgets?.[crewConfig.coordination] ?? 10);
   if (messagesSentThisSession >= budget) {
     return result(
       `Message budget reached (${messagesSentThisSession}/${budget} for ${crewConfig.coordination} level). Focus on your task.`,
@@ -320,6 +327,93 @@ export function executeSend(
     );
   }
 
+  // Check for single-recipient collaborator send → blocking path
+  if (!broadcast && recipients.length === 1) {
+    const recipient = recipients[0];
+    const collabEntry = findCollaboratorByName(recipient);
+    if (collabEntry) {
+      // Single-recipient collaborator send — block for reply
+      state.blockingCollaborators.add(recipient);
+      try {
+        if (recipient === state.agentName) {
+          return result("Error: cannot send to self.", { mode: "send", error: "send_to_self" });
+        }
+        const validation = store.validateTargetAgent(recipient, dirs);
+        if (!validation.valid) {
+          return result(`Error: collaborator "${recipient}" not found or not active.`,
+            { mode: "send", error: "collaborator_not_active", name: recipient });
+        }
+
+        const sendTimestamp = Date.now();
+        const outbound = store.sendMessageToAgent(state, dirs, recipient, message, replyTo);
+        messagesSentThisSession++;
+        const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
+        logFeedEvent(cwd, state.agentName, "message", recipient, preview);
+
+        // Read stall threshold from config with validation
+        const crewDir = path.join(cwd, ".pi-crew");
+        const crewConfig = loadCrewConfig(crewDir);
+        const rawStallSend = crewConfig.collaboration?.stallThresholdMs;
+        const stallThresholdMs = typeof rawStallSend === "number" && Number.isFinite(rawStallSend)
+          ? Math.max(MIN_STALL_THRESHOLD_MS, rawStallSend)
+          : DEFAULT_STALL_THRESHOLD_MS;
+
+        const pollResult = await pollForCollaboratorMessage({
+          inboxDir: path.join(dirs.inbox, state.agentName),
+          collabName: recipient,
+          correlationId: outbound.id,
+          sendTimestamp,
+          entry: collabEntry,
+          signal,
+          onUpdate,
+          stallThresholdMs,
+          state,
+        });
+
+        const remaining = budget - messagesSentThisSession;
+
+        if (!pollResult.ok) {
+          // Extract error details — TypeScript may lose narrowing after await
+          const errResult = pollResult as { ok: false; error: string; exitCode?: number; logTail?: string; stallDurationMs?: number };
+          const { error: pollError, exitCode, logTail, stallDurationMs } = errResult;
+          // Send-path cancel/stall/crash: do NOT dismiss collaborator
+          if (pollError === "crashed") {
+            return result(
+              `Message sent to ${recipient}, but collaborator crashed (exit code ${exitCode ?? "unknown"}).` +
+              (logTail ? `\n\nLog tail:\n${logTail}` : "") +
+              `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+              { mode: "send", sent: [recipient], failed: [], error: "collaborator_crashed", exitCode, logTail },
+            );
+          }
+          if (pollError === "cancelled") {
+            return result(
+              `Message sent to ${recipient}, but wait for reply was cancelled. Collaborator is still running.` +
+              `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+              { mode: "send", sent: [recipient], failed: [], error: "cancelled" },
+            );
+          }
+          // stalled
+          return result(
+            `Message sent to ${recipient}, but no output for ${Math.round((stallDurationMs ?? 0) / 1000)}s. ` +
+            `Collaborator is still running — retry sending or dismiss and re-spawn. Do NOT proceed without a collaborator.` +
+            `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+            { mode: "send", sent: [recipient], failed: [], error: "stalled", name: recipient, stallDurationMs },
+          );
+        }
+
+        // Success — reply received
+        return result(
+          `Reply from ${recipient}:\n\n${pollResult.message.text}` +
+          `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+          { mode: "send", sent: [recipient], failed: [], reply: pollResult.message.text, to: recipient, delivered: true },
+        );
+      } finally {
+        state.blockingCollaborators.delete(recipient);
+      }
+    }
+  }
+
+  // Non-collaborator / multi-recipient / broadcast: existing synchronous path
   const sent: string[] = [];
   const failed: Array<{ name: string; error: string }> = [];
 
@@ -383,7 +477,7 @@ export function executeSend(
 export function executeReserve(
   state: MessengerState,
   dirs: Dirs,
-  ctx: ExtensionContext,
+  ctx: HandlerContext,
   patterns: string[],
   reason?: string
 ) {
@@ -417,7 +511,7 @@ export function executeReserve(
 export function executeRelease(
   state: MessengerState,
   dirs: Dirs,
-  ctx: ExtensionContext,
+  ctx: HandlerContext,
   release: string[] | true
 ) {
   if (!state.registered) {
@@ -454,7 +548,7 @@ export function executeRename(
   dirs: Dirs,
   ctx: ExtensionContext,
   newName: string,
-  deliverFn: (msg: AgentMailMessage) => void,
+  deliverFn: (msg: AgentMailMessage) => boolean,
   updateStatusFn: (ctx: ExtensionContext) => void
 ) {
   store.stopWatcher(state);

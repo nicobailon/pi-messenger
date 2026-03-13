@@ -107,6 +107,55 @@ function extractArgsPreview(args?: Record<string, unknown>): string {
   return "";
 }
 
+/**
+ * Update progress from a normalized ProgressEvent (runtime-agnostic).
+ * Delegates to the same logic as updateProgress() but accepts the
+ * adapter-neutral ProgressEvent type instead of PiEvent.
+ */
+export function updateProgressFromEvent(
+  progress: AgentProgress,
+  event: import("./adapters/types.js").ProgressEvent,
+  startTime: number,
+): void {
+  progress.durationMs = Date.now() - startTime;
+
+  switch (event.type) {
+    case "tool_call":
+      progress.status = "running";
+      progress.currentTool = event.toolName;
+      progress.currentToolArgs = extractArgsPreview(event.args);
+      progress.currentToolStartMs = Date.now();
+      break;
+
+    case "tool_result":
+      progress.toolCallCount++;
+      if (progress.currentTool) {
+        progress.recentTools.push({
+          tool: progress.currentTool,
+          args: progress.currentToolArgs ?? "",
+          startMs: progress.currentToolStartMs ?? Date.now(),
+          endMs: Date.now(),
+        });
+      }
+      progress.currentTool = undefined;
+      progress.currentToolArgs = undefined;
+      progress.currentToolStartMs = undefined;
+      break;
+
+    case "message":
+      if (event.tokens) {
+        progress.tokens += (event.tokens.input ?? 0) + (event.tokens.output ?? 0);
+      }
+      break;
+
+    case "error":
+      if (event.errorMessage) {
+        progress.error = event.errorMessage;
+      }
+      break;
+  }
+}
+
 export function getFinalOutput(messages: PiEvent[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];

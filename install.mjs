@@ -121,6 +121,36 @@ if (path.resolve(PACKAGE_DIR) === path.resolve(EXTENSION_DIR)) {
 	process.exit(0);
 }
 
+// ─── Collision guard: check settings.json packages ───────────────────────────
+// If pi-messenger is already registered as a package (local path or npm),
+// copying to extensions/ creates a collision — two copies loaded by pi.
+
+const isForce = args.includes("--force") || args.includes("-f");
+const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
+
+if (!isForce && fs.existsSync(settingsPath)) {
+	try {
+		const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+		const packages = settings.packages ?? [];
+		const collision = packages.find((entry) => {
+			if (typeof entry !== "string") return false;
+			// Match by basename: "npm:pi-messenger", "/some/path/pi-messenger", etc.
+			const name = entry.startsWith("npm:") ? entry.slice(4) : path.basename(entry);
+			return name === "pi-messenger";
+		});
+		if (collision) {
+			console.log(`⚠ pi-messenger is already registered in settings.json packages at:
+  ${collision}
+
+Copying to extensions/ would create a collision (two copies loaded by pi).
+Skipping extension install. Use --force to override.`);
+			process.exit(1);
+		}
+	} catch {
+		// settings.json parse error — proceed with install
+	}
+}
+
 const isUpdate = fs.existsSync(EXTENSION_DIR);
 
 // Warn if existing install is a git clone from the old installer
