@@ -25,6 +25,12 @@ import { checkStaleHeartbeats } from "../lobby.js";
 import { recordReviewOutcome, getReviewIntensity } from "../credibility.js";
 import { classifyTask, recordTaskOutcome } from "../specialization.js";
 import { checkWaveConflicts } from "../conflict-detector.js";
+import {
+  buildFileClaims,
+  serializeOverlappingTasks,
+  buildFileReservationContext,
+  type TaskFileClaim,
+} from "../utils/file-overlap.js";
 
 type NamespaceParams = CrewParams & {
   crew?: string;
@@ -596,11 +602,16 @@ async function spawnDualWorkers(
   otherTasks: import("../types.js").Task[],
   modelOverride: string | undefined,
   modelIdentity: string,
+  waveFileClaims?: TaskFileClaim[],
 ): Promise<{ results: AgentResult[]; workerNames: [string, string] }> {
   const workerNameA = `${generateMemorableName()}-A`;
   const workerNameB = `${generateMemorableName()}-B`;
 
-  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, otherTasks);
+  // Part 2: include file reservation context for critical tasks (Bug fix: was missing)
+  const fileReservationCtx = waveFileClaims
+    ? buildFileReservationContext(task.id, waveFileClaims)
+    : undefined;
+  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, otherTasks, fileReservationCtx);
 
   store.updateTask(cwd, task.id, {
     status: "in_progress",
@@ -796,6 +807,52 @@ ${reason}`, {
 
   // Build prompts for remaining tasks — spawnAgents throttles via autonomousState.concurrency
   const remainingTasks = readyTasks.filter(t => !lobbyAssigned.has(t.id));
+
+  // === Part 1: File Overlap Detection — serialize tasks that touch the same files ===
+  // Extract file paths from each task's spec to detect concurrent write conflicts.
+  // Tasks that overlap with a higher-priority (earlier) task are deferred to the
+  // next wave — this prevents the 16-19 attempt loops caused by concurrent writes.
+  //
+  // IMPORTANT: Lobby-assigned tasks are already dispatched — their file claims must
+  // be included FIRST in the combined spec map so remainingTasks that overlap with
+  // lobby tasks are correctly deferred (Bug fix: lobby bypass).
+  const allCandidateTasks = [
+    ...readyTasks.filter(t => lobbyAssigned.has(t.id)), // lobby tasks first (already claimed)
+    ...remainingTasks,
+  ];
+  const allCandidateSpecMap = new Map<string, string>();
+  for (const task of allCandidateTasks) {
+    allCandidateSpecMap.set(task.id, store.getTaskSpec(cwd, task.id) ?? "");
+  }
+
+  // Run serialization over all candidates; lobby tasks (listed first) win file conflicts
+  const { dispatch: dispatchTaskIds, defer: deferredTaskIds, overlapLog } =
+    serializeOverlappingTasks(allCandidateTasks, allCandidateSpecMap);
+
+  if (deferredTaskIds.length > 0) {
+    for (const entry of overlapLog) {
+      // Only log progress for non-lobby deferred tasks (lobby tasks are already in-progress)
+      if (!lobbyAssigned.has(entry.deferredTaskId)) {
+        const deferReason = `File overlap: shares [${entry.conflictingFiles.join(", ")}] with ${entry.conflictsWith.join(", ")} — deferred to next wave to prevent concurrent write conflicts`;
+        store.appendTaskProgress(cwd, entry.deferredTaskId, "system", deferReason);
+        logFeedEvent(cwd, "crew", "message", entry.deferredTaskId,
+          `⏸ Deferred (file overlap): ${entry.conflictingFiles.slice(0, 3).join(", ")}${entry.conflictingFiles.length > 3 ? ` +${entry.conflictingFiles.length - 3} more` : ""}`);
+      }
+    }
+  }
+
+  const dispatchSet = new Set(dispatchTaskIds);
+  // Only filter remainingTasks (not lobby tasks — they're already dispatched)
+  const remainingTasksFiltered = remainingTasks.filter(t => dispatchSet.has(t.id));
+
+  // Build file claims for all dispatched tasks — includes lobby tasks so worker
+  // prompts show complete reservation picture across all concurrent workers (Part 2).
+  const waveFileClaims: TaskFileClaim[] = buildFileClaims(
+    allCandidateTasks.filter(t => dispatchSet.has(t.id)),
+    allCandidateSpecMap,
+  );
+  // =============================================================================
+
   const pendingAssignments: Array<{
     task: typeof remainingTasks[number];
     workerName: string;
@@ -805,7 +862,7 @@ ${reason}`, {
     modelIdentity: string;
   }> = [];
 
-  for (const task of remainingTasks) {
+  for (const task of remainingTasksFiltered) {
     const currentTask = store.getTask(cwd, task.id);
     const namespacedId = namespacedTaskId(task.id, crewNamespace);
     if (!currentTask || currentTask.status !== "todo" || hasActiveWorker(cwd, namespacedId)) continue;
@@ -883,7 +940,7 @@ ${reason}`, {
 
     const others = pendingAssignments.map(a => a.task).filter(o => o.id !== assignedTask.id);
     const promise = spawnDualWorkers(
-      freshTask, prdLabel, cwd, config, dirs, crewNamespace, params, agentName, others, modelOverride, modelIdentity,
+      freshTask, prdLabel, cwd, config, dirs, crewNamespace, params, agentName, others, modelOverride, modelIdentity, waveFileClaims,
     ).then(({ results: dualResults, workerNames }) => {
       const [resultA, resultB] = dualResults;
       const outputA = resultA?.output ?? "";
@@ -929,7 +986,9 @@ ${reason}`, {
 
   const workerTasks = normalAssignments.map(({ task, workerName, agentName, modelOverride }) => {
     const others = pendingAssignments.map(assignment => assignment.task).filter(other => other.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
+    // Part 2: Build file reservation context for this worker's prompt
+    const fileReservationCtx = buildFileReservationContext(task.id, waveFileClaims);
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, fileReservationCtx);
 
     return {
       agent: agentName,
