@@ -765,7 +765,7 @@ ${reason}`, {
 
   // If autonomous mode, set up state and persist (only on first wave or cwd change)
   if (sharedAutonomous && !isAutonomousForCwd(cwd)) {
-    startAutonomous(cwd, autonomousState.concurrency);
+    startAutonomous(cwd, autonomousState.concurrency, crewNamespace);
     appendEntry("crew-state", autonomousState);
   }
 

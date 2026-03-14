@@ -550,20 +550,24 @@ async function runAgent(
 
     // Enforce a maximum worker runtime to prevent hangs
     const workerTimeoutMs = config.work.workerTimeoutMs ?? 900_000; // default 15 minutes
-    workerTimeoutHandle = setTimeout(() => {
-      if (settled) return;
-      const label = task.taskId ? ` (task: ${task.taskId})` : "";
-      process.stderr.write(
-        `[pi-messenger] Worker "${workerName}"${label} exceeded timeout of ${workerTimeoutMs}ms — sending SIGTERM\n`
-      );
-      if (task.taskId) {
-        store.appendTaskProgress(cwd, task.taskId, "system",
-          `Worker killed after timeout (${workerTimeoutMs}ms): ${workerName}`);
-      }
-      if (!proc.killed && proc.exitCode === null) {
-        proc.kill("SIGTERM");
-      }
-    }, workerTimeoutMs);
+    if (!workerTimeoutMs || workerTimeoutMs <= 0) {
+      // Timeout disabled — no timer set
+    } else {
+      workerTimeoutHandle = setTimeout(() => {
+        if (settled) return;
+        const label = task.taskId ? ` (task: ${task.taskId})` : "";
+        process.stderr.write(
+          `[pi-messenger] Worker "${workerName}"${label} exceeded timeout of ${workerTimeoutMs}ms — sending SIGTERM\n`
+        );
+        if (task.taskId) {
+          store.appendTaskProgress(cwd, task.taskId, "system",
+            `Worker killed after timeout (${workerTimeoutMs}ms): ${workerName}`);
+        }
+        if (!proc.killed && proc.exitCode === null) {
+          proc.kill("SIGTERM");
+        }
+      }, workerTimeoutMs);
+    }
 
     proc.on("error", (err) => {
       handleLaunchFailure(err as NodeJS.ErrnoException);

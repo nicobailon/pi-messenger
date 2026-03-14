@@ -21,6 +21,9 @@ export interface ReconcileResult {
   skipped: string[];
 }
 
+/** Per-(cwd, namespace) in-flight deduplication to prevent concurrent reconciliation. */
+const _inFlight = new Map<string, Promise<ReconcileResult>>();
+
 /**
  * Reconcile orphaned tasks.
  *
@@ -38,6 +41,20 @@ export async function reconcileOrphanedTasks(
   cwd: string,
   namespace?: string,
 ): Promise<ReconcileResult> {
+  const key = `${cwd}:${namespace ?? ''}`;
+  const existing = _inFlight.get(key);
+  if (existing) return existing;
+
+  const promise = _reconcileImpl(cwd, namespace);
+  _inFlight.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    _inFlight.delete(key);
+  }
+}
+
+async function _reconcileImpl(cwd: string, namespace?: string): Promise<ReconcileResult> {
   const tasks = store.getTasks(cwd, namespace);
   const leases = readLeases(cwd);
   const reset: string[] = [];

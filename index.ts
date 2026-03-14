@@ -68,7 +68,7 @@ import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
 import { shutdownAllWorkers } from "./crew/agents.js";
 import { shutdownLobbyWorkers } from "./crew/lobby.js";
 import { reconcileOrphanedTasks } from "./crew/reconcile.js";
-import { readLeases, isLeaseStale, isProcessAlive } from "./crew/leases.js";
+import { readLeases, isLeaseStale, isProcessAlive, deleteLease } from "./crew/leases.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -784,35 +784,40 @@ Usage (action-based API - preferred):
 
     // Real-time dead-worker recovery: when a critical alert fires, check if the
     // associated worker lease is stale and, if so, reset the task to "todo".
-    monitorRegistry.healthMonitor.onAlert((alert) => {
-      if (alert.status !== "critical") return;
-      const alertCwd = ctx.cwd ?? process.cwd();
-      // Resolve the taskId associated with this monitor session
-      const session = monitorRegistry?.lifecycle.getStore().get(alert.sessionId);
-      const taskId = session?.metadata?.taskId;
-      if (!taskId) return;
+    monitorRegistry.healthMonitor.onAlert(async (alert) => {
+      try {
+        if (alert.status !== "critical") return;
+        const alertCwd = ctx.cwd ?? process.cwd();
+        // Resolve the taskId associated with this monitor session
+        const session = monitorRegistry?.lifecycle.getStore().get(alert.sessionId);
+        const taskId = session?.metadata?.taskId;
+        if (!taskId) return;
 
-      // Check if the lease is stale or the PID is no longer alive
-      const leases = readLeases(alertCwd);
-      const lease = leases.find(l => l.taskId === taskId);
-      const isDead =
-        !lease ||
-        (lease.pid !== null && !isProcessAlive(lease.pid)) ||
-        isLeaseStale(lease);
+        // Check if the lease is stale or the PID is no longer alive
+        const leases = readLeases(alertCwd);
+        const lease = leases.find(l => l.taskId === taskId);
+        const isDead =
+          !lease ||
+          (lease.pid !== null && !isProcessAlive(lease.pid)) ||
+          isLeaseStale(lease);
 
-      if (isDead) {
-        const task = crewStore.getTask(alertCwd, taskId);
-        if (task && (task.status === "in_progress" || task.status === "starting")) {
-          crewStore.updateTask(alertCwd, taskId, {
-            status: "todo",
-            assigned_to: undefined,
-            started_at: undefined,
-          });
-          console.log(`[crew] health monitor: reset dead worker task ${taskId} (${alert.reason})`);
-          if (ctx.hasUI) {
-            ctx.ui.notify(`Task ${taskId} worker is dead — reset to ready`, "warning");
+        if (isDead) {
+          const task = crewStore.getTask(alertCwd, taskId);
+          if (task && (task.status === "in_progress" || task.status === "starting")) {
+            crewStore.updateTask(alertCwd, taskId, {
+              status: "todo",
+              assigned_to: undefined,
+              started_at: undefined,
+            });
+            deleteLease(alertCwd, taskId);
+            console.log(`[crew] health monitor: reset dead worker task ${taskId} (${alert.reason})`);
+            if (ctx.hasUI) {
+              ctx.ui.notify(`Task ${taskId} worker is dead — reset to ready`, "warning");
+            }
           }
         }
+      } catch (err) {
+        console.error('[crew] alert handler error:', err);
       }
     });
 
@@ -1042,7 +1047,8 @@ Usage (action-based API - preferred):
     
     if (readyTasks.length === 0) {
       // Reconcile orphaned tasks before giving up — a worker may have died mid-flight
-      const reconciled = await reconcileOrphanedTasks(cwd);
+      const ns = autonomousState?.namespace;
+      const reconciled = await reconcileOrphanedTasks(cwd, ns);
       if (reconciled.reset.length > 0) {
         console.log(`[crew] agent_end: reconciler recovered ${reconciled.reset.length} orphaned task(s): ${reconciled.reset.join(", ")}`);
         if (ctx.hasUI) {

@@ -70,5 +70,4 @@ To adjust the timeout, set `workerTimeoutMs` in your crew config:
 }
 ```
 
-Setting `workerTimeoutMs: 0` disables the timeout (not recommended for production
-autonomous runs).
+Setting `workerTimeoutMs` to `0` or omitting it disables the timeout (default: 15 minutes).

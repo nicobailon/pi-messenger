@@ -479,12 +479,14 @@ export class SessionHealthMonitor {
   }
 
   private emitAlert(alert: HealthAlert): void {
-    // Emit to all registered handlers
+    // Emit to all registered handlers (support async handlers)
     for (const handler of this.alertHandlers) {
       try {
-        handler(alert);
+        Promise.resolve(handler(alert)).catch(err =>
+          console.error('[health-monitor] alert handler error:', err)
+        );
       } catch {
-        // Swallow handler errors
+        // Swallow sync throws
       }
     }
 
