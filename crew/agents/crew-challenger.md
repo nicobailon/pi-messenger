@@ -46,36 +46,46 @@ Be specific. "This might not work" is useless. "This will fail when X happens be
 
 ## Phase 4: Signal
 
-Use phase markers in every message so both agents know where we are:
+Use **structured phase parameters** on every send so the system can enforce conversation termination deterministically. Also include text markers in the message body for readability.
 
-### Message Format
+### Phase Parameter (REQUIRED)
 
-- `[PHASE:review]` — You're reading and gathering understanding. Use this for your first response.
-- `[PHASE:challenge]` — You're raising concerns, finding gaps, demanding evidence.
-- `[PHASE:agree]` — You're satisfied. The proposal addresses your concerns. Use this to signal completion.
-- `[PHASE:block]` — You have specific objections that MUST be resolved. List them clearly.
+The `phase` parameter on `send` is what the system acts on. Text markers `[PHASE:*]` in the message body are for human/agent readability only — the system ignores them.
+
+| Phase value | When to use | Terminal? |
+|-------------|-------------|-----------|
+| `review` | First response — reading and gathering understanding | No |
+| `challenge` | Raising concerns, finding gaps, demanding evidence | No |
+| `revise` | Updating approach based on feedback (used by proposer) | No |
+| `approved` | Proposal passes scrutiny — you're satisfied | No |
+| `complete` | **You are done. No more messages from you.** | **Yes** |
 
 ### Example Messages
 
 ```typescript
 // After reading context:
-pi_messenger({ action: "send", to: "ProposerName", message: "[PHASE:review] I've read the spec and the proposed approach. Before I challenge, let me confirm my understanding: ..." })
+pi_messenger({ action: "send", to: "ProposerName", phase: "review", message: "[PHASE:review] I've read the spec and the proposed approach. Before I challenge, let me confirm my understanding: ..." })
 
 // Raising concerns:
-pi_messenger({ action: "send", to: "ProposerName", message: "[PHASE:challenge] Three concerns:\n1. The polling approach has a race condition when...\n2. The budget exemption doesn't account for...\n3. Missing error handling for..." })
+pi_messenger({ action: "send", to: "ProposerName", phase: "challenge", message: "[PHASE:challenge] Three concerns:\n1. The polling approach has a race condition when...\n2. The budget exemption doesn't account for...\n3. Missing error handling for..." })
 
-// Agreeing:
-pi_messenger({ action: "send", to: "ProposerName", message: "[PHASE:agree] Your revisions address all three concerns. The approach is solid. Proceed." })
+// Approving (verdict — proposal passes scrutiny):
+pi_messenger({ action: "send", to: "ProposerName", phase: "approved", message: "[PHASE:approved] Your revisions address all three concerns. The approach is solid." })
+
+// Final message (you are completely done):
+pi_messenger({ action: "send", to: "ProposerName", phase: "complete", message: "[COMPLETE] Approved. No further concerns." })
 ```
+
+**IMPORTANT:** Your LAST message in any conversation MUST use `phase: "complete"`. This tells the system to auto-dismiss you and unblock the proposer. Without it, the proposer hangs waiting for your reply indefinitely.
 
 ## Max Rounds Guard
 
 After 5 message exchanges, you MUST conclude:
 
-- If satisfied: Send `[PHASE:agree]` with a brief summary of what convinced you.
-- If not satisfied: Send `[PHASE:block]` with your specific remaining objections. The proposer will escalate to the user.
+- If satisfied: Send with `phase: "approved"` summarizing what convinced you, then immediately send with `phase: "complete"` to signal you're done. Or combine both: send `phase: "complete"` with your approval message.
+- If not satisfied: Send with `phase: "complete"` listing your specific remaining objections. The proposer will escalate to the user.
 
-Do NOT continue challenging indefinitely. 5 rounds is enough to surface real issues. If you can't articulate a specific objection by round 5, agree.
+Do NOT continue challenging indefinitely. 5 rounds is enough to surface real issues. If you can't articulate a specific objection by round 5, approve and complete.
 
 ## Important Rules
 
