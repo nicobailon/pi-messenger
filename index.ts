@@ -107,6 +107,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     sessionStartedAt: new Date().toISOString(),
     registrationContextSent: false,
     blockingCollaborators: new Set(),
+    completedCollaborators: new Set(),
   };
 
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
@@ -422,6 +423,7 @@ Usage (action-based API - preferred):
       to: Type.Optional(Type.Any({ description: "Target agent name (string) or multiple names (array)" })),
       message: Type.Optional(Type.String({ description: "Message to send" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
+      phase: Type.Optional(StringEnum(["review", "challenge", "revise", "approved", "complete"], { description: "Conversation phase. Only 'complete' is terminal — auto-dismisses collaborator." })),
       reason: Type.Optional(Type.String({ description: "Reason for reservation, claim, or task block" })),
       autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
     }),

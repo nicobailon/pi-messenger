@@ -54,6 +54,11 @@ function createMinimalState(name: string, cwd: string): MessengerState {
     session: { toolCalls: 0, tokens: 0, filesModified: [] },
     activity: { lastActivityAt: new Date().toISOString() },
     customStatus: false,
+    registryFlushTimer: null,
+    sessionStartedAt: new Date().toISOString(),
+    registrationContextSent: false,
+    blockingCollaborators: new Set(),
+    completedCollaborators: new Set(),
   };
 }
 

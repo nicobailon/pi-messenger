@@ -103,7 +103,7 @@ export async function executeCrewAction(
       return handlers.executeSetSpec(state, dirs, ctx, params.spec);
 
     case 'send':
-      return await handlers.executeSend(state, dirs, ctx.cwd ?? process.cwd(), params.to, false, params.message, params.replyTo, signal, onUpdate);
+      return await handlers.executeSend(state, dirs, ctx.cwd ?? process.cwd(), params.to, false, params.message, params.replyTo, params.phase, signal, onUpdate);
 
     case 'broadcast':
       return await handlers.executeSend(state, dirs, ctx.cwd ?? process.cwd(), undefined, true, params.message, params.replyTo);

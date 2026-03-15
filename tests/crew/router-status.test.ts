@@ -30,6 +30,9 @@ function createTestState(agentName: string): MessengerState {
     customStatus: false,
     registryFlushTimer: null,
     sessionStartedAt: new Date().toISOString(),
+    registrationContextSent: false,
+    blockingCollaborators: new Set(),
+    completedCollaborators: new Set(),
   };
 }
 

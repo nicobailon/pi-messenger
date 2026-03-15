@@ -86,7 +86,7 @@ export interface CrewConfig {
    * considered stalled. Different from work.stuckTimeoutMs which controls crew
    * worker idle detection.
    */
-  collaboration: { stallThresholdMs: number };
+  collaboration: { stallThresholdMs: number; pollTimeoutMs: number };
 }
 
 const DEFAULT_CONFIG: CrewConfig = {
@@ -106,7 +106,7 @@ const DEFAULT_CONFIG: CrewConfig = {
   review: { enabled: true, maxIterations: 3 },
   planning: { maxPasses: 1 },
   work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false, shutdownGracePeriodMs: 30000, stuckTimeoutMs: 300000 },
-  collaboration: { stallThresholdMs: 120_000 },
+  collaboration: { stallThresholdMs: 120_000, pollTimeoutMs: 300_000 },
   dependencies: "advisory",
   coordination: "chatty",
   messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },

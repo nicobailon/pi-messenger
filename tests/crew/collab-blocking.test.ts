@@ -91,6 +91,7 @@ function makeMinimalState(overrides: Partial<MessengerState> = {}): MessengerSta
     sessionStartedAt: new Date().toISOString(),
     registrationContextSent: false,
     blockingCollaborators: new Set(),
+    completedCollaborators: new Set(),
     ...overrides,
   };
 }
@@ -512,6 +513,174 @@ describe("pollForCollaboratorMessage", () => {
       expect(result.error).toBe("cancelled");
     }
   });
+
+  // ── peerComplete / peerTerminal (spec 006 — D4 arming) ──────────────
+
+  it("returns peerComplete: true when message has phase:'complete'", async () => {
+    const msg = makeMessage({ phase: "complete" });
+    const logFile = path.join(tmpDir, "peer-complete.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    setTimeout(() => writeMessageFile(inboxDir, msg), 50);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 5000,
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.peerComplete).toBe(true);
+    }
+  });
+
+  it("returns peerComplete: undefined when message has no phase", async () => {
+    const msg = makeMessage();
+    const logFile = path.join(tmpDir, "no-phase.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    setTimeout(() => writeMessageFile(inboxDir, msg), 50);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 5000,
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.peerComplete).toBeUndefined();
+    }
+  });
+
+  it("sets entry.peerTerminal when phase is 'complete'", async () => {
+    const msg = makeMessage({ phase: "complete" });
+    const logFile = path.join(tmpDir, "terminal.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    expect(entry.peerTerminal).toBeUndefined();
+
+    setTimeout(() => writeMessageFile(inboxDir, msg), 50);
+
+    await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 5000,
+      state: makeMinimalState(),
+    });
+
+    expect(entry.peerTerminal).toBe(true);
+  });
+
+  it("does NOT set peerTerminal for non-terminal phase", async () => {
+    const msg = makeMessage({ phase: "approved" });
+    const logFile = path.join(tmpDir, "approved.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    setTimeout(() => writeMessageFile(inboxDir, msg), 50);
+
+    await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 5000,
+      state: makeMinimalState(),
+    });
+
+    expect(entry.peerTerminal).toBeUndefined();
+  });
+
+  // ── D5: Absolute poll timeout (spec 006) ────────────────────────────
+
+  it("pollTimeout fires despite active log growth (D5)", async () => {
+    const logFile = path.join(tmpDir, "timeout-test.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    // Drip log bytes to prevent log-stall from firing
+    const drip = setInterval(() => {
+      try { fs.appendFileSync(logFile, "."); } catch {}
+    }, 50);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 60_000,   // high — should not fire
+      pollTimeoutMs: 500,          // low — should fire quickly
+      state: makeMinimalState(),
+    });
+
+    clearInterval(drip);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("stalled");
+      expect(result.stallType).toBe("timeout");
+      expect(result.stallDurationMs).toBeGreaterThanOrEqual(400);
+    }
+  });
+
+  it("log-stall returns stallType:'log'", async () => {
+    const logFile = path.join(tmpDir, "log-stall.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 300,       // very low — fires fast
+      pollTimeoutMs: 60_000,       // high — should not fire
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("stalled");
+      expect(result.stallType).toBe("log");
+    }
+  });
+
+  it("pollTimeoutMs is configurable (overrides default)", async () => {
+    const logFile = path.join(tmpDir, "config-timeout.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    const drip = setInterval(() => {
+      try { fs.appendFileSync(logFile, "."); } catch {}
+    }, 50);
+
+    const start = Date.now();
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 60_000,
+      pollTimeoutMs: 800,
+      state: makeMinimalState(),
+    });
+    const elapsed = Date.now() - start;
+
+    clearInterval(drip);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.stallType).toBe("timeout");
+    }
+    // Should fire around 800ms, not the default 300_000ms
+    expect(elapsed).toBeLessThan(5000);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -838,6 +1007,164 @@ describe("executeSend handler-level behavior", () => {
     const text = result.content[0].text;
     expect(text).toContain("cancelled");
     expect(result.details.error).toBe("cancelled");
+  });
+
+  // ── D2: phase:"complete" → non-blocking send + dismiss (spec 006) ──
+
+  it("D2: send with phase:'complete' returns immediately without polling", async () => {
+    // Mock findCollaboratorByName to return a live entry
+    vi.resetModules();
+    const mockDismiss = vi.fn().mockResolvedValue(undefined);
+    const mockUnregister = vi.fn();
+    const mockFindCollabD2 = vi.fn().mockReturnValue(makeCollabEntry({ name: "NavAgent" }));
+    const mockPollD2 = vi.fn(); // Should NOT be called
+
+    vi.doMock("../../crew/handlers/collab.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/handlers/collab.js")>();
+      return { ...original, pollForCollaboratorMessage: mockPollD2, gracefulDismiss: mockDismiss };
+    });
+    vi.doMock("../../crew/registry.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/registry.js")>();
+      return { ...original, findCollaboratorByName: mockFindCollabD2, unregisterWorker: mockUnregister };
+    });
+
+    const { executeSend: execSendD2 } = await import("../../handlers.js");
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    const result = await execSendD2(
+      state, dirs, tmpDir, "NavAgent", undefined, "Final message", undefined, "complete",
+    );
+
+    expect(result.content[0].text).toContain("Conversation complete");
+    expect((result.details as any).conversationComplete).toBe(true);
+    expect((result.details as any).dismissed).toBe("NavAgent");
+    expect(mockPollD2).not.toHaveBeenCalled();
+    expect(mockUnregister).toHaveBeenCalled();
+    expect(mockDismiss).toHaveBeenCalled();
+    expect(state.completedCollaborators.has("NavAgent")).toBe(true);
+  });
+
+  // ── D4: peerTerminal → auto-terminate on next send (spec 006) ──
+
+  it("D4: peerTerminal triggers non-blocking send without phase param", async () => {
+    vi.resetModules();
+    const mockDismiss = vi.fn().mockResolvedValue(undefined);
+    const mockUnregister = vi.fn();
+    const peerTerminalEntry = makeCollabEntry({ name: "NavAgent" });
+    peerTerminalEntry.peerTerminal = true;
+    const mockFindCollabD4 = vi.fn().mockReturnValue(peerTerminalEntry);
+    const mockPollD4 = vi.fn();
+
+    vi.doMock("../../crew/handlers/collab.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/handlers/collab.js")>();
+      return { ...original, pollForCollaboratorMessage: mockPollD4, gracefulDismiss: mockDismiss };
+    });
+    vi.doMock("../../crew/registry.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/registry.js")>();
+      return { ...original, findCollaboratorByName: mockFindCollabD4, unregisterWorker: mockUnregister };
+    });
+
+    const { executeSend: execSendD4 } = await import("../../handlers.js");
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    // No phase param — D4 fires from peerTerminal
+    const result = await execSendD4(
+      state, dirs, tmpDir, "NavAgent", undefined, "Any message", undefined, undefined,
+    );
+
+    expect(result.content[0].text).toContain("Conversation complete");
+    expect((result.details as any).conversationComplete).toBe(true);
+    expect(mockPollD4).not.toHaveBeenCalled();
+  });
+
+  // ── D4-after-death: completedCollaborators fallback (spec 006) ──
+
+  it("D4-after-death: completedCollaborators returns conversationComplete", async () => {
+    vi.resetModules();
+    const mockFindCollabDead = vi.fn().mockReturnValue(null); // collaborator is dead
+
+    vi.doMock("../../crew/handlers/collab.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/handlers/collab.js")>();
+      return { ...original };
+    });
+    vi.doMock("../../crew/registry.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/registry.js")>();
+      return { ...original, findCollaboratorByName: mockFindCollabDead };
+    });
+
+    const { executeSend: execSendDead } = await import("../../handlers.js");
+    const state = makeMinimalState();
+    state.completedCollaborators.add("GhostAgent");
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+    // No registry file → validateTargetAgent returns not_found
+
+    const result = await execSendDead(
+      state, dirs, tmpDir, "GhostAgent", undefined, "Hello?", undefined, undefined,
+    );
+
+    expect((result.details as any).conversationComplete).toBe(true);
+  });
+
+  // ── T15: peerComplete on poll success → auto-dismiss (spec 006) ──
+
+  it("peerComplete on poll success auto-dismisses collaborator", async () => {
+    vi.resetModules();
+    const mockDismiss = vi.fn().mockResolvedValue(undefined);
+    const mockUnregister = vi.fn();
+
+    const mockPollComplete = vi.fn().mockResolvedValue({
+      ok: true,
+      message: makeMessage({ text: "All good!", phase: "complete" }),
+      peerComplete: true,
+    });
+    const mockFindCollabComplete = vi.fn().mockReturnValue(makeCollabEntry({ name: "NavAgent" }));
+
+    vi.doMock("../../crew/handlers/collab.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/handlers/collab.js")>();
+      return { ...original, pollForCollaboratorMessage: mockPollComplete, gracefulDismiss: mockDismiss };
+    });
+    vi.doMock("../../crew/registry.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/registry.js")>();
+      return { ...original, findCollaboratorByName: mockFindCollabComplete, unregisterWorker: mockUnregister };
+    });
+
+    const { executeSend: execSendPeer } = await import("../../handlers.js");
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    const result = await execSendPeer(
+      state, dirs, tmpDir, "NavAgent", undefined, "Any message", undefined, undefined,
+    );
+
+    expect(result.content[0].text).toContain("Conversation complete");
+    expect((result.details as any).conversationComplete).toBe(true);
+    expect((result.details as any).dismissed).toBe("NavAgent");
+    expect(mockDismiss).toHaveBeenCalled();
+    expect(mockUnregister).toHaveBeenCalled();
+    expect(state.completedCollaborators.has("NavAgent")).toBe(true);
+  });
+
+  // ── Backward compat: no phase blocks as before (spec 006) ──
+
+  it("backward compat: send without phase still blocks for reply", async () => {
+    const executeSend = await importWithMocks({
+      ok: true,
+      message: makeMessage({ text: "Normal reply" }),
+    });
+
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    const result = await executeSend(
+      state, dirs, tmpDir, "NavAgent", undefined, "Regular message", undefined,
+    );
+
+    // Should use poll path (mockPollFn was called)
+    expect(mockPollFn).toHaveBeenCalled();
+    expect(result.content[0].text).toContain("Normal reply");
+    expect((result.details as any).conversationComplete).toBeUndefined();
   });
 });
 

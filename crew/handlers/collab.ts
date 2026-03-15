@@ -19,7 +19,7 @@ import type { MessengerState, Dirs, AgentMailMessage } from "../../lib.js";
 import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
 import { generateMemorableName } from "../../lib.js";
-import { recordMessageInHistory } from "../../store.js";
+import { recordMessageInHistory, validateTargetAgent } from "../../store.js";
 import { discoverCrewAgents } from "../utils/discover.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../agents.js";
@@ -48,6 +48,8 @@ const PROGRESS_INTERVAL_MS = 30_000;              // 30 seconds
 export const DEFAULT_STALL_THRESHOLD_MS = 120_000;
 /** Minimum allowed stall threshold — prevents instant-stall from bad config. */
 export const MIN_STALL_THRESHOLD_MS = 1_000;
+/** Default absolute poll timeout: 5 minutes wall-clock from poll start. Never resets. */
+export const DEFAULT_POLL_TIMEOUT_MS = 300_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Blocking poll for collaborator messages
@@ -63,12 +65,14 @@ export interface PollOptions {
   onUpdate?: (update: string) => void;
   /** Stall threshold: log must grow within this interval or collaborator is considered stalled. */
   stallThresholdMs?: number;
+  /** Absolute wall-clock timeout from poll start. Never resets. Catches log-drip case. */
+  pollTimeoutMs?: number;
   state: MessengerState;
 }
 
 export type PollResult =
-  | { ok: true; message: AgentMailMessage }
-  | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number };
+  | { ok: true; message: AgentMailMessage; peerComplete?: boolean }
+  | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number; stallType?: "log" | "timeout" };
 
 /**
  * Poll the spawner's inbox for a message from a specific collaborator.
@@ -86,6 +90,7 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
     entry, signal, onUpdate, state,
   } = opts;
   const resolvedStallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
+  const resolvedPollTimeoutMs = opts.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
 
   return new Promise<PollResult>((resolve) => {
     const startTime = Date.now();
@@ -203,7 +208,11 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
               clearInterval(timer);
               try { fs.unlinkSync(filePath); } catch {}
               recordMessageInHistory(state, msg);
-              resolve({ ok: true, message: msg });
+              const peerComplete = msg.phase === "complete";
+              if (peerComplete) {
+                entry.peerTerminal = true;
+              }
+              resolve({ ok: true, message: msg, peerComplete: peerComplete || undefined });
               return;
             }
           }
@@ -234,9 +243,25 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
             error: "stalled",
             logTail: logTail || undefined,
             stallDurationMs,
+            stallType: "log",
           });
           return;
         }
+      }
+
+      // D5: Absolute wall-clock timeout — catches log-drip case
+      // (independent of log-growth stall, never resets)
+      if (now - startTime >= resolvedPollTimeoutMs) {
+        clearInterval(timer);
+        const logTail = readLogTail();
+        resolve({
+          ok: false,
+          error: "stalled",
+          logTail: logTail || undefined,
+          stallDurationMs: now - startTime,
+          stallType: "timeout",
+        });
+        return;
       }
 
       // Emit progress at 30s intervals
@@ -308,8 +333,19 @@ export async function executeSpawn(
     );
   }
 
-  // Generate a unique name
-  const collabName = generateMemorableName();
+  // Generate unique name with collision avoidance against BOTH
+  // in-memory collaborators AND live mesh agents (registry files)
+  let collabName = generateMemorableName();
+  for (let i = 0; i < 5; i++) {
+    const existingCollab = findCollaboratorByName(collabName);
+    const meshValidation = validateTargetAgent(collabName, dirs);
+    // Retry if name collides with a live collaborator OR any live mesh agent
+    if ((!existingCollab || existingCollab.proc.exitCode !== null) && !meshValidation.valid) break;
+    collabName = generateMemorableName();
+  }
+  // Clear any stale terminal state for this name
+  state.completedCollaborators.delete(collabName);
+
   const collabId = randomUUID().slice(0, 8);
 
   // Build args — RPC mode, no -p flag (prompt goes via stdin)
@@ -442,6 +478,10 @@ export async function executeSpawn(
     const stallThresholdMs = typeof rawStall === "number" && Number.isFinite(rawStall)
       ? Math.max(MIN_STALL_THRESHOLD_MS, rawStall)
       : DEFAULT_STALL_THRESHOLD_MS;
+    const rawPollTimeout = config.collaboration?.pollTimeoutMs;
+    const pollTimeoutMs = typeof rawPollTimeout === "number" && Number.isFinite(rawPollTimeout)
+      ? Math.max(MIN_STALL_THRESHOLD_MS, rawPollTimeout)
+      : DEFAULT_POLL_TIMEOUT_MS;
 
     const pollResult = await pollForCollaboratorMessage({
       inboxDir: path.join(dirs.inbox, state.agentName),
@@ -451,6 +491,7 @@ export async function executeSpawn(
       signal,
       onUpdate,
       stallThresholdMs,
+      pollTimeoutMs,
       state,
     });
 
@@ -484,6 +525,22 @@ export async function executeSpawn(
     }
 
     // Success — first message received
+    if (pollResult.ok && pollResult.peerComplete) {
+      // One-shot collaborator — auto-dismiss
+      state.completedCollaborators.add(collabName);
+      unregisterWorker(cwd, taskId);
+      gracefulDismiss(entry).catch(() => {});
+      logFeedEvent(cwd, "crew", "dismiss", collabName);
+
+      return result(
+        `Collaborator "${collabName}" spawned (${agentName}). First message:\n\n` +
+        `${pollResult.message.text}\n\nConversation complete — collaborator dismissed.`,
+        { mode: "spawn", name: collabName, agent: agentName,
+          firstMessage: pollResult.message.text, conversationComplete: true, dismissed: collabName },
+      );
+    }
+
+    // Normal (non-terminal) spawn
     return result(
       `Collaborator "${collabName}" spawned (${agentName}). First message:\n\n` +
       `${pollResult.message.text}\n\n` +
