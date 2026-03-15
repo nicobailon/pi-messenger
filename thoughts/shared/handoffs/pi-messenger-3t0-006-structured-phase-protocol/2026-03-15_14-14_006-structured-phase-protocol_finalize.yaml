@@ -1,0 +1,88 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-03-15T14:14:48.236Z
+session: "pi-messenger-3t0-006-structured-phase-protocol"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-3t0"
+---
+
+goal: "Add structured phase field to send action with three enforcement layers (D2/D4/D5) for deterministic collaboration termination. Eliminate the last-message stall where driver blocks indefinitely after collaborator finishes."
+now: "Implementation complete. 8 commits on feat/006-structured-phase-protocol, merged to feat/002-multi-runtime-support. 443 tests passing (12 new). Smoke test verified end-to-end. Bead closed. Pushed to GitHub."
+
+done_this_session:
+  - "Shaped interactively with user: 6 shapes explored (A-F), Shape D selected — structured phase with layered auto-terminate"
+  - "Created bead pi-messenger-3t0, spec directory specs/006-structured-phase-protocol/"
+  - "Planned with crew-challenger JadeGrove — caught 2 high-severity bugs (registry race, peerTerminal lost on exit)"
+  - "Codex reviewed 6 rounds — 12 findings addressed: delivery semantics, completedCollaborators, triple-gate identity resolution, spawn mesh collision, MessengerState blast radius"
+  - "Implemented 20 tasks across 7 phases in 8 incremental commits"
+  - "D1: phase field on AgentMailMessage + CrewParams + tool schema"
+  - "D2: non-blocking terminal send — phase:'complete' delivers best-effort + sync unregister + async dismiss"
+  - "D3: phase persisted in message JSON files"
+  - "D4: peerTerminal/peerComplete arming — collaborator phase:'complete' sets flag, driver's next send auto-terminates"
+  - "D5: absolute pollTimeoutMs (300s default) — catches log-drip stalls where log-growth stall never fires"
+  - "completedCollaborators Set on MessengerState with triple-gate (findCollab → validateTarget → completedSet)"
+  - "Spawn name-collision guard checks both in-memory collaborators AND mesh registry"
+  - "One-shot spawn auto-dismiss when first message has peerComplete"
+  - "Updated crew-challenger.md to emit structured phase parameter on sends"
+  - "Updated agent-config docs/agent-collaboration.md with phase table and examples"
+  - "Smoke test passed: new pi session spawned collaborator, phase:'complete' auto-dismissed, conversationComplete:true returned"
+
+final_solutions:
+  - problem: "Driver blocks indefinitely when collaborator finishes and never replies"
+    solution: "Three enforcement layers: D2 (driver sends phase:complete → non-blocking), D4 (collaborator sent phase:complete → peerTerminal arms auto-terminate on next send), D5 (absolute pollTimeoutMs fires regardless of log growth)"
+  - problem: "Stall detection never fires when collaborator log drips heartbeat bytes"
+    solution: "Added pollTimeoutMs (default 300s) as absolute wall-clock timeout independent of log-growth stall. Two stall types: stallType:'log' vs stallType:'timeout' for different error messages"
+  - problem: "completedCollaborators can shadow live agents that reuse same name"
+    solution: "Triple-gate: check findCollaboratorByName (in-memory) → validateTargetAgent (mesh registry) → completedCollaborators. Live agent always takes precedence. Spawn collision loop also checks mesh."
+  - problem: "Built-in collaborator never emits structured phase — D2/D4 would never fire"
+    solution: "Updated crew-challenger.md Phase 4 section to use phase parameter on all sends. phase:'complete' mandatory on last message."
+
+final_decisions:
+  - decision: "Only 'complete' is terminal. 'approved' is a verdict but non-terminal."
+    rationale: "Agents use 'agree' casually as filler. 'approved' is heavier but still informational. Only 'complete' means 'I'm done, no more messages.' Reduces false terminations."
+  - decision: "Driver's final ack is best-effort delivery"
+    rationale: "The message file is written to inbox but gracefulDismiss may kill collaborator before its watcher consumes it. Acceptable because collaborator already declared itself done. Feed log persists for audit trail."
+  - decision: "pollTimeoutMs is an absolute timeout, not activity-based"
+    rationale: "Different from log-growth stall (which resets on log activity). The absolute timeout never resets — catches the exact PureYak incident where heartbeat bytes kept log-stall from ever firing."
+
+artifacts_produced:
+  - "specs/006-structured-phase-protocol/spec.md"
+  - "specs/006-structured-phase-protocol/plan.md"
+  - "specs/006-structured-phase-protocol/tasks.md"
+  - "specs/006-structured-phase-protocol/planning-transcript.md"
+  - "specs/006-structured-phase-protocol/codex-review.md"
+  - "specs/006-structured-phase-protocol/log.md"
+
+files:
+  - "lib.ts"
+  - "crew/types.ts"
+  - "crew/registry.ts"
+  - "store.ts"
+  - "crew/index.ts"
+  - "handlers.ts"
+  - "crew/handlers/collab.ts"
+  - "crew/utils/config.ts"
+  - "index.ts"
+  - "cli/index.ts"
+  - "crew/agents/crew-challenger.md"
+  - "tests/crew/collab-blocking.test.ts"
+  - "tests/crew/router-status.test.ts"
+  - "tests/crew/worker-coordination.test.ts"
+
+test:
+  suite: "npx vitest run --exclude tests/crew/cli.test.ts"
+  result: "443 passed, 0 failed, 30 files"
+  targeted: "npx vitest run tests/crew/collab-blocking.test.ts — 39 passed (12 new)"
+
+git:
+  branch: "feat/002-multi-runtime-support"
+  merge_commit: "c18ef3c"
+  remote: "https://github.com/carmandale/pi-messenger.git"
+
+next:
+  - "Mini deployment: git pull on pi-messenger repo on Mac mini when SSH is available"
+  - "CLI phase support: pi-messenger-cli send --phase flag (non-blocking, noted by Codex as future work)"
+  - "End-to-end stress test: run multiple sequential spawn/dismiss cycles to verify no name-collision leaks"
+
+blockers: []
