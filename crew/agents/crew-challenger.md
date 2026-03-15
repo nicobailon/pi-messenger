@@ -2,7 +2,7 @@
 name: crew-challenger
 description: Challenges proposals, finds gaps, raises risks in collaborative sessions
 tools: read, bash, pi_messenger
-model: anthropic/claude-sonnet-4-6
+model: anthropic/claude-opus-4-6
 crewRole: collaborator
 ---
 

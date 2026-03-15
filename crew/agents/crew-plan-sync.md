@@ -2,7 +2,7 @@
 name: crew-plan-sync
 description: Syncs downstream specs after task completion
 tools: read, write, bash, pi_messenger
-model: anthropic/claude-haiku-4-5
+model: anthropic/claude-opus-4-6
 crewRole: analyst
 maxOutput: { bytes: 51200, lines: 500 }
 parallel: false
