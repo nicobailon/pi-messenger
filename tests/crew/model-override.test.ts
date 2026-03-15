@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveModel, pushModelArgs, spawnAgents } from "../../crew/agents.js";
+import { pushModelArgs, spawnAgents } from "../../crew/agents.js";
+import { resolveModel, type ModelResolution } from "../../crew/utils/model.js";
 import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -51,10 +52,10 @@ You are a test worker.
   fs.writeFileSync(filePath, content);
 }
 
-function writeCrewConfig(cwd: string, models: Record<string, string | null>): void {
+function writeCrewConfig(cwd: string, config: Record<string, unknown>): void {
   const configPath = path.join(cwd, ".pi", "messenger", "crew", "config.json");
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify({ models }));
+  fs.writeFileSync(configPath, JSON.stringify(config));
 }
 
 describe("crew/model override", () => {
@@ -66,15 +67,41 @@ describe("crew/model override", () => {
     spawnMock.mockImplementation(() => createMockProcess(0));
   });
 
-  it("resolveModel follows task -> params -> config -> agent priority", () => {
-    expect(resolveModel("task-model", "param-model", "config-model", "agent-model")).toBe("task-model");
-    expect(resolveModel(undefined, "param-model", "config-model", "agent-model")).toBe("param-model");
-    expect(resolveModel(undefined, undefined, "config-model", "agent-model")).toBe("config-model");
-    expect(resolveModel(undefined, undefined, undefined, "agent-model")).toBe("agent-model");
-  });
+  describe("resolveModel (5-arg with ModelResolution)", () => {
+    it("follows task -> param -> role -> default -> agent priority", () => {
+      const r1 = resolveModel("task-m", "param-m", "role-m", "default-m", "agent-m");
+      expect(r1).toEqual({ model: "task-m", source: "task" });
 
-  it("resolveModel returns undefined when all inputs are undefined", () => {
-    expect(resolveModel(undefined, undefined, undefined, undefined)).toBeUndefined();
+      const r2 = resolveModel(undefined, "param-m", "role-m", "default-m", "agent-m");
+      expect(r2).toEqual({ model: "param-m", source: "param" });
+
+      const r3 = resolveModel(undefined, undefined, "role-m", "default-m", "agent-m");
+      expect(r3).toEqual({ model: "role-m", source: "role" });
+
+      const r4 = resolveModel(undefined, undefined, undefined, "default-m", "agent-m");
+      expect(r4).toEqual({ model: "default-m", source: "default" });
+
+      const r5 = resolveModel(undefined, undefined, undefined, undefined, "agent-m");
+      expect(r5).toEqual({ model: "agent-m", source: "agent" });
+    });
+
+    it("returns { model: undefined, source: 'none' } when all inputs are undefined", () => {
+      expect(resolveModel(undefined, undefined, undefined, undefined, undefined))
+        .toEqual({ model: undefined, source: "none" });
+    });
+
+    it("defaultModel fills the gap between role config and agent fallback", () => {
+      // No role config, but defaultModel set — should pick defaultModel
+      const r = resolveModel(undefined, undefined, undefined, "anthropic/claude-opus-4-6", "anthropic/claude-haiku-4-5");
+      expect(r).toEqual({ model: "anthropic/claude-opus-4-6", source: "default" });
+    });
+
+    it("backward compat: modelOverride maps to taskModel position", () => {
+      // Simulates: task.taskModel ?? task.modelOverride as first arg
+      const modelOverride = "override-model";
+      const r = resolveModel(modelOverride, undefined, "role-m", "default-m", "agent-m");
+      expect(r).toEqual({ model: "override-model", source: "task" });
+    });
   });
 
   it("spawnAgents passes resolved model override in spawn args", async () => {
@@ -97,7 +124,7 @@ describe("crew/model override", () => {
 
   it("spawnAgents falls back to agent model when no override is provided", async () => {
     writeWorkerAgent(dirs.cwd, "agent-default-model");
-    writeCrewConfig(dirs.cwd, { worker: null });
+    writeCrewConfig(dirs.cwd, { models: { worker: null } });
 
     await spawnAgents([{
       agent: "crew-worker",
@@ -112,9 +139,49 @@ describe("crew/model override", () => {
     expect(args[modelFlagIndex + 1]).toBe("agent-default-model");
   });
 
+  it("spawnAgents uses defaultModel when no role config exists", async () => {
+    writeWorkerAgent(dirs.cwd, "agent-default-model");
+    writeCrewConfig(dirs.cwd, { defaultModel: "anthropic/claude-opus-4-6" });
+
+    await spawnAgents([{
+      agent: "crew-worker",
+      task: "Implement task",
+      taskId: "task-1",
+    }], dirs.cwd);
+
+    const args = spawnMock.mock.calls[0][1] as string[];
+    // pushModelArgs splits "anthropic/claude-opus-4-6" into --provider + --model
+    const providerIdx = args.indexOf("--provider");
+    const modelIdx = args.indexOf("--model");
+    expect(providerIdx).toBeGreaterThan(-1);
+    expect(args[providerIdx + 1]).toBe("anthropic");
+    expect(modelIdx).toBeGreaterThan(-1);
+    expect(args[modelIdx + 1]).toBe("claude-opus-4-6");
+  });
+
+  it("spawnAgents uses paramModel when passed on AgentTask", async () => {
+    writeWorkerAgent(dirs.cwd, "agent-default-model");
+
+    await spawnAgents([{
+      agent: "crew-worker",
+      task: "Implement task",
+      taskId: "task-1",
+      paramModel: "anthropic/claude-sonnet-4-6",
+    }], dirs.cwd);
+
+    const args = spawnMock.mock.calls[0][1] as string[];
+    // pushModelArgs splits "anthropic/claude-sonnet-4-6" into --provider + --model
+    const providerIdx = args.indexOf("--provider");
+    const modelIdx = args.indexOf("--model");
+    expect(providerIdx).toBeGreaterThan(-1);
+    expect(args[providerIdx + 1]).toBe("anthropic");
+    expect(modelIdx).toBeGreaterThan(-1);
+    expect(args[modelIdx + 1]).toBe("claude-sonnet-4-6");
+  });
+
   it("spawnAgents splits provider/model into --provider and --model flags", async () => {
     writeWorkerAgent(dirs.cwd, "zai/glm-5");
-    writeCrewConfig(dirs.cwd, { worker: null });
+    writeCrewConfig(dirs.cwd, { models: { worker: null } });
 
     await spawnAgents([{
       agent: "crew-worker",

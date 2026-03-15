@@ -148,7 +148,9 @@ export interface AgentTask {
   agent: string;
   task: string;
   taskId?: string;
-  modelOverride?: string;
+  modelOverride?: string;  // DEPRECATED — kept for backward compat, maps to taskModel
+  taskModel?: string;      // Per-task model (highest priority)
+  paramModel?: string;     // Per-invocation model (e.g., params.model from CLI)
   maxOutput?: MaxOutputConfig;
 }
 

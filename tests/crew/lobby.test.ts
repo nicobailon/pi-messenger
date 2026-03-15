@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -419,5 +420,43 @@ describe("lobby workers", () => {
     const promptArg = calls[0][1]![calls[0][1]!.length - 1] as string;
     expect(promptArg).toContain("Standing by for task assignment");
     expect(promptArg).not.toContain("Chat With Your Team");
+  });
+
+  it("uses defaultModel when no role-specific model is configured", async () => {
+    const configMod = await import("../../crew/utils/config.js");
+    vi.mocked(configMod.loadCrewConfig).mockReturnValue({
+      concurrency: { workers: 4, max: 10 },
+      models: {},
+      defaultModel: "anthropic/claude-opus-4-6",
+      artifacts: { enabled: false, cleanupDays: 7 },
+      work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false },
+      coordination: "chatty",
+      messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
+      memory: { enabled: false },
+      planSync: { enabled: false },
+      review: { enabled: true, maxIterations: 3 },
+      planning: { maxPasses: 1 },
+      dependencies: "advisory" as const,
+      truncation: {
+        planners: { bytes: 204800, lines: 5000 },
+        workers: { bytes: 204800, lines: 5000 },
+        reviewers: { bytes: 102400, lines: 2000 },
+        analysts: { bytes: 102400, lines: 2000 },
+      },
+      collaboration: { stallThresholdMs: 120000, pollTimeoutMs: 300000 },
+    });
+
+    const cwd = createTestCwd();
+    lobby.spawnLobbyWorker(cwd);
+
+    const calls = vi.mocked(spawn).mock.calls;
+    const args = calls[0][1] as string[];
+    // defaultModel "anthropic/claude-opus-4-6" is split by pushModelArgs
+    const providerIdx = args.indexOf("--provider");
+    const modelIdx = args.indexOf("--model");
+    expect(providerIdx).toBeGreaterThan(-1);
+    expect(args[providerIdx + 1]).toBe("anthropic");
+    expect(modelIdx).toBeGreaterThan(-1);
+    expect(args[modelIdx + 1]).toBe("claude-opus-4-6");
   });
 });

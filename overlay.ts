@@ -492,7 +492,14 @@ export class MessengerOverlay implements Component, Focusable {
       const discovered = discoverCrewAgents(this.cwd);
       const configLine = discovered.length === 0
         ? "Config: no crew agents discovered"
-        : `Config: ${discovered.map(agent => `${agent.name}${agent.model ? ` (${agent.model})` : ""}`).join(", ")}`;
+        : (() => {
+          const crewConfig = loadCrewConfig(crewStore.getCrewDir(this.cwd));
+          return `Config: ${discovered.map(agent => {
+            const role = agent.crewRole ?? "worker";
+            const effectiveModel = crewConfig.models?.[role] ?? crewConfig.defaultModel ?? agent.model;
+            return `${agent.name}${effectiveModel ? ` (${effectiveModel})` : ""}`;
+          }).join(", ")}`;
+        })();
 
       return [
         `Crew snapshot: no active plan, ${autonomousState.concurrency}w concurrency`,

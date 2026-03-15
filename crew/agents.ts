@@ -181,7 +181,13 @@ async function runAgent(
   return new Promise((resolve) => {
     // Build spawn args via runtime adapter (V1.6 — unified spawn engine)
     const runtime = resolveRuntime(config, role);
-    const model = task.modelOverride ?? config.models?.[role] ?? agentConfig?.model;
+    const { model } = resolveModel(
+      task.taskModel ?? task.modelOverride,
+      task.paramModel,
+      config.models?.[role],
+      config.defaultModel,
+      agentConfig?.model,
+    );
     const thinking = resolveThinking(
       config.thinking?.[role],
       agentConfig?.thinking,

@@ -342,7 +342,8 @@ export function renderEmptyState(theme: Theme, cwd: string, width: number, heigh
     lines.push(theme.fg("dim", "  (none discovered)"));
   } else {
     for (const agent of agents) {
-      const effectiveModel = crewConfig.models?.[agent.crewRole ?? "worker"] ?? agent.model;
+      const role = agent.crewRole ?? "worker";
+      const effectiveModel = crewConfig.models?.[role] ?? crewConfig.defaultModel ?? agent.model;
       const model = effectiveModel ? ` (model: ${effectiveModel})` : "";
       lines.push(`  ${agent.name}${model}`);
     }

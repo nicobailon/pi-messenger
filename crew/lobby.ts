@@ -13,7 +13,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID, createHash } from "node:crypto";
 import { generateMemorableName, type FileReservation } from "../lib.js";
-import { resolveThinking } from "./utils/model.js";
+import { resolveModel, resolveThinking } from "./utils/model.js";
 import { discoverCrewAgents } from "./utils/discover.js";
 import { loadCrewConfig, type CrewConfig } from "./utils/config.js";
 import {
@@ -78,7 +78,13 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   // Build spawn args via runtime adapter (V1.7 — unified spawn engine)
   // runtime already resolved above for the lobby guard
-  const model = config.models?.worker ?? workerConfig.model;
+  const { model } = resolveModel(
+    undefined,
+    undefined,
+    config.models?.worker,
+    config.defaultModel,
+    workerConfig.model,
+  );
   const thinking = resolveThinking(
     config.thinking?.worker,
     workerConfig.thinking,

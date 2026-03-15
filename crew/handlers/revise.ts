@@ -24,6 +24,7 @@ export async function executeRevise(
   taskId: string,
   prompt: string | undefined,
   agentName: string,
+  paramModel?: string,
 ): Promise<ReviseResult> {
   const task = store.getTask(cwd, taskId);
   if (!task) return { success: false, message: `Task ${taskId} not found` };
@@ -50,7 +51,7 @@ export async function executeRevise(
       agent: "crew-planner",
       task: revisePrompt,
       taskId: "__reviser__",
-      modelOverride: config.models?.planner,
+      paramModel,
     }], cwd);
 
     if (agentResult.exitCode !== 0) {
@@ -84,7 +85,7 @@ export async function taskRevise(cwd: string, params: CrewParams, state: Messeng
   const { id, prompt } = params;
   if (!id) return result("Error: id required for task.revise", { mode: "task.revise", error: "missing_id" });
 
-  const r = await executeRevise(cwd, id, prompt ?? undefined, state.agentName || "unknown");
+  const r = await executeRevise(cwd, id, prompt ?? undefined, state.agentName || "unknown", params.model);
   if (!r.success) {
     return result(`Error: ${r.message}`, { mode: "task.revise", error: "revision_failed", id });
   }
@@ -100,6 +101,7 @@ export async function executeReviseTree(
   taskId: string,
   prompt: string | undefined,
   agentName: string,
+  paramModel?: string,
 ): Promise<ReviseResult> {
   const target = store.getTask(cwd, taskId);
   if (!target) return { success: false, message: `Task ${taskId} not found` };
@@ -134,7 +136,7 @@ export async function executeReviseTree(
       agent: "crew-planner",
       task: revisePrompt,
       taskId: "__reviser__",
-      modelOverride: config.models?.planner,
+      paramModel,
     }], cwd);
 
     if (agentResult.exitCode !== 0) {
@@ -227,7 +229,7 @@ export async function taskReviseTree(cwd: string, params: CrewParams, state: Mes
   const { id, prompt } = params;
   if (!id) return result("Error: id required for task.revise-tree", { mode: "task.revise-tree", error: "missing_id" });
 
-  const r = await executeReviseTree(cwd, id, prompt ?? undefined, state.agentName || "unknown");
+  const r = await executeReviseTree(cwd, id, prompt ?? undefined, state.agentName || "unknown", params.model);
   if (!r.success) {
     return result(`Error: ${r.message}`, { mode: "task.revise-tree", error: "revision_failed", id });
   }

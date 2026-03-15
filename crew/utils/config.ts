@@ -32,6 +32,7 @@ export function cycleCoordinationLevel(current: CoordinationLevel): Coordination
 }
 
 export interface CrewConfig {
+  defaultModel?: string;
   models?: {
     planner?: string;
     worker?: string;

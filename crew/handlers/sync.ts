@@ -126,7 +126,7 @@ Follow the output format in your instructions.`;
   const [syncResult] = await spawnAgents([{
     agent: "crew-plan-sync",
     task: prompt,
-    modelOverride: config.models?.analyst,
+    paramModel: params.model,
   }], cwd);
 
   if (syncResult.exitCode !== 0) {

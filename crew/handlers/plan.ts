@@ -334,7 +334,7 @@ export async function execute(
     const [plannerResult] = await spawnAgents([{
       agent: PLANNER_AGENT,
       task: plannerPrompt,
-      modelOverride: config.models?.planner,
+      paramModel: params.model,
       taskId: "__planner__",
     }], cwd);
 
@@ -387,7 +387,7 @@ export async function execute(
     const [reviewResult] = await spawnAgents([{
       agent: "crew-reviewer",
       task: reviewPrompt,
-      modelOverride: config.models?.reviewer,
+      paramModel: params.model,
       taskId: "__reviewer__",
     }], cwd);
 

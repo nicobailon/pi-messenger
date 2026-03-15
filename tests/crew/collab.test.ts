@@ -257,4 +257,18 @@ describe("collaborator config support", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("resolveModel uses defaultModel when no role-specific model configured", async () => {
+    const { resolveModel } = await import("../../crew/utils/model.js");
+    // No role config, but defaultModel set — should pick defaultModel over agent fallback
+    const result = resolveModel(undefined, undefined, undefined, "anthropic/claude-opus-4-6", "anthropic/claude-haiku-4-5");
+    expect(result).toEqual({ model: "anthropic/claude-opus-4-6", source: "default" });
+  });
+
+  it("resolveModel prioritizes params.model over role config for collaborator", async () => {
+    const { resolveModel } = await import("../../crew/utils/model.js");
+    // params.model (param) should override role config
+    const result = resolveModel(undefined, "anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6", undefined, undefined);
+    expect(result).toEqual({ model: "anthropic/claude-sonnet-4-6", source: "param" });
+  });
 });

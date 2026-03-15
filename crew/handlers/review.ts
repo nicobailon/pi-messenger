@@ -11,7 +11,6 @@ import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
 import { spawnAgents } from "../agents.js";
 import { discoverCrewAgents } from "../utils/discover.js";
-import { loadCrewConfig } from "../utils/config.js";
 import { parseVerdict, type ParsedReview } from "../utils/verdict.js";
 import * as store from "../store.js";
 
@@ -21,8 +20,6 @@ export async function execute(
 ) {
   const cwd = ctx.cwd ?? process.cwd();
   const { target, type } = params;
-  const config = loadCrewConfig(store.getCrewDir(cwd));
-  const reviewerModel = config.models?.reviewer;
 
   if (!target) {
     return result("Error: target (task ID) required for review action.\n\nUsage: pi_messenger({ action: \"review\", target: \"task-1\" })", {
@@ -45,9 +42,9 @@ export async function execute(
   const reviewType = type ?? (target.startsWith("task-") ? "impl" : "plan");
 
   if (reviewType === "impl") {
-    return reviewImplementation(cwd, target, reviewerModel);
+    return reviewImplementation(cwd, target, params.model);
   } else {
-    return reviewPlan(cwd, reviewerModel);
+    return reviewPlan(cwd, params.model);
   }
 }
 
@@ -55,7 +52,7 @@ export async function execute(
 // Implementation Review
 // =============================================================================
 
-async function reviewImplementation(cwd: string, taskId: string, modelOverride?: string) {
+async function reviewImplementation(cwd: string, taskId: string, paramModel?: string) {
   const task = store.getTask(cwd, taskId);
   if (!task) {
     return result(`Error: Task ${taskId} not found.`, {
@@ -121,7 +118,7 @@ Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback
   const [reviewResult] = await spawnAgents([{
     agent: "crew-reviewer",
     task: prompt,
-    modelOverride,
+    paramModel,
   }], cwd);
 
   if (reviewResult.exitCode !== 0) {
@@ -174,7 +171,7 @@ ${verdict.verdict === "SHIP" ? "✅ Ready to merge!" : verdict.verdict === "NEED
 // Plan Review
 // =============================================================================
 
-async function reviewPlan(cwd: string, modelOverride?: string) {
+async function reviewPlan(cwd: string, paramModel?: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
     return result("Error: No plan found.", {
@@ -229,7 +226,7 @@ Output your verdict as SHIP (plan is solid), NEEDS_WORK (minor adjustments), or 
   const [reviewResult] = await spawnAgents([{
     agent: "crew-reviewer",
     task: prompt,
-    modelOverride,
+    paramModel,
   }], cwd);
 
   if (reviewResult.exitCode !== 0) {

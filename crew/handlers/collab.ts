@@ -23,6 +23,7 @@ import { recordMessageInHistory, validateTargetAgent } from "../../store.js";
 import { discoverCrewAgents } from "../utils/discover.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../agents.js";
+import { resolveModel } from "../utils/model.js";
 import {
   registerWorker,
   unregisterWorker,
@@ -351,9 +352,13 @@ export async function executeSpawn(
   // Build args — RPC mode, no -p flag (prompt goes via stdin)
   const args = ["--mode", "rpc", "--no-session"];
 
-  const model = params.model
-    ?? config.models?.collaborator
-    ?? agentConfig.model;
+  const { model } = resolveModel(
+    undefined,
+    params.model,
+    config.models?.collaborator,
+    config.defaultModel,
+    agentConfig.model,
+  );
   if (model) pushModelArgs(args, model);
 
   const thinking = resolveThinking(

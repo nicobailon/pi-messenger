@@ -217,7 +217,8 @@ export async function executeCrew(
       for (const a of agents) {
         const role = a.crewRole ?? "other";
         if (!byRole[role]) byRole[role] = [];
-        byRole[role].push(`${a.name} (${a.model ?? "default"})`);
+        const effectiveModel = config.models?.[role] ?? config.defaultModel ?? a.model ?? "default";
+        byRole[role].push(`${a.name} (${effectiveModel})`);
       }
 
       let text = "# Crew Agents\n";
@@ -227,7 +228,10 @@ export async function executeCrew(
 
       return result(text, {
         mode: "crew.agents",
-        agents: agents.map(a => ({ name: a.name, role: a.crewRole, model: a.model }))
+        agents: agents.map(a => {
+          const role = a.crewRole ?? "other";
+          return { name: a.name, role: a.crewRole, model: config.models?.[role] ?? config.defaultModel ?? a.model };
+        })
       });
     }
 

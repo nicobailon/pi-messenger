@@ -9,7 +9,7 @@ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { Dirs, FileReservation } from "../../lib.js";
 import type { CrewParams, AppendEntryFn } from "../types.js";
 import { result } from "../utils/result.js";
-import { resolveModel, spawnAgents } from "../agents.js";
+import { spawnAgents } from "../agents.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { discoverCrewAgents, discoverCrewSkills } from "../utils/discover.js";
 import { buildWorkerPrompt } from "../prompt.js";
@@ -147,11 +147,6 @@ export async function execute(
   // Build prompts for remaining tasks — spawnAgents throttles via autonomousState.concurrency
   const remainingTasks = readyTasks.filter(t => !lobbyAssigned.has(t.id));
   const workerTasks = remainingTasks.map(task => {
-    const taskModel = resolveModel(
-      task.model,
-      params.model,
-      config.models?.worker,
-    );
     // Set in_progress BEFORE building prompt (match lobby path above).
     // Without this, task.done fails because it requires in_progress status.
     store.updateTask(cwd, task.id, {
@@ -170,7 +165,8 @@ export async function execute(
       agent: "crew-worker",
       task: prompt,
       taskId: task.id,
-      modelOverride: taskModel,
+      taskModel: task.model,
+      paramModel: params.model,
     };
   });
 

@@ -33,11 +33,22 @@ export function modelHasThinkingSuffix(model: string | undefined): boolean {
   return THINKING_LEVELS.has(model.substring(colonIdx + 1));
 }
 
+export interface ModelResolution {
+  model: string | undefined;
+  source: "task" | "param" | "role" | "default" | "agent" | "none";
+}
+
 export function resolveModel(
   taskModel?: string,
   paramModel?: string,
-  configModel?: string,
+  roleModel?: string,
+  defaultModel?: string,
   agentModel?: string,
-): string | undefined {
-  return taskModel ?? paramModel ?? configModel ?? agentModel;
+): ModelResolution {
+  if (taskModel) return { model: taskModel, source: "task" };
+  if (paramModel) return { model: paramModel, source: "param" };
+  if (roleModel) return { model: roleModel, source: "role" };
+  if (defaultModel) return { model: defaultModel, source: "default" };
+  if (agentModel) return { model: agentModel, source: "agent" };
+  return { model: undefined, source: "none" };
 }
