@@ -554,12 +554,14 @@ describe("executeSend broadcast filtering", () => {
       "OakBear",
       "Team-wide update",
       undefined,
+      undefined,
     );
     expect(storeModule.sendMessageToAgent).toHaveBeenCalledWith(
       state,
       messageDirs,
       "PineFox",
       "Team-wide update",
+      undefined,
       undefined,
     );
   });
@@ -582,6 +584,7 @@ describe("executeSend broadcast filtering", () => {
       messageDirs,
       "OakBear",
       "Need your input",
+      undefined,
       undefined,
     );
     // Non-collaborator send: no reply field (immediate return, no blocking)

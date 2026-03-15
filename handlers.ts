@@ -267,6 +267,7 @@ export async function executeSend(
   broadcast: boolean | undefined,
   message?: string,
   replyTo?: string,
+  phase?: string,
   signal?: AbortSignal,
   onUpdate?: (update: string) => void,
 ) {
@@ -345,7 +346,7 @@ export async function executeSend(
         }
 
         const sendTimestamp = Date.now();
-        const outbound = store.sendMessageToAgent(state, dirs, recipient, message, replyTo);
+        const outbound = store.sendMessageToAgent(state, dirs, recipient, message, replyTo, phase);
         messagesSentThisSession++;
         const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
         logFeedEvent(cwd, state.agentName, "message", recipient, preview);
@@ -437,7 +438,7 @@ export async function executeSend(
     }
 
     try {
-      store.sendMessageToAgent(state, dirs, recipient, message, replyTo);
+      store.sendMessageToAgent(state, dirs, recipient, message, replyTo, phase);
       sent.push(recipient);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "write failed";
