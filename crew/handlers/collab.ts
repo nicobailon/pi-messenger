@@ -67,8 +67,8 @@ export interface PollOptions {
 }
 
 export type PollResult =
-  | { ok: true; message: AgentMailMessage }
-  | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number };
+  | { ok: true; message: AgentMailMessage; peerComplete?: boolean }
+  | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number; stallType?: "log" | "timeout" };
 
 /**
  * Poll the spawner's inbox for a message from a specific collaborator.
@@ -203,7 +203,11 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
               clearInterval(timer);
               try { fs.unlinkSync(filePath); } catch {}
               recordMessageInHistory(state, msg);
-              resolve({ ok: true, message: msg });
+              const peerComplete = msg.phase === "complete";
+              if (peerComplete) {
+                entry.peerTerminal = true;
+              }
+              resolve({ ok: true, message: msg, peerComplete: peerComplete || undefined });
               return;
             }
           }

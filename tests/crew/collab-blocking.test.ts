@@ -513,6 +513,92 @@ describe("pollForCollaboratorMessage", () => {
       expect(result.error).toBe("cancelled");
     }
   });
+
+  // ── peerComplete / peerTerminal (spec 006 — D4 arming) ──────────────
+
+  it("returns peerComplete: true when message has phase:'complete'", async () => {
+    const msg = makeMessage({ phase: "complete" });
+    const logFile = path.join(tmpDir, "peer-complete.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    setTimeout(() => writeMessageFile(inboxDir, msg), 50);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 5000,
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.peerComplete).toBe(true);
+    }
+  });
+
+  it("returns peerComplete: undefined when message has no phase", async () => {
+    const msg = makeMessage();
+    const logFile = path.join(tmpDir, "no-phase.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    setTimeout(() => writeMessageFile(inboxDir, msg), 50);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 5000,
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.peerComplete).toBeUndefined();
+    }
+  });
+
+  it("sets entry.peerTerminal when phase is 'complete'", async () => {
+    const msg = makeMessage({ phase: "complete" });
+    const logFile = path.join(tmpDir, "terminal.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    expect(entry.peerTerminal).toBeUndefined();
+
+    setTimeout(() => writeMessageFile(inboxDir, msg), 50);
+
+    await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 5000,
+      state: makeMinimalState(),
+    });
+
+    expect(entry.peerTerminal).toBe(true);
+  });
+
+  it("does NOT set peerTerminal for non-terminal phase", async () => {
+    const msg = makeMessage({ phase: "approved" });
+    const logFile = path.join(tmpDir, "approved.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    setTimeout(() => writeMessageFile(inboxDir, msg), 50);
+
+    await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 5000,
+      state: makeMinimalState(),
+    });
+
+    expect(entry.peerTerminal).toBeUndefined();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
