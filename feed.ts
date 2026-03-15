@@ -33,7 +33,21 @@ export type FeedEventType =
   | "plan.done"
   | "plan.cancel"
   | "plan.failed"
-  | "stuck";
+  | "stuck"
+  | "agent.health"
+  | "task.progress"
+  | "task.heartbeat"
+  | "suggestion.new"
+  | "suggestion.approved"
+  | "suggestion.rejected"
+  | "reaction";
+
+export interface MessageContent {
+  type: 'text' | 'code' | 'diff' | 'file' | 'table';
+  content: string;
+  lang?: string;   // For code blocks
+  path?: string;   // For file references
+}
 
 export interface FeedEvent {
   ts: string;
@@ -41,6 +55,13 @@ export interface FeedEvent {
   type: FeedEventType;
   target?: string;
   preview?: string;
+  // New fields (optional, backward-compatible)
+  threadId?: string;           // Thread grouping: defaults to target taskId
+  content?: MessageContent[];  // Rich content blocks
+  reactionTo?: string;         // Target event ts for reactions
+  emoji?: string;              // Reaction emoji
+  severity?: 'info' | 'warn' | 'error' | 'critical';
+  metadata?: Record<string, unknown>;
 }
 
 function feedPath(cwd: string): string {
@@ -63,14 +84,24 @@ function sanitizeAgentName(value: string): string {
 }
 
 export function sanitizeFeedEvent(event: FeedEvent): FeedEvent {
-  return {
+  const sanitized: FeedEvent = {
     ts: event.ts,
     type: event.type,
     agent: sanitizeAgentName(event.agent),
     target: sanitizeInlineText(event.target),
     preview: sanitizeInlineText(event.preview),
   };
+  // Pass through new optional fields
+  if (event.threadId !== undefined) sanitized.threadId = sanitizeInlineText(event.threadId);
+  if (event.content !== undefined) sanitized.content = event.content;
+  if (event.reactionTo !== undefined) sanitized.reactionTo = event.reactionTo;
+  if (event.emoji !== undefined) sanitized.emoji = event.emoji;
+  if (event.severity !== undefined) sanitized.severity = event.severity;
+  if (event.metadata !== undefined) sanitized.metadata = event.metadata;
+  return sanitized;
 }
+
+const TASK_ID_PATTERN = /^task-\d+$/;
 
 export function appendFeedEvent(cwd: string, event: FeedEvent): void {
   const p = feedPath(cwd);
@@ -78,6 +109,10 @@ export function appendFeedEvent(cwd: string, event: FeedEvent): void {
     const feedDir = path.dirname(p);
     if (!fs.existsSync(feedDir)) {
       fs.mkdirSync(feedDir, { recursive: true });
+    }
+    // Auto-assign threadId from target when it looks like a task ID
+    if (!event.threadId && event.target && TASK_ID_PATTERN.test(event.target)) {
+      event = { ...event, threadId: event.target };
     }
     const sanitized = sanitizeFeedEvent(event);
     fs.appendFileSync(p, JSON.stringify(sanitized) + "\n");
@@ -198,6 +233,13 @@ export function formatFeedLine(event: FeedEvent): string {
     case "plan.cancel": line += " planning cancelled"; break;
     case "plan.failed": line += withPreview(" planning failed"); break;
     case "stuck": line += " appears stuck"; break;
+    case "agent.health": line += ` ❤️ health: ${preview}`; break;
+    case "task.progress": line += ` 📊 progress: ${preview}`; break;
+    case "task.heartbeat": line += ` 💓 heartbeat: ${preview}`; break;
+    case "suggestion.new": line += ` 💡 suggestion: ${preview}`; break;
+    case "suggestion.approved": line += ` ✅ approved: ${preview}`; break;
+    case "suggestion.rejected": line += ` ❌ rejected: ${preview}`; break;
+    case "reaction": line += ` ${sanitized.emoji ?? '👍'} reacted to ${target}`; break;
     default: line += ` ${sanitized.type}`; break;
   }
   return line;
@@ -221,4 +263,31 @@ export function logFeedEvent(
     target,
     preview,
   });
+}
+
+export function searchFeed(cwd: string, query: string, options?: { since?: number, limit?: number }): FeedEvent[] {
+  const events = readFeedEvents(cwd, 1000);
+  const regex = new RegExp(query, 'i');
+  let filtered = events.filter(e =>
+    regex.test(e.preview ?? '') ||
+    regex.test(e.target ?? '') ||
+    regex.test(e.agent) ||
+    regex.test(e.type)
+  );
+  if (options?.since) {
+    const sinceTs = Date.now() - options.since;
+    filtered = filtered.filter(e => new Date(e.ts).getTime() >= sinceTs);
+  }
+  return filtered.slice(-(options?.limit ?? 20));
+}
+
+export function readFeedByThread(cwd: string, limit: number = 50): Map<string, FeedEvent[]> {
+  const events = readFeedEvents(cwd, limit);
+  const threads = new Map<string, FeedEvent[]>();
+  for (const event of events) {
+    const tid = event.threadId ?? '__global';
+    if (!threads.has(tid)) threads.set(tid, []);
+    threads.get(tid)!.push(event);
+  }
+  return threads;
 }

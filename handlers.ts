@@ -27,6 +27,7 @@ import * as crewStore from "./crew/store.js";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.js";
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
+import { startHealthBus, stopHealthBus } from './crew/health-bus.js';
 
 let messagesSentThisSession = 0;
 
@@ -88,6 +89,7 @@ export function executeJoin(
   updateStatusFn(ctx);
   pruneFeed(cwd, feedRetention ?? 50);
   logFeedEvent(cwd, state.agentName, "join");
+  startHealthBus(cwd);
 
   let specWarning = "";
   if (specPath) {

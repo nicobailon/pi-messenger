@@ -3,7 +3,7 @@ import { matchesKey, type TUI } from "@mariozechner/pi-tui";
 import type { AgentMailMessage, Dirs, MessengerState } from "./lib.js";
 import { MAX_CHAT_HISTORY } from "./lib.js";
 import { sendMessageToAgent, getActiveAgents } from "./store.js";
-import { logFeedEvent } from "./feed.js";
+import { logFeedEvent, appendFeedEvent, type FeedEvent } from "./feed.js";
 import * as crewStore from "./crew/store.js";
 import { executeTaskAction as runTaskAction } from "./crew/task-actions.js";
 import type { Task } from "./crew/types.js";
@@ -16,6 +16,21 @@ interface ConfirmAction {
   taskId: string;
   label: string;
 }
+
+export interface ChannelFilter {
+  name: string;
+  filter: (event: FeedEvent) => boolean;
+}
+
+export const BUILT_IN_CHANNELS: ChannelFilter[] = [
+  { name: '#all', filter: () => true },
+  { name: '#escalations', filter: e => e.severity === 'warn' || e.severity === 'error' || e.severity === 'critical' || (e.type as string) === 'stuck' || e.type === 'task.block' },
+  { name: '#progress', filter: e => e.type === 'task.progress' || e.type === 'task.done' || e.type === 'task.heartbeat' },
+  { name: '#messages', filter: e => e.type === 'message' },
+  { name: '#health', filter: e => (e.type as string) === 'agent.health' },
+];
+
+
 
 export interface CrewViewState {
   scrollOffset: number;
@@ -30,11 +45,14 @@ export interface CrewViewState {
   reviseScope: "single" | "tree";
   revisePromptInput: string;
   lastSeenEventTs: string | null;
-  notification: { message: string; expiresAt: number } | null;
+  notification: { message: string; expiresAt: number; severity?: 'critical' | 'warn' | 'info' } | null;
   notificationTimer: ReturnType<typeof setTimeout> | null;
   feedFocus: boolean;
   mentionCandidates: string[];
   mentionIndex: number;
+  activeChannel: string;
+  lastNotifications: Map<string, number>;
+  emojiPickerMode: boolean;
 }
 
 export function createCrewViewState(): CrewViewState {
@@ -56,6 +74,9 @@ export function createCrewViewState(): CrewViewState {
     feedFocus: false,
     mentionCandidates: [],
     mentionIndex: -1,
+    activeChannel: '#all',
+    lastNotifications: new Map(),
+    emojiPickerMode: false,
   };
 }
 
@@ -92,13 +113,15 @@ function executeTaskAction(
   return { success: result.success, message: result.message };
 }
 
-export function setNotification(viewState: CrewViewState, tui: TUI, success: boolean, message: string): void {
+export function setNotification(viewState: CrewViewState, tui: TUI, success: boolean, message: string, severity?: 'critical' | 'warn' | 'info'): void {
   if (viewState.notificationTimer) clearTimeout(viewState.notificationTimer);
-  viewState.notification = { message: `${success ? "✓" : "✗"} ${message}`, expiresAt: Date.now() + 2000 };
+  const displayMs = severity === 'critical' ? 5000 : 2000;
+  const marker = severity === 'critical' ? '🔴' : severity === 'warn' ? '⚠ ' : (success ? "✓" : "✗");
+  viewState.notification = { message: `${marker} ${message}`, expiresAt: Date.now() + displayMs, severity };
   viewState.notificationTimer = setTimeout(() => {
     viewState.notificationTimer = null;
     tui.requestRender();
-  }, 2000);
+  }, displayMs);
 }
 
 function addToChatHistory(state: MessengerState, recipient: string, message: AgentMailMessage): void {
@@ -445,6 +468,51 @@ export function handleMessageInput(
     viewState.mentionIndex = -1;
     tui.requestRender();
   }
+}
+
+
+export function cycleActiveChannel(viewState: CrewViewState): void {
+  const currentIndex = BUILT_IN_CHANNELS.findIndex(c => c.name === viewState.activeChannel);
+  const nextIndex = (currentIndex + 1) % BUILT_IN_CHANNELS.length;
+  viewState.activeChannel = BUILT_IN_CHANNELS[nextIndex].name;
+}
+
+export function handleEmojiPicker(
+  data: string,
+  viewState: CrewViewState,
+  cwd: string,
+  allEvents: FeedEvent[],
+  tui: TUI,
+): boolean {
+  if (!viewState.emojiPickerMode) return false;
+
+  const emojiMap: Record<string, string> = { '1': '✅', '2': '❌', '3': '🔄', '4': '👀' };
+
+  if (matchesKey(data, 'escape')) {
+    viewState.emojiPickerMode = false;
+    tui.requestRender();
+    return true;
+  }
+
+  const emoji = emojiMap[data];
+  if (emoji && allEvents.length > 0) {
+    const selectedEvent = allEvents[allEvents.length - 1];
+    appendFeedEvent(cwd, {
+      ts: new Date().toISOString(),
+      agent: 'human',
+      type: 'reaction' as any,
+      reactionTo: selectedEvent.ts,
+      emoji,
+      target: selectedEvent.target,
+      preview: `${emoji} on ${(selectedEvent.preview ?? 'event').slice(0, 40)}`,
+    } as any);
+    viewState.emojiPickerMode = false;
+    setNotification(viewState, tui, true, `Reacted ${emoji}`);
+    tui.requestRender();
+    return true;
+  }
+
+  return false;
 }
 
 export function handleCrewKeyBinding(

@@ -37,6 +37,8 @@ import {
   handleRevisePromptInput,
   handleCrewKeyBinding,
   setNotification,
+  cycleActiveChannel,
+  handleEmojiPicker,
   type CrewViewState,
 } from "./overlay-actions.js";
 import { getLiveWorkers, hasLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
@@ -306,6 +308,25 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (matchesKey(data, "f")) {
       this.crewViewState.feedFocus = !this.crewViewState.feedFocus;
+      this.tui.requestRender();
+      return;
+    }
+
+    if (matchesKey(data, "tab")) {
+      cycleActiveChannel(this.crewViewState);
+      this.tui.requestRender();
+      return;
+    }
+
+    // Emoji picker for feed reactions
+    const allEventsCurrent = readFeedEvents(this.cwd, 20);
+    if (this.crewViewState.emojiPickerMode) {
+      handleEmojiPicker(data, this.crewViewState, this.cwd, allEventsCurrent, this.tui);
+      return;
+    }
+
+    if (matchesKey(data, "e")) {
+      this.crewViewState.emojiPickerMode = true;
       this.tui.requestRender();
       return;
     }
@@ -646,7 +667,7 @@ export class MessengerOverlay implements Component, Focusable {
       }
 
       const displayEvents = allEvents.slice(-feedHeight);
-      let feedLines = renderFeedSection(this.theme, displayEvents, sectionW, prevTs);
+      let feedLines = renderFeedSection(this.theme, displayEvents, sectionW, prevTs, this.crewViewState, allEvents);
       if (feedLines.length > feedHeight) feedLines = feedLines.slice(-feedHeight);
 
       while (workerLines.length > 0 && workersHeight() + mainHeight + (feedLines.length > 0 ? feedLines.length + 1 : 0) + agentsHeight > contentHeight) {
@@ -714,6 +735,14 @@ export class MessengerOverlay implements Component, Focusable {
     const newEvents = events.filter(e => e.ts > prevTs);
     if (newEvents.length === 0) return;
 
+    // Terminal bell for critical escalation events
+    for (const event of newEvents) {
+      if (event.severity === 'critical' || (event.type as string) === 'stuck') {
+        process.stdout.write('\x07'); // Terminal bell
+        break; // Only ring once per render cycle
+      }
+    }
+
     const significant = newEvents.filter(e => MessengerOverlay.SIGNIFICANT_EVENTS.has(e.type));
     if (significant.length === 0) return;
 
@@ -742,7 +771,14 @@ export class MessengerOverlay implements Component, Focusable {
         `${last.agent} ${last.type}${target}`;
     }
 
-    setNotification(this.crewViewState, this.tui, true, message);
+    // Notification dedup: skip if same agent+type+target notified within 5 minutes
+    const dedupKey = `${last.agent}:${last.type}:${last.target ?? ''}`;
+    const lastNotifTime = this.crewViewState.lastNotifications.get(dedupKey) ?? 0;
+    if (Date.now() - lastNotifTime < 300_000) return;
+    this.crewViewState.lastNotifications.set(dedupKey, Date.now());
+
+    const isCritical = last.severity === 'critical' || last.type === 'task.block';
+    setNotification(this.crewViewState, this.tui, true, message, isCritical ? 'critical' : undefined);
   }
 
   private checkCompletion(tasks: Task[], planning: boolean): void {

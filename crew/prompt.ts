@@ -110,12 +110,28 @@ ${truncatedSpec}
     prompt += coordInstructions;
   }
 
+  prompt += buildHeartbeatInstructions();
+
   const skillsSection = buildSkillsSection(skills, task.skills);
   if (skillsSection) {
     prompt += skillsSection;
   }
 
   return prompt;
+}
+
+
+function buildHeartbeatInstructions(): string {
+  return `
+## Heartbeat Protocol (MANDATORY)
+After every tool_call completion, report progress:
+\`\`\`
+pi_messenger({ action: "task.heartbeat", id: "<your-task-id>", percentage: <0-100>, detail: "<what you just did>", phase: "<current phase>" })
+\`\`\`
+- Use \`task.progress\` for major milestones: \`pi_messenger({ action: "task.progress", id: "<task-id>", percentage: 75, detail: "Tests passing, wiring agent" })\`
+- Without heartbeats, you become invisible to the health monitor and may be terminated as stale.
+- Minimum: heartbeat every 3 tool calls.
+`;
 }
 
 function buildSkillsSection(

@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { homedir } from "node:os";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import {
@@ -32,7 +33,7 @@ import { discoverCrewAgents } from "./crew/utils/discover.js";
 import { loadConfig } from "./config.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
 import { getLobbyWorkerCount } from "./crew/lobby.js";
-import type { CrewViewState } from "./overlay-actions.js";
+import { BUILT_IN_CHANNELS, type CrewViewState } from "./overlay-actions.js";
 
 const STATUS_ICONS: Record<string, string> = { done: "✓", in_progress: "●", todo: "○", blocked: "✗" };
 
@@ -92,6 +93,16 @@ function idleLabel(timestamp: string | undefined): string {
   return `idle ${formatDuration(ageMs)}`;
 }
 
+
+function getLifecyclePhase(): string | null {
+  try {
+    const statePath = path.join(homedir(), '.pi', 'agent', 'governance', 'state.json');
+    if (!fs.existsSync(statePath)) return null;
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    return state.lifecycleState ?? null;
+  } catch { return null; }
+}
+
 export function renderStatusBar(theme: Theme, cwd: string, width: number): string {
   const plan = crewStore.getPlan(cwd);
   const autonomousActive = isAutonomousForCwd(cwd);
@@ -110,12 +121,14 @@ export function renderStatusBar(theme: Theme, cwd: string, width: number): strin
 
   if (!plan) {
     const liveCount = getLiveWorkers(cwd).size;
-    return truncateToWidth(`No active plan │ ⚙ ${liveCount}/${autonomousState.concurrency} workers`, width);
+    const phase = getLifecyclePhase();
+    return truncateToWidth(`No active plan │ ⚙ ${liveCount}/${autonomousState.concurrency} workers │ PHASE: ${phase ?? 'UNKNOWN'}`, width);
   }
 
   const ready = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
   const progress = `${plan.completed_count}/${plan.task_count}`;
   const planLabel = crewStore.getPlanLabel(plan, 40);
+  const lifecyclePhase = getLifecyclePhase();
   let base = `📋 ${planLabel}: ${progress}`;
   if (ready.length > 0) {
     const readyLabel = crewConfig.dependencies === "advisory" ? "available" : "ready";
@@ -125,6 +138,7 @@ export function renderStatusBar(theme: Theme, cwd: string, width: number): strin
   base += ` │ ⚙ ${liveCount}/${autonomousState.concurrency} workers`;
   const coordLevel = crewConfig.coordination;
   base += ` │ ${crewConfig.dependencies} │ ${coordLevel}`;
+  base += ` │ PHASE: ${lifecyclePhase ?? 'UNKNOWN'}`;
 
   if (!autonomousActive) {
     return truncateToWidth(base, width);
@@ -218,17 +232,48 @@ export function renderTaskSummary(theme: Theme, cwd: string, width: number, heig
 
 const DIM_EVENTS = new Set(["join", "leave", "reserve", "release", "plan.pass.start", "plan.pass.done", "plan.review.start", "plan.review.done"]);
 
-export function renderFeedSection(theme: Theme, events: FeedEvent[], width: number, lastSeenTs: string | null): string[] {
+export function renderFeedSection(theme: Theme, events: FeedEvent[], width: number, lastSeenTs: string | null, viewState?: CrewViewState, allEvents?: FeedEvent[]): string[] {
   if (events.length === 0) return [];
   const lines: string[] = [];
-  let lastWasMessage = false;
 
-  for (const event of events) {
+  // Channel filtering
+  const channelName = viewState?.activeChannel ?? '#all';
+  let filteredEvents = events;
+  if (channelName !== '#all') {
+    const channel = BUILT_IN_CHANNELS.find(c => c.name === channelName);
+    if (channel) filteredEvents = events.filter(channel.filter);
+  }
+
+  // Channel header — only when filtering to a specific channel (not #all)
+  if (channelName !== '#all') {
+    lines.push(theme.fg("dim", `Feed [${channelName}]`));
+  }
+
+  if (filteredEvents.length === 0) {
+    lines.push(theme.fg("dim", "  (no events)"));
+    return lines;
+  }
+
+  // Separate threaded vs global events
+  const threadMap = new Map<string, FeedEvent[]>();
+  const globalEvents: FeedEvent[] = [];
+  for (const event of filteredEvents) {
+    const tid = event.threadId;
+    if (tid) {
+      if (!threadMap.has(tid)) threadMap.set(tid, []);
+      threadMap.get(tid)!.push(event);
+    } else {
+      globalEvents.push(event);
+    }
+  }
+
+  let lastWasMessage = false;
+  for (const event of globalEvents) {
     const sanitized = sanitizeFeedEvent(event);
     const isNew = lastSeenTs === null || sanitized.ts > lastSeenTs;
     const isMessage = sanitized.type === "message";
 
-    if (lines.length > 0 && isMessage !== lastWasMessage) {
+    if (lines.length > 1 && isMessage !== lastWasMessage) {
       lines.push(theme.fg("dim", "  ·"));
     }
 
@@ -239,8 +284,36 @@ export function renderFeedSection(theme: Theme, events: FeedEvent[], width: numb
       const dimmed = DIM_EVENTS.has(sanitized.type) || !isNew;
       lines.push(truncateToWidth(dimmed ? theme.fg("dim", formatted) : formatted, width));
     }
+
+    // Aggregate reactions for this event
+    if (allEvents) {
+      const reactions = allEvents.filter(e => e.reactionTo === event.ts && e.emoji);
+      if (reactions.length > 0) {
+        const emojiCounts = new Map<string, number>();
+        for (const r of reactions) {
+          const em = r.emoji!;
+          emojiCounts.set(em, (emojiCounts.get(em) ?? 0) + 1);
+        }
+        const reactionLine = Array.from(emojiCounts.entries()).map(([em, c]) => `${em} ${c}`).join('  ');
+        lines.push(theme.fg("dim", `  ${reactionLine}`));
+      }
+    }
+
     lastWasMessage = isMessage;
   }
+
+  // Render threaded event groups (collapsed — show header + last event)
+  for (const [threadId, threadEvents] of threadMap) {
+    const count = threadEvents.length;
+    lines.push(theme.fg("dim", `[➤ ${threadId} (${count})]`));
+    const lastEvent = threadEvents[threadEvents.length - 1];
+    const sanitized = sanitizeFeedEvent(lastEvent);
+    const isNew = lastSeenTs === null || sanitized.ts > lastSeenTs;
+    const formatted = sharedFormatFeedLine(sanitized);
+    const dimmed = DIM_EVENTS.has(sanitized.type) || !isNew;
+    lines.push(truncateToWidth("  " + (dimmed ? theme.fg("dim", formatted) : formatted), width));
+  }
+
   return lines;
 }
 
@@ -439,9 +512,20 @@ export function renderLegend(
     return truncateToWidth(theme.fg("accent", appendUniversalHints(text)), width);
   }
 
+  if (viewState.emojiPickerMode) {
+    return truncateToWidth(theme.fg("accent", appendUniversalHints("React: [1] ✅  [2] ❌  [3] 🔄  [4] 👀  [Esc] Cancel")), width);
+  }
+
   if (viewState.notification) {
     if (Date.now() < viewState.notification.expiresAt) {
-      return truncateToWidth(appendUniversalHints(viewState.notification.message), width);
+      const msg = viewState.notification.message;
+      const sev = viewState.notification.severity;
+      const styled = sev === 'critical'
+        ? theme.fg("error", msg)
+        : sev === 'warn'
+          ? theme.fg("warning", msg)
+          : msg;
+      return truncateToWidth(appendUniversalHints(styled), width);
     }
     viewState.notification = null;
   }
