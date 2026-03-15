@@ -91,6 +91,7 @@ function makeMinimalState(overrides: Partial<MessengerState> = {}): MessengerSta
     sessionStartedAt: new Date().toISOString(),
     registrationContextSent: false,
     blockingCollaborators: new Set(),
+    completedCollaborators: new Set(),
     ...overrides,
   };
 }

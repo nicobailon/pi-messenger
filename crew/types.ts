@@ -119,6 +119,7 @@ export interface CrewParams {
   to?: string | string[];
   message?: string;
   replyTo?: string;
+  phase?: string;   // conversation phase for send action
   paths?: string[];
   reason?: string;
   name?: string;

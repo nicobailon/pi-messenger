@@ -35,6 +35,7 @@ export interface CollaboratorEntry extends BaseWorkerEntry {
   startedAt: number;
   promptTmpDir: string | null;
   logFile: string | null;
+  peerTerminal?: boolean;  // set when collaborator sends phase:"complete"
 }
 
 export type WorkerEntry = RegularWorker | LobbyWorkerEntry | CollaboratorEntry;

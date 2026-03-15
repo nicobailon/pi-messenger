@@ -64,6 +64,7 @@ export interface AgentMailMessage {
   text: string;
   timestamp: string;
   replyTo: string | null;
+  phase?: string;  // "review" | "challenge" | "revise" | "approved" | "complete"
 }
 
 export interface ReservationConflict {
@@ -99,6 +100,7 @@ export interface MessengerState {
   sessionStartedAt: string;
   registrationContextSent: boolean;
   blockingCollaborators: Set<string>;
+  completedCollaborators: Set<string>;
 }
 
 export interface Dirs {

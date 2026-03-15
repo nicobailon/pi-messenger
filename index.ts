@@ -107,6 +107,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     sessionStartedAt: new Date().toISOString(),
     registrationContextSent: false,
     blockingCollaborators: new Set(),
+    completedCollaborators: new Set(),
   };
 
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
