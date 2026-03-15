@@ -124,7 +124,7 @@ describe("crew/model override", () => {
 
   it("spawnAgents falls back to agent model when no override is provided", async () => {
     writeWorkerAgent(dirs.cwd, "agent-default-model");
-    writeCrewConfig(dirs.cwd, { models: { worker: null } });
+    writeCrewConfig(dirs.cwd, { defaultModel: null, models: { worker: null } });
 
     await spawnAgents([{
       agent: "crew-worker",
@@ -181,7 +181,7 @@ describe("crew/model override", () => {
 
   it("spawnAgents splits provider/model into --provider and --model flags", async () => {
     writeWorkerAgent(dirs.cwd, "zai/glm-5");
-    writeCrewConfig(dirs.cwd, { models: { worker: null } });
+    writeCrewConfig(dirs.cwd, { defaultModel: null, models: { worker: null } });
 
     await spawnAgents([{
       agent: "crew-worker",
