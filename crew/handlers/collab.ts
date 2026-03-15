@@ -19,7 +19,7 @@ import type { MessengerState, Dirs, AgentMailMessage } from "../../lib.js";
 import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
 import { generateMemorableName } from "../../lib.js";
-import { recordMessageInHistory } from "../../store.js";
+import { recordMessageInHistory, validateTargetAgent } from "../../store.js";
 import { discoverCrewAgents } from "../utils/discover.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../agents.js";
@@ -333,8 +333,19 @@ export async function executeSpawn(
     );
   }
 
-  // Generate a unique name
-  const collabName = generateMemorableName();
+  // Generate unique name with collision avoidance against BOTH
+  // in-memory collaborators AND live mesh agents (registry files)
+  let collabName = generateMemorableName();
+  for (let i = 0; i < 5; i++) {
+    const existingCollab = findCollaboratorByName(collabName);
+    const meshValidation = validateTargetAgent(collabName, dirs);
+    // Retry if name collides with a live collaborator OR any live mesh agent
+    if ((!existingCollab || existingCollab.proc.exitCode !== null) && !meshValidation.valid) break;
+    collabName = generateMemorableName();
+  }
+  // Clear any stale terminal state for this name
+  state.completedCollaborators.delete(collabName);
+
   const collabId = randomUUID().slice(0, 8);
 
   // Build args — RPC mode, no -p flag (prompt goes via stdin)
@@ -514,6 +525,22 @@ export async function executeSpawn(
     }
 
     // Success — first message received
+    if (pollResult.ok && pollResult.peerComplete) {
+      // One-shot collaborator — auto-dismiss
+      state.completedCollaborators.add(collabName);
+      unregisterWorker(cwd, taskId);
+      gracefulDismiss(entry).catch(() => {});
+      logFeedEvent(cwd, "crew", "dismiss", collabName);
+
+      return result(
+        `Collaborator "${collabName}" spawned (${agentName}). First message:\n\n` +
+        `${pollResult.message.text}\n\nConversation complete — collaborator dismissed.`,
+        { mode: "spawn", name: collabName, agent: agentName,
+          firstMessage: pollResult.message.text, conversationComplete: true, dismissed: collabName },
+      );
+    }
+
+    // Normal (non-terminal) spawn
     return result(
       `Collaborator "${collabName}" spawned (${agentName}). First message:\n\n` +
       `${pollResult.message.text}\n\n` +
