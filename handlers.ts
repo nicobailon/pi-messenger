@@ -29,7 +29,7 @@ import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } 
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
 import { findCollaboratorByName } from "./crew/registry.js";
-import { pollForCollaboratorMessage, DEFAULT_STALL_THRESHOLD_MS, MIN_STALL_THRESHOLD_MS } from "./crew/handlers/collab.js";
+import { pollForCollaboratorMessage, DEFAULT_STALL_THRESHOLD_MS, MIN_STALL_THRESHOLD_MS, DEFAULT_POLL_TIMEOUT_MS } from "./crew/handlers/collab.js";
 import * as path from "node:path";
 
 let messagesSentThisSession = 0;
@@ -358,6 +358,10 @@ export async function executeSend(
         const stallThresholdMs = typeof rawStallSend === "number" && Number.isFinite(rawStallSend)
           ? Math.max(MIN_STALL_THRESHOLD_MS, rawStallSend)
           : DEFAULT_STALL_THRESHOLD_MS;
+        const rawPollTimeout = crewConfig.collaboration?.pollTimeoutMs;
+        const pollTimeoutMs = typeof rawPollTimeout === "number" && Number.isFinite(rawPollTimeout)
+          ? Math.max(MIN_STALL_THRESHOLD_MS, rawPollTimeout)
+          : DEFAULT_POLL_TIMEOUT_MS;
 
         const pollResult = await pollForCollaboratorMessage({
           inboxDir: path.join(dirs.inbox, state.agentName),
@@ -368,6 +372,7 @@ export async function executeSend(
           signal,
           onUpdate,
           stallThresholdMs,
+          pollTimeoutMs,
           state,
         });
 

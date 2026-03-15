@@ -48,6 +48,8 @@ const PROGRESS_INTERVAL_MS = 30_000;              // 30 seconds
 export const DEFAULT_STALL_THRESHOLD_MS = 120_000;
 /** Minimum allowed stall threshold — prevents instant-stall from bad config. */
 export const MIN_STALL_THRESHOLD_MS = 1_000;
+/** Default absolute poll timeout: 5 minutes wall-clock from poll start. Never resets. */
+export const DEFAULT_POLL_TIMEOUT_MS = 300_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Blocking poll for collaborator messages
@@ -63,6 +65,8 @@ export interface PollOptions {
   onUpdate?: (update: string) => void;
   /** Stall threshold: log must grow within this interval or collaborator is considered stalled. */
   stallThresholdMs?: number;
+  /** Absolute wall-clock timeout from poll start. Never resets. Catches log-drip case. */
+  pollTimeoutMs?: number;
   state: MessengerState;
 }
 
@@ -86,6 +90,7 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
     entry, signal, onUpdate, state,
   } = opts;
   const resolvedStallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
+  const resolvedPollTimeoutMs = opts.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
 
   return new Promise<PollResult>((resolve) => {
     const startTime = Date.now();
@@ -238,9 +243,25 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
             error: "stalled",
             logTail: logTail || undefined,
             stallDurationMs,
+            stallType: "log",
           });
           return;
         }
+      }
+
+      // D5: Absolute wall-clock timeout — catches log-drip case
+      // (independent of log-growth stall, never resets)
+      if (now - startTime >= resolvedPollTimeoutMs) {
+        clearInterval(timer);
+        const logTail = readLogTail();
+        resolve({
+          ok: false,
+          error: "stalled",
+          logTail: logTail || undefined,
+          stallDurationMs: now - startTime,
+          stallType: "timeout",
+        });
+        return;
       }
 
       // Emit progress at 30s intervals
@@ -446,6 +467,10 @@ export async function executeSpawn(
     const stallThresholdMs = typeof rawStall === "number" && Number.isFinite(rawStall)
       ? Math.max(MIN_STALL_THRESHOLD_MS, rawStall)
       : DEFAULT_STALL_THRESHOLD_MS;
+    const rawPollTimeout = config.collaboration?.pollTimeoutMs;
+    const pollTimeoutMs = typeof rawPollTimeout === "number" && Number.isFinite(rawPollTimeout)
+      ? Math.max(MIN_STALL_THRESHOLD_MS, rawPollTimeout)
+      : DEFAULT_POLL_TIMEOUT_MS;
 
     const pollResult = await pollForCollaboratorMessage({
       inboxDir: path.join(dirs.inbox, state.agentName),
@@ -455,6 +480,7 @@ export async function executeSpawn(
       signal,
       onUpdate,
       stallThresholdMs,
+      pollTimeoutMs,
       state,
     });
 

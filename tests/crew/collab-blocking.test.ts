@@ -599,6 +599,88 @@ describe("pollForCollaboratorMessage", () => {
 
     expect(entry.peerTerminal).toBeUndefined();
   });
+
+  // ── D5: Absolute poll timeout (spec 006) ────────────────────────────
+
+  it("pollTimeout fires despite active log growth (D5)", async () => {
+    const logFile = path.join(tmpDir, "timeout-test.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    // Drip log bytes to prevent log-stall from firing
+    const drip = setInterval(() => {
+      try { fs.appendFileSync(logFile, "."); } catch {}
+    }, 50);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 60_000,   // high — should not fire
+      pollTimeoutMs: 500,          // low — should fire quickly
+      state: makeMinimalState(),
+    });
+
+    clearInterval(drip);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("stalled");
+      expect(result.stallType).toBe("timeout");
+      expect(result.stallDurationMs).toBeGreaterThanOrEqual(400);
+    }
+  });
+
+  it("log-stall returns stallType:'log'", async () => {
+    const logFile = path.join(tmpDir, "log-stall.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 300,       // very low — fires fast
+      pollTimeoutMs: 60_000,       // high — should not fire
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("stalled");
+      expect(result.stallType).toBe("log");
+    }
+  });
+
+  it("pollTimeoutMs is configurable (overrides default)", async () => {
+    const logFile = path.join(tmpDir, "config-timeout.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    const drip = setInterval(() => {
+      try { fs.appendFileSync(logFile, "."); } catch {}
+    }, 50);
+
+    const start = Date.now();
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 60_000,
+      pollTimeoutMs: 800,
+      state: makeMinimalState(),
+    });
+    const elapsed = Date.now() - start;
+
+    clearInterval(drip);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.stallType).toBe("timeout");
+    }
+    // Should fire around 800ms, not the default 300_000ms
+    expect(elapsed).toBeLessThan(5000);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
