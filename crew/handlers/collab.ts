@@ -352,14 +352,18 @@ export async function executeSpawn(
   // Build args — RPC mode, no -p flag (prompt goes via stdin)
   const args = ["--mode", "rpc", "--no-session"];
 
-  const { model } = resolveModel(
+  const resolved = resolveModel(
     undefined,
     params.model,
     config.models?.collaborator,
     config.defaultModel,
     agentConfig.model,
   );
-  if (model) pushModelArgs(args, model);
+  const model = resolved.model;
+  if (model) {
+    pushModelArgs(args, model);
+    logFeedEvent(cwd, collabName, "model.resolved", model, `source: ${resolved.source}`);
+  }
 
   const thinking = resolveThinking(
     config.thinking?.collaborator,

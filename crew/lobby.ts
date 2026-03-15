@@ -78,13 +78,17 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   // Build spawn args via runtime adapter (V1.7 — unified spawn engine)
   // runtime already resolved above for the lobby guard
-  const { model } = resolveModel(
+  const resolved = resolveModel(
     undefined,
     undefined,
     config.models?.worker,
     config.defaultModel,
     workerConfig.model,
   );
+  const model = resolved.model;
+  if (model) {
+    logFeedEvent(cwd, name, "model.resolved", model, `source: ${resolved.source}`);
+  }
   const thinking = resolveThinking(
     config.thinking?.worker,
     workerConfig.thinking,

@@ -133,4 +133,21 @@ describe("feed", () => {
     const freshCwd = createTempCrewDirs().cwd;
     expect(readFeedEvents(freshCwd, 20)).toEqual([]);
   });
+
+  it("formats model.resolved feed event", () => {
+    const line = formatFeedLine({
+      ts: new Date("2026-03-15T10:00:00.000Z").toISOString(),
+      agent: "TestWorker1",
+      type: "model.resolved",
+      target: "anthropic/claude-opus-4-6",
+      preview: "source: default",
+    });
+    expect(line).toContain("TestWorker1");
+    expect(line).toContain("model resolved: anthropic/claude-opus-4-6");
+    expect(line).toContain("source: default");
+  });
+
+  it("classifies model.resolved as a crew event", () => {
+    expect(isCrewEvent("model.resolved")).toBe(true);
+  });
 });
