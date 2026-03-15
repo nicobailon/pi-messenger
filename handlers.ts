@@ -28,8 +28,8 @@ import * as crewStore from "./crew/store.js";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.js";
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
-import { findCollaboratorByName } from "./crew/registry.js";
-import { pollForCollaboratorMessage, DEFAULT_STALL_THRESHOLD_MS, MIN_STALL_THRESHOLD_MS, DEFAULT_POLL_TIMEOUT_MS } from "./crew/handlers/collab.js";
+import { findCollaboratorByName, unregisterWorker } from "./crew/registry.js";
+import { pollForCollaboratorMessage, gracefulDismiss, DEFAULT_STALL_THRESHOLD_MS, MIN_STALL_THRESHOLD_MS, DEFAULT_POLL_TIMEOUT_MS } from "./crew/handlers/collab.js";
 import * as path from "node:path";
 
 let messagesSentThisSession = 0;
@@ -328,12 +328,46 @@ export async function executeSend(
     );
   }
 
-  // Check for single-recipient collaborator send → blocking path
+  // Check for single-recipient collaborator send → blocking/terminal path
   if (!broadcast && recipients.length === 1) {
     const recipient = recipients[0];
     const collabEntry = findCollaboratorByName(recipient);
+
+    // Triple-gate dead-collaborator fallback (D4-after-death):
+    // Only if no live collaborator AND no live mesh agent AND name is in completed set
+    if (!collabEntry) {
+      const meshValidation = store.validateTargetAgent(recipient, dirs);
+      if (!meshValidation.valid && state.completedCollaborators.has(recipient)) {
+        return result(
+          `Conversation with ${recipient} already complete — collaborator has been dismissed.`,
+          { mode: "send", sent: [], failed: [], conversationComplete: true },
+        );
+      }
+      // If meshValidation.valid, fall through to non-collaborator send path below
+    }
+
     if (collabEntry) {
-      // Single-recipient collaborator send — block for reply
+      // D2 + D4: terminal send — deliver and dismiss without blocking
+      if (phase === "complete" || collabEntry.peerTerminal) {
+        const preview = message!.length > 200 ? message!.slice(0, 197) + "..." : message!;
+        store.sendMessageToAgent(state, dirs, recipient, message!, replyTo, phase);
+        messagesSentThisSession++;
+        logFeedEvent(cwd, state.agentName, "message", recipient, preview);
+
+        state.completedCollaborators.add(recipient);
+        unregisterWorker(collabEntry.cwd, collabEntry.taskId);
+        gracefulDismiss(collabEntry).catch(() => {});
+        logFeedEvent(cwd, "crew", "dismiss", recipient);
+
+        const remaining = budget - messagesSentThisSession;
+        return result(
+          `Message delivered to ${recipient} (best-effort). Conversation complete — collaborator dismissed.` +
+          `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+          { mode: "send", sent: [recipient], failed: [], conversationComplete: true, dismissed: recipient },
+        );
+      }
+
+      // Normal collaborator send — block for reply
       state.blockingCollaborators.add(recipient);
       try {
         if (recipient === state.agentName) {
@@ -408,6 +442,21 @@ export async function executeSend(
         }
 
         // Success — reply received
+        if (pollResult.ok && pollResult.peerComplete) {
+          // Collaborator signaled completion — auto-dismiss
+          state.completedCollaborators.add(recipient);
+          unregisterWorker(collabEntry.cwd, collabEntry.taskId);
+          gracefulDismiss(collabEntry).catch(() => {});
+          logFeedEvent(cwd, "crew", "dismiss", recipient);
+
+          return result(
+            `Reply from ${recipient}:\n\n${pollResult.message.text}\n\nConversation complete — collaborator dismissed.` +
+            `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+            { mode: "send", sent: [recipient], failed: [], reply: pollResult.message.text,
+              conversationComplete: true, dismissed: recipient },
+          );
+        }
+
         return result(
           `Reply from ${recipient}:\n\n${pollResult.message.text}` +
           `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
