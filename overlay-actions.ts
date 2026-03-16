@@ -51,8 +51,10 @@ export interface CrewViewState {
   mentionCandidates: string[];
   mentionIndex: number;
   activeChannel: string;
+  threadedView: boolean;
   lastNotifications: Map<string, number>;
   emojiPickerMode: boolean;
+  emojiPickerTs: string | null; // ts of the event being reacted to
 }
 
 export function createCrewViewState(): CrewViewState {
@@ -75,8 +77,10 @@ export function createCrewViewState(): CrewViewState {
     mentionCandidates: [],
     mentionIndex: -1,
     activeChannel: '#all',
+    threadedView: false,
     lastNotifications: new Map(),
     emojiPickerMode: false,
+    emojiPickerTs: null,
   };
 }
 
@@ -477,6 +481,11 @@ export function cycleActiveChannel(viewState: CrewViewState): void {
   viewState.activeChannel = BUILT_IN_CHANNELS[nextIndex].name;
 }
 
+export function openEmojiPicker(viewState: CrewViewState, eventTs: string): void {
+  viewState.emojiPickerMode = true;
+  viewState.emojiPickerTs = eventTs;
+}
+
 export function handleEmojiPicker(
   data: string,
   viewState: CrewViewState,
@@ -490,24 +499,63 @@ export function handleEmojiPicker(
 
   if (matchesKey(data, 'escape')) {
     viewState.emojiPickerMode = false;
+    viewState.emojiPickerTs = null;
     tui.requestRender();
     return true;
   }
 
   const emoji = emojiMap[data];
-  if (emoji && allEvents.length > 0) {
-    const selectedEvent = allEvents[allEvents.length - 1];
-    appendFeedEvent(cwd, {
-      ts: new Date().toISOString(),
-      agent: 'human',
-      type: 'reaction' as any,
-      reactionTo: selectedEvent.ts,
-      emoji,
-      target: selectedEvent.target,
-      preview: `${emoji} on ${(selectedEvent.preview ?? 'event').slice(0, 40)}`,
-    } as any);
+  if (emoji) {
+    // Locate the target event by ts (falls back to last event if not set)
+    const targetTs = viewState.emojiPickerTs;
+    const selectedEvent = targetTs
+      ? allEvents.find(e => e.ts === targetTs)
+      : allEvents[allEvents.length - 1];
+
+    if (selectedEvent) {
+      // Write reaction FeedEvent
+      appendFeedEvent(cwd, {
+        ts: new Date().toISOString(),
+        agent: 'human',
+        type: 'reaction' as any,
+        reactionTo: selectedEvent.ts,
+        emoji,
+        target: selectedEvent.target,
+        preview: `${emoji} on ${(selectedEvent.preview ?? 'event').slice(0, 40)}`,
+      } as any);
+
+      // Handle actionable outcomes based on emoji + event type
+      if (emoji === '✅' && selectedEvent.type === 'suggestion.new') {
+        appendFeedEvent(cwd, {
+          ts: new Date().toISOString(),
+          agent: 'human',
+          type: 'suggestion.approved' as any,
+          target: selectedEvent.target,
+          preview: `Approved: ${(selectedEvent.preview ?? '').slice(0, 60)}`,
+        } as any);
+      } else if (emoji === '❌' && selectedEvent.type === 'suggestion.new') {
+        appendFeedEvent(cwd, {
+          ts: new Date().toISOString(),
+          agent: 'human',
+          type: 'suggestion.rejected' as any,
+          target: selectedEvent.target,
+          preview: `Rejected: ${(selectedEvent.preview ?? '').slice(0, 60)}`,
+        } as any);
+      } else if (emoji === '🔄' && (selectedEvent.type === 'stuck' || selectedEvent.type === 'task.block')) {
+        appendFeedEvent(cwd, {
+          ts: new Date().toISOString(),
+          agent: 'human',
+          type: 'task.reset' as any,
+          target: selectedEvent.target,
+          preview: `Reset triggered for ${selectedEvent.target ?? 'task'}`,
+        } as any);
+      }
+
+      setNotification(viewState, tui, true, `Reacted ${emoji}`);
+    }
+
     viewState.emojiPickerMode = false;
-    setNotification(viewState, tui, true, `Reacted ${emoji}`);
+    viewState.emojiPickerTs = null;
     tui.requestRender();
     return true;
   }

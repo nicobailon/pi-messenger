@@ -233,9 +233,17 @@ export function formatFeedLine(event: FeedEvent): string {
     case "plan.cancel": line += " planning cancelled"; break;
     case "plan.failed": line += withPreview(" planning failed"); break;
     case "stuck": line += " appears stuck"; break;
-    case "agent.health": line += ` ❤️ health: ${preview}`; break;
-    case "task.progress": line += ` 📊 progress: ${preview}`; break;
-    case "task.heartbeat": line += ` 💓 heartbeat: ${preview}`; break;
+    case "agent.health": {
+      const sevBadge = sanitized.severity ? `[${sanitized.severity}] ` : '';
+      line += preview ? ` ${sevBadge}${preview}` : sevBadge ? ` ${sevBadge.trim()}` : ` health event`;
+      break;
+    }
+    case "task.heartbeat":
+      line += preview ? ` 💓 ${preview}` : ` heartbeating`;
+      break;
+    case "task.progress":
+      line += preview ? ` 📊 ${preview}` : ` progress update`;
+      break;
     case "suggestion.new": line += ` 💡 suggestion: ${preview}`; break;
     case "suggestion.approved": line += ` ✅ approved: ${preview}`; break;
     case "suggestion.rejected": line += ` ❌ rejected: ${preview}`; break;

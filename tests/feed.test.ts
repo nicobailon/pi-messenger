@@ -392,8 +392,40 @@ describe("new event types", () => {
       target: "task-1",
       preview: "degraded Φ=3.2 — no recent heartbeat",
     });
-    expect(line).toContain("❤️ health:");
     expect(line).toContain("degraded Φ=3.2");
+    expect(line).toContain("Helios");
+  });
+
+  it("should include severity badge in agent.health when severity is set", () => {
+    const line = formatFeedLine({
+      ts: new Date().toISOString(),
+      agent: "Watchdog",
+      type: "agent.health",
+      severity: "critical",
+      preview: "no heartbeat for 300s",
+    });
+    expect(line).toContain("[critical]");
+    expect(line).toContain("no heartbeat for 300s");
+  });
+
+  it("should show severity badge even when preview is absent in agent.health", () => {
+    const line = formatFeedLine({
+      ts: new Date().toISOString(),
+      agent: "Watchdog",
+      type: "agent.health",
+      severity: "warn",
+    });
+    expect(line).toContain("[warn]");
+    expect(line).not.toContain("health event");
+  });
+
+  it("should fall back to health event when no severity and no preview in agent.health", () => {
+    const line = formatFeedLine({
+      ts: new Date().toISOString(),
+      agent: "Watchdog",
+      type: "agent.health",
+    });
+    expect(line).toContain("health event");
   });
 
   it("should format task.progress events correctly", () => {
@@ -404,8 +436,16 @@ describe("new event types", () => {
       target: "task-3",
       preview: "75% — building auth module",
     });
-    expect(line).toContain("📊 progress:");
-    expect(line).toContain("75%");
+    expect(line).toContain("📊 75%");
+  });
+
+  it("should fall back to progress update when no preview in task.progress", () => {
+    const line = formatFeedLine({
+      ts: new Date().toISOString(),
+      agent: "Worker",
+      type: "task.progress",
+    });
+    expect(line).toContain("progress update");
   });
 
   it("should format task.heartbeat events correctly", () => {
@@ -416,8 +456,16 @@ describe("new event types", () => {
       target: "task-3",
       preview: "still running",
     });
-    expect(line).toContain("💓 heartbeat:");
-    expect(line).toContain("still running");
+    expect(line).toContain("💓 still running");
+  });
+
+  it("should fall back to heartbeating when no preview in task.heartbeat", () => {
+    const line = formatFeedLine({
+      ts: new Date().toISOString(),
+      agent: "Worker",
+      type: "task.heartbeat",
+    });
+    expect(line).toContain("heartbeating");
   });
 
   it("should format suggestion.new events correctly", () => {

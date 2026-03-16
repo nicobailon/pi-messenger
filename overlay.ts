@@ -312,6 +312,12 @@ export class MessengerOverlay implements Component, Focusable {
       return;
     }
 
+    if (matchesKey(data, "shift+tab")) {
+      this.crewViewState.threadedView = !this.crewViewState.threadedView;
+      this.tui.requestRender();
+      return;
+    }
+
     if (matchesKey(data, "tab")) {
       cycleActiveChannel(this.crewViewState);
       this.tui.requestRender();

@@ -254,64 +254,98 @@ export function renderFeedSection(theme: Theme, events: FeedEvent[], width: numb
     return lines;
   }
 
-  // Separate threaded vs global events
-  const threadMap = new Map<string, FeedEvent[]>();
-  const globalEvents: FeedEvent[] = [];
-  for (const event of filteredEvents) {
-    const tid = event.threadId;
-    if (tid) {
-      if (!threadMap.has(tid)) threadMap.set(tid, []);
-      threadMap.get(tid)!.push(event);
-    } else {
-      globalEvents.push(event);
+  // Pre-build reaction map once — O(n) instead of O(n²) per-event filtering
+  // Map: eventTs → Map<emoji, count>
+  const reactionMap = new Map<string, Map<string, number>>();
+  if (allEvents) {
+    for (const evt of allEvents) {
+      if (evt.type === 'reaction' && evt.reactionTo && evt.emoji) {
+        if (!reactionMap.has(evt.reactionTo)) reactionMap.set(evt.reactionTo, new Map());
+        const emojiCounts = reactionMap.get(evt.reactionTo)!;
+        emojiCounts.set(evt.emoji, (emojiCounts.get(evt.emoji) ?? 0) + 1);
+      }
     }
   }
 
-  let lastWasMessage = false;
-  for (const event of globalEvents) {
-    const sanitized = sanitizeFeedEvent(event);
-    const isNew = lastSeenTs === null || sanitized.ts > lastSeenTs;
-    const isMessage = sanitized.type === "message";
-
-    if (lines.length > 1 && isMessage !== lastWasMessage) {
-      lines.push(theme.fg("dim", "  ·"));
+  /** Render reaction line for an event, if any reactions exist */
+  function renderReactions(event: FeedEvent): void {
+    const reactions = reactionMap.get(event.ts);
+    if (reactions && reactions.size > 0) {
+      const reactionStr = Array.from(reactions.entries()).map(([e, c]) => `${e} ${c}`).join('  ');
+      lines.push(theme.fg("dim", `  ${reactionStr}`));
     }
+  }
 
-    if (isMessage) {
-      lines.push(...renderMessageLines(theme, sanitized, width));
-    } else {
-      const formatted = sharedFormatFeedLine(sanitized);
-      const dimmed = DIM_EVENTS.has(sanitized.type) || !isNew;
-      lines.push(truncateToWidth(dimmed ? theme.fg("dim", formatted) : formatted, width));
+  if (viewState?.threadedView !== true) {
+    // Flat mode (default): render all filtered events without thread separation
+    let lastWasMessage = false;
+    for (const event of filteredEvents) {
+      const sanitized = sanitizeFeedEvent(event);
+      const isNew = lastSeenTs === null || sanitized.ts > lastSeenTs;
+      const isMessage = sanitized.type === "message";
+
+      if (lines.length > 1 && isMessage !== lastWasMessage) {
+        lines.push(theme.fg("dim", "  ·"));
+      }
+
+      if (isMessage) {
+        lines.push(...renderMessageLines(theme, sanitized, width));
+      } else {
+        const formatted = sharedFormatFeedLine(sanitized);
+        const dimmed = DIM_EVENTS.has(sanitized.type) || !isNew;
+        lines.push(truncateToWidth(dimmed ? theme.fg("dim", formatted) : formatted, width));
+      }
+
+      renderReactions(event);
+      lastWasMessage = isMessage;
     }
-
-    // Aggregate reactions for this event
-    if (allEvents) {
-      const reactions = allEvents.filter(e => e.reactionTo === event.ts && e.emoji);
-      if (reactions.length > 0) {
-        const emojiCounts = new Map<string, number>();
-        for (const r of reactions) {
-          const em = r.emoji!;
-          emojiCounts.set(em, (emojiCounts.get(em) ?? 0) + 1);
-        }
-        const reactionLine = Array.from(emojiCounts.entries()).map(([em, c]) => `${em} ${c}`).join('  ');
-        lines.push(theme.fg("dim", `  ${reactionLine}`));
+  } else {
+    // Threaded mode: separate global vs threaded events, collapse thread groups
+    const threadMap = new Map<string, FeedEvent[]>();
+    const globalEvents: FeedEvent[] = [];
+    for (const event of filteredEvents) {
+      const tid = event.threadId;
+      if (tid) {
+        if (!threadMap.has(tid)) threadMap.set(tid, []);
+        threadMap.get(tid)!.push(event);
+      } else {
+        globalEvents.push(event);
       }
     }
 
-    lastWasMessage = isMessage;
-  }
+    let lastWasMessage = false;
+    for (const event of globalEvents) {
+      const sanitized = sanitizeFeedEvent(event);
+      const isNew = lastSeenTs === null || sanitized.ts > lastSeenTs;
+      const isMessage = sanitized.type === "message";
 
-  // Render threaded event groups (collapsed — show header + last event)
-  for (const [threadId, threadEvents] of threadMap) {
-    const count = threadEvents.length;
-    lines.push(theme.fg("dim", `[➤ ${threadId} (${count})]`));
-    const lastEvent = threadEvents[threadEvents.length - 1];
-    const sanitized = sanitizeFeedEvent(lastEvent);
-    const isNew = lastSeenTs === null || sanitized.ts > lastSeenTs;
-    const formatted = sharedFormatFeedLine(sanitized);
-    const dimmed = DIM_EVENTS.has(sanitized.type) || !isNew;
-    lines.push(truncateToWidth("  " + (dimmed ? theme.fg("dim", formatted) : formatted), width));
+      if (lines.length > 1 && isMessage !== lastWasMessage) {
+        lines.push(theme.fg("dim", "  ·"));
+      }
+
+      if (isMessage) {
+        lines.push(...renderMessageLines(theme, sanitized, width));
+      } else {
+        const formatted = sharedFormatFeedLine(sanitized);
+        const dimmed = DIM_EVENTS.has(sanitized.type) || !isNew;
+        lines.push(truncateToWidth(dimmed ? theme.fg("dim", formatted) : formatted, width));
+      }
+
+      renderReactions(event);
+      lastWasMessage = isMessage;
+    }
+
+    // Render threaded event groups (collapsed — show header + last event)
+    for (const [threadId, threadEvents] of threadMap) {
+      const count = threadEvents.length;
+      lines.push(theme.fg("dim", `  🧵 ${threadId} (${count} msgs)`));
+      const lastEvent = threadEvents[threadEvents.length - 1];
+      const sanitized = sanitizeFeedEvent(lastEvent);
+      const isNew = lastSeenTs === null || sanitized.ts > lastSeenTs;
+      const formatted = sharedFormatFeedLine(sanitized);
+      const dimmed = DIM_EVENTS.has(sanitized.type) || !isNew;
+      lines.push(truncateToWidth("  " + (dimmed ? theme.fg("dim", formatted) : formatted), width));
+    }
   }
 
   return lines;

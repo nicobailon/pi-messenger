@@ -42,6 +42,7 @@ import { MessengerOverlay, type OverlayCallbacks } from "./overlay.js";
 import { MessengerConfigOverlay } from "./config-overlay.js";
 import { loadConfig, matchesAutoRegisterPath, type MessengerConfig } from "./config.js";
 import { executeCrewAction } from "./crew/index.js";
+import { stopHealthBus } from "./crew/health-bus.js";
 import { logFeedEvent, pruneFeed } from "./feed.js";
 import type { CrewParams } from "./crew/types.js";
 import {
@@ -1016,6 +1017,7 @@ Usage (action-based API - preferred):
     }
     if (state.registered) {
       logFeedEvent(process.cwd(), state.agentName, "leave");
+      stopHealthBus();
     }
     if (state.registryFlushTimer) {
       clearTimeout(state.registryFlushTimer);
