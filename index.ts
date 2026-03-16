@@ -328,7 +328,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       : folder;
     pi.sendMessage({
       customType: "messenger_context",
-      content: `You are agent "${state.agentName}" in ${locationPart}. Use pi_messenger({ action: "status" }) to see crew status, pi_messenger({ action: "work" }) to run tasks.`,
+      content: `You are agent "${state.agentName}" (model: ${state.model}) in ${locationPart}. Use pi_messenger({ action: "status" }) to see crew status, pi_messenger({ action: "work" }) to run tasks.`,
       display: false
     }, { triggerTurn: false });
   }

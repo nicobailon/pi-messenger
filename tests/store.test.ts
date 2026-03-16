@@ -56,6 +56,40 @@ afterEach(() => {
   roots.clear();
 });
 
+describe("store model field in registrations", () => {
+  it("registration JSON includes model field from ctx.model.id", () => {
+    const root = createTempRoot();
+    const dirs = createDirs(root);
+    const projectDir = path.join(root, "project");
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    // Simulate registration with a specific model
+    const reg: AgentRegistration = {
+      name: "ModelTestAgent",
+      pid: process.pid,
+      sessionId: "session-model",
+      cwd: projectDir,
+      model: "claude-opus-4-6",
+      startedAt: new Date().toISOString(),
+      isHuman: false,
+      session: { toolCalls: 0, tokens: 0, filesModified: [] },
+      activity: { lastActivityAt: new Date().toISOString() },
+    };
+    fs.writeFileSync(path.join(dirs.registry, "ModelTestAgent.json"), JSON.stringify(reg));
+
+    // Read back and verify model survives round-trip
+    const raw = JSON.parse(fs.readFileSync(path.join(dirs.registry, "ModelTestAgent.json"), "utf-8"));
+    expect(raw.model).toBe("claude-opus-4-6");
+
+    // Verify getActiveAgents returns the model field
+    process.chdir(projectDir);
+    const agents = getActiveAgents(createState(false), dirs);
+    const found = agents.find(a => a.name === "ModelTestAgent");
+    expect(found).toBeDefined();
+    expect(found!.model).toBe("claude-opus-4-6");
+  });
+});
+
 describe("store.getActiveAgents cwd scoping", () => {
   it("matches scoped agents using canonical cwd", () => {
     const root = createTempRoot();

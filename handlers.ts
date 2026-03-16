@@ -106,7 +106,7 @@ export function executeJoin(
   const folder = extractFolder(cwd);
   const locationPart = state.gitBranch ? `${folder} on ${state.gitBranch}` : folder;
 
-  let text = `Joined as ${state.agentName} in ${locationPart}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.`;
+  let text = `Joined as ${state.agentName} (${state.model}) in ${locationPart}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.`;
 
   if (state.spec) {
     text += `\nSpec: ${displaySpecPath(state.spec, cwd)}`;
@@ -124,6 +124,7 @@ export function executeJoin(
   return result(text, {
     mode: "join",
     name: state.agentName,
+    model: state.model,
     location: locationPart,
     peerCount: agents.length,
     peers: agents.map(a => a.name),
@@ -142,6 +143,7 @@ export function executeStatus(state: MessengerState, dirs: Dirs, cwd: string = p
   const myClaim = store.getAgentCurrentClaim(dirs, state.agentName);
 
   let text = `You: ${state.agentName}\n`;
+  text += `Model: ${state.model}\n`;
   text += `Location: ${location}\n`;
 
   if (state.spec) {
@@ -163,6 +165,7 @@ export function executeStatus(state: MessengerState, dirs: Dirs, cwd: string = p
     mode: "status",
     registered: true,
     self: state.agentName,
+    model: state.model,
     folder,
     gitBranch: state.gitBranch,
     peerCount: agents.length,
