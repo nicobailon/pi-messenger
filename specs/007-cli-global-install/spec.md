@@ -5,6 +5,9 @@ bead: pi-messenger-32a
 ---
 
 <!-- issue:complete:v1 | harness: unknown | date: 2026-03-18T17:15:07Z -->
+<!-- Codex Review: APPROVED after 3 rounds | model: gpt-5.4 | date: 2026-03-18 -->
+<!-- Status: UNCHANGED -->
+<!-- Revisions: none -->
 
 # 007 — pi-messenger-cli Global Install
 
