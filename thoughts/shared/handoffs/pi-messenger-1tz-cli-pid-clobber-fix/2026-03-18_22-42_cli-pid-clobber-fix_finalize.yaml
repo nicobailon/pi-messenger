@@ -1,0 +1,44 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-03-18T22:42:58.888Z
+session: "pi-messenger-1tz-cli-pid-clobber-fix"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-1tz"
+---
+
+goal: "Fix CLI read-only commands (list, status, feed) clobbering the spawn process PID registration, which caused collaborators to fail message delivery"
+now: "Fix committed and pushed. READ_ONLY_COMMANDS set added to cli/index.ts. bootstrap() accepts register flag. All 488 tests pass. Dual-push landed on GitHub and mini-ts."
+
+done_this_session:
+  - "Diagnosed root cause: every CLI invocation re-registered with its own PID via bootstrapExternal(). Short-lived list/status commands clobbered the long-running spawn process's PID, causing validateTargetAgent() to see the caller as dead."
+  - "Added READ_ONLY_COMMANDS set (list, status, feed, task.list, task.show, help, version) to cli/index.ts"
+  - "Added register option to bootstrap() — read-only commands pass { register: false }"
+  - "Updated tests: replaced registration-on-list tests with PID-clobber regression tests"
+  - "All 488 tests pass across 32 test files"
+  - "Committed, pushed — dual-push landed on GitHub and mini-ts"
+
+final_solutions:
+  - "CLI commands classified as read-only vs mutating. Read-only commands skip bootstrapExternal() entirely, preventing PID overwrites."
+
+final_decisions:
+  - "Read-only path resolves agent name from PI_AGENT_NAME env var (or 'anonymous') without touching the registry file"
+  - "Crew-spawned mode (PI_CREW_WORKER=1) is unaffected — it always goes through bootstrapCrewSpawned which only reads, never writes"
+
+artifacts_produced:
+  - "cli/index.ts — READ_ONLY_COMMANDS set + bootstrap({ register }) flag"
+  - "tests/crew/cli.test.ts — 3 new tests: read-only no-register, join does-register, PID-clobber regression"
+
+files:
+  - "cli/index.ts"
+  - "tests/crew/cli.test.ts"
+  - ".claude/napkin.md"
+
+test:
+  command: "npx vitest run"
+  result: "488 passed, 0 failed (32 test files)"
+
+git:
+  branch: "feat/002-multi-runtime-support"
+  commit: "8202d8f"
+  remote: "https://github.com/carmandale/pi-messenger.git"
