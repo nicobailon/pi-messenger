@@ -122,6 +122,36 @@ describe("CLI wrapper creation/removal (T5)", () => {
   });
 });
 
+// ─── Clean env verification (the test that would have caught the PATH bug) ─
+
+describe("CLI wrapper works outside pi (clean env)", () => {
+  it("wrapper is callable without ~/.pi/agent/bin in PATH", () => {
+    const jitiPath = getRealJitiPath();
+    if (!jitiPath) {
+      console.log("Skipping: jiti not found (pi not installed)");
+      return;
+    }
+
+    const binDir = createTmpDir("clean-env");
+    const sourceDir = path.resolve(__dirname, "../..");
+    const wrapperPath = writeWrapper(binDir, jitiPath, sourceDir);
+
+    // Execute with a PATH that does NOT include ~/.pi/agent/bin
+    // This simulates a regular terminal (not inside pi)
+    const result = execFileSync(wrapperPath, ["--help"], {
+      encoding: "utf-8",
+      timeout: 15000,
+      env: {
+        HOME: os.homedir(),
+        PATH: "/opt/homebrew/bin:/usr/bin:/bin",  // Normal macOS PATH, no .pi/agent/bin
+      },
+    });
+
+    expect(result).toContain("pi-messenger-cli");
+    expect(result).toContain("Commands:");
+  });
+});
+
 // ─── T6: Graceful failure ──────────────────────────────────────────────────
 
 describe("CLI wrapper graceful failure (T6)", () => {

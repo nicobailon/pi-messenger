@@ -68,6 +68,21 @@ function resolveJitiPath() {
  * The wrapper invokes pi's jiti to run the CLI TypeScript source directly.
  * Returns true if wrapper was created, false if jiti was not found.
  */
+/**
+ * Resolve the Homebrew bin directory (where pi, node, codex live).
+ * This is the system-wide PATH location — works from any shell context.
+ * ~/.pi/agent/bin/ is only in PATH inside pi sessions (getShellEnv), NOT
+ * in regular terminals. The Homebrew bin is universally in PATH on macOS.
+ */
+function resolveBrewBinDir() {
+	try {
+		const npmPrefix = execFileSync("npm", ["prefix", "-g"], { encoding: "utf-8" }).trim();
+		const brewBin = path.join(npmPrefix, "bin");
+		if (fs.existsSync(brewBin)) return brewBin;
+	} catch {}
+	return null;
+}
+
 function installCliWrapper(sourceDir) {
 	const jitiPath = resolveJitiPath();
 	if (!jitiPath) {
@@ -94,6 +109,23 @@ fi
 exec node "$JITI_PATH" "$SOURCE_DIR/cli/index.ts" "$@"
 `;
 	fs.writeFileSync(CLI_WRAPPER_PATH, wrapper, { mode: 0o755 });
+
+	// Symlink into Homebrew bin so the CLI is available from ANY shell context,
+	// not just inside pi sessions. ~/.pi/agent/bin/ is only in PATH when pi's
+	// getShellEnv() prepends it — regular terminals don't have it.
+	const brewBin = resolveBrewBinDir();
+	if (brewBin) {
+		const symlinkPath = path.join(brewBin, "pi-messenger-cli");
+		try {
+			// Remove existing symlink/file if present (idempotent)
+			if (fs.existsSync(symlinkPath)) fs.unlinkSync(symlinkPath);
+			fs.symlinkSync(CLI_WRAPPER_PATH, symlinkPath);
+		} catch (err) {
+			console.error(`⚠ Could not create symlink at ${symlinkPath}: ${err.message}`);
+			console.error("  pi-messenger-cli will only work inside pi sessions.");
+		}
+	}
+
 	return true;
 }
 
@@ -160,7 +192,14 @@ if (isCrewUninstall) {
 // ─── Extension remove ────────────────────────────────────────────────────────
 
 if (isRemove) {
-	// Always clean up CLI wrapper, even if extension dir is already gone
+	// Always clean up CLI wrapper + Homebrew symlink, even if extension dir is already gone
+	const brewBin = resolveBrewBinDir();
+	if (brewBin) {
+		const symlinkPath = path.join(brewBin, "pi-messenger-cli");
+		if (fs.existsSync(symlinkPath)) {
+			try { fs.unlinkSync(symlinkPath); } catch {}
+		}
+	}
 	if (fs.existsSync(CLI_WRAPPER_PATH)) {
 		fs.unlinkSync(CLI_WRAPPER_PATH);
 		console.log("Removed CLI: " + CLI_WRAPPER_PATH);
