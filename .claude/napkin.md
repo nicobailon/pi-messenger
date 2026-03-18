@@ -8,6 +8,7 @@
 | 2026-03-12 | Dale correction | Assumed we'd merge PR to upstream and npm publish to release spec 004 | We don't own upstream. We install our fork locally via `node install.mjs`. Never propose upstream merge/npm publish without explicit user direction |
 | 2026-03-12 | Dale correction | Messaged WildNova by wrong name (called them WildNova, they are HappyFalcon) | Agent name ≠ session name. WildNova is the session/mesh identity; HappyFalcon is the agent who was in the shaping session. Check context before assuming identity |
 | 2026-03-18 | Dale correction | `~/.pi/agent/bin/` assumed to be in system PATH — survived shaping, planning, 6 Codex rounds, implementation, and code verification. User caught it in 5 seconds from Terminal. | Every agent runs inside pi where getShellEnv() adds the bin dir. That's an environmental bias, not reality. ALWAYS test PATH-dependent features with `env -i PATH=... which <cmd>` from a clean shell. The Homebrew bin (`/opt/homebrew/bin/`) is the real system-wide PATH on macOS. |
+| 2026-03-18 | Codex agent logs | CLI read-only commands (list, status, feed) re-registered the caller's PID, clobbering the spawn process's registration. Collaborators then failed to deliver messages because `validateTargetAgent` saw the dead PID from the short-lived list process. | Read-only CLI commands must NEVER write to the registry. Only mutating commands (join, send, reserve, spawn, etc.) should register. Fixed in `READ_ONLY_COMMANDS` set + `bootstrap({ register: false })`. |
 
 ## User Preferences
 - "Best in class, tested, repeatable, updatable, installed and ready to use" — no quick fixes, no bandaids without explicit approval
@@ -25,6 +26,7 @@
 - Lighter spawn prompts: only include what's needed for FIRST response. File reads can happen during conversation.
 
 ## Patterns That Don't Work
+- **CLI read-only commands clobbering spawn registrations** — Every CLI invocation used to re-register, so `list` would overwrite the PID left by `spawn`. When `list` exits, collaborators see the caller as dead. Fixed: `READ_ONLY_COMMANDS` bypass registration.
 - **Dismissing collaborators before they respond** — challengers need 3-10 min on large codebases. Check token count delta (increasing = still working) before assuming stuck.
 - **D5 absolute timeout kills working spawns** — spec 006 D5 (300s absolute timeout) fires during spawn when collaborator is actively reading files. Root cause: pollForCollaboratorMessage has no context awareness. Fix: spec 008 adds `context: "spawn" | "send"` to PollOptions, gates D5 to send-only.
 - `((var++))` with `set -e` silently aborts when var=0 — use `var=$((var + 1))`

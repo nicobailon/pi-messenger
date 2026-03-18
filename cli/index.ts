@@ -249,9 +249,21 @@ function printResult(result: { content: Array<{ text: string }>; details: Record
 // Command Handlers
 // =============================================================================
 
-function bootstrap(cwd: string): { state: MessengerState; dirs: Dirs } {
+/**
+ * Commands that only read state — these must NOT re-register in the mesh
+ * because re-registration overwrites the PID in the registry file. If a
+ * long-running command (spawn) is active in another process, a short-lived
+ * read-only command would clobber its PID, causing collaborators to see the
+ * caller as "not active" and fail to deliver messages.
+ */
+const READ_ONLY_COMMANDS = new Set([
+  "list", "status", "feed", "task.list", "task.show", "help", "version",
+]);
+
+function bootstrap(cwd: string, options?: { register?: boolean }): { state: MessengerState; dirs: Dirs } {
   const dirs = getMessengerDirs();
   const isCrewSpawned = process.env.PI_CREW_WORKER === "1";
+  const shouldRegister = options?.register !== false;
 
   let name: string;
   if (isCrewSpawned) {
@@ -261,8 +273,11 @@ function bootstrap(cwd: string): { state: MessengerState; dirs: Dirs } {
       process.exit(1);
     }
     name = crewName;
-  } else {
+  } else if (shouldRegister) {
     name = bootstrapExternal(dirs, cwd);
+  } else {
+    // Read-only: resolve name from env or existing registration, but do NOT write to registry
+    name = process.env.PI_AGENT_NAME || "anonymous";
   }
 
   const state = createMinimalState(name, cwd);
@@ -281,7 +296,7 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
     return;
   }
 
-  const { state, dirs } = bootstrap(cwd);
+  const { state, dirs } = bootstrap(cwd, { register: !READ_ONLY_COMMANDS.has(cmd.action) });
 
   // Validate nonce for mutating commands on crew-spawned workers
   if (MUTATING_COMMANDS.has(cmd.action) && process.env.PI_CREW_WORKER === "1") {

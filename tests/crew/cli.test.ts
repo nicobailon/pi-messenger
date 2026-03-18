@@ -51,20 +51,38 @@ describe("pi-messenger-cli", () => {
       fs.rmSync(testDir, { recursive: true, force: true });
     });
 
-    it("self-registers on list command", () => {
+    it("read-only commands do NOT re-register (prevents PID clobber)", () => {
       const messengerDir = path.join(testDir, "messenger");
       fs.mkdirSync(path.join(messengerDir, "registry"), { recursive: true });
       fs.mkdirSync(path.join(messengerDir, "inbox"), { recursive: true });
 
+      // list is read-only — must NOT create a registration file
       const result = runCli(["list"], {
         PI_MESSENGER_DIR: messengerDir,
         PI_AGENT_NAME: "TestAgent",
       });
 
-      // Should register and show itself
+      expect(result.exitCode).toBe(0);
+
+      // Verify NO registration file was created
+      const regFile = path.join(messengerDir, "registry", "TestAgent.json");
+      expect(fs.existsSync(regFile)).toBe(false);
+    });
+
+    it("join command DOES register (mutating command)", () => {
+      const messengerDir = path.join(testDir, "messenger");
+      fs.mkdirSync(path.join(messengerDir, "registry"), { recursive: true });
+      fs.mkdirSync(path.join(messengerDir, "inbox"), { recursive: true });
+
+      const result = runCli(["join"], {
+        PI_MESSENGER_DIR: messengerDir,
+        PI_AGENT_NAME: "TestAgent",
+      });
+
+      expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("TestAgent");
 
-      // Verify registration file was created
+      // Verify registration file WAS created
       const regFile = path.join(messengerDir, "registry", "TestAgent.json");
       expect(fs.existsSync(regFile)).toBe(true);
 
@@ -73,21 +91,37 @@ describe("pi-messenger-cli", () => {
       expect(reg.isHuman).toBe(false);
     });
 
-    it("generates a name when PI_AGENT_NAME is not set", () => {
+    it("read-only list after join does not clobber PID", () => {
       const messengerDir = path.join(testDir, "messenger");
       fs.mkdirSync(path.join(messengerDir, "registry"), { recursive: true });
       fs.mkdirSync(path.join(messengerDir, "inbox"), { recursive: true });
 
+      // Simulate a spawn process that registered with a specific PID
+      const regFile = path.join(messengerDir, "registry", "TestAgent.json");
+      const fakeReg = {
+        name: "TestAgent",
+        pid: process.pid, // Use our own PID so isProcessAlive passes
+        sessionId: "cli-fake",
+        cwd: process.cwd(),
+        model: "test",
+        startedAt: new Date().toISOString(),
+        isHuman: false,
+        session: { toolCalls: 0, tokens: 0, filesModified: [] },
+        activity: { lastActivityAt: new Date().toISOString() },
+      };
+      fs.writeFileSync(regFile, JSON.stringify(fakeReg, null, 2));
+
+      // list must NOT overwrite the registration
       const result = runCli(["list"], {
         PI_MESSENGER_DIR: messengerDir,
+        PI_AGENT_NAME: "TestAgent",
       });
 
-      // Should have generated some name and shown it
       expect(result.exitCode).toBe(0);
 
-      // Should have a registration file
-      const files = fs.readdirSync(path.join(messengerDir, "registry"));
-      expect(files.filter(f => f.endsWith(".json")).length).toBe(1);
+      // Registration PID must be unchanged (our PID, not the list process PID)
+      const regAfter = JSON.parse(fs.readFileSync(regFile, "utf-8"));
+      expect(regAfter.pid).toBe(process.pid);
     });
   });
 
