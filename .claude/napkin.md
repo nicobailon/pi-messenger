@@ -45,3 +45,6 @@
 - **Mini-ts**: Still on v0.13.0 (upstream npm). Not urgent — HappyFalcon handling separately. Would need `scp -r` or similar to push extension files there.
 - Mac mini SSH: `ssh mini-ts` (user chipcarman@chips-mac-mini)
 - **Branch**: `feat/002-multi-runtime-support` is active dev branch on fork. PR #9 open against upstream but NOT for merging yet.
+
+## Additional Domain Notes
+- **pi-messenger-cli spawn/dismiss**: Added in spec 007. Uses FIFO stdin to keep collaborator alive between CLI invocations. State files in ~/.pi/agent/messenger/collaborators/. This is what makes the CLI actually useful — without spawn, non-pi agents can't participate in the collaboration protocol.
