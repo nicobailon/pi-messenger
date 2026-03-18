@@ -86,8 +86,12 @@ export interface CrewConfig {
    * stallThresholdMs: log must grow within this interval or the collaborator is
    * considered stalled. Different from work.stuckTimeoutMs which controls crew
    * worker idle detection.
+   * pollTimeoutMs: absolute wall-clock timeout for send polls (D5). Default 300s.
+   * spawnPollTimeoutMs: absolute wall-clock timeout for spawn polls. Default 900s
+   * (15 min) — spawn boot sequences (system prompt, file reads, thinking) take
+   * much longer than send replies.
    */
-  collaboration: { stallThresholdMs: number; pollTimeoutMs: number };
+  collaboration: { stallThresholdMs: number; pollTimeoutMs: number; spawnPollTimeoutMs: number };
 }
 
 const DEFAULT_CONFIG: CrewConfig = {
@@ -107,7 +111,7 @@ const DEFAULT_CONFIG: CrewConfig = {
   review: { enabled: true, maxIterations: 3 },
   planning: { maxPasses: 1 },
   work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false, shutdownGracePeriodMs: 30000, stuckTimeoutMs: 300000 },
-  collaboration: { stallThresholdMs: 120_000, pollTimeoutMs: 300_000 },
+  collaboration: { stallThresholdMs: 120_000, pollTimeoutMs: 300_000, spawnPollTimeoutMs: 900_000 },
   dependencies: "advisory",
   coordination: "chatty",
   messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
