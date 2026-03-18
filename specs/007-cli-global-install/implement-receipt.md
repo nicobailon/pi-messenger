@@ -6,6 +6,8 @@ test_result: pass
 test_count: 486
 ---
 
+<!-- implement:complete:v1 | harness: pi/claude-opus-4-6 | date: 2026-03-18T20:59:57Z -->
+
 # Implementation Receipt
 
 ## Changed Files
