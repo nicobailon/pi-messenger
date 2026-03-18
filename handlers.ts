@@ -389,7 +389,7 @@ export async function executeSend(
         logFeedEvent(cwd, state.agentName, "message", recipient, preview);
 
         // Read stall threshold from config with validation
-        const crewDir = path.join(cwd, ".pi-crew");
+        const crewDir = crewStore.getCrewDir(cwd);
         const crewConfig = loadCrewConfig(crewDir);
         const rawStallSend = crewConfig.collaboration?.stallThresholdMs;
         const stallThresholdMs = typeof rawStallSend === "number" && Number.isFinite(rawStallSend)
