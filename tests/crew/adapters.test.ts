@@ -603,6 +603,51 @@ describe("buildRuntimeSpawn", () => {
 });
 
 // =============================================================================
+// pi-messenger-cli spawn-time validation (spec 007 T7)
+// =============================================================================
+
+describe("buildRuntimeSpawn CLI validation (spec 007)", () => {
+  it("throws for non-pi runtime when pi-messenger-cli not in worker PATH", () => {
+    // Runtime command check uses PARENT env (claude IS installed on this machine).
+    // CLI check uses CONSTRUCTED env with minimal PATH — pi-messenger-cli won't be found.
+    const minimalEnv: Record<string, string> = {
+      PATH: "/usr/bin:/bin",
+      HOME: process.env.HOME ?? "",
+    };
+    expect(() =>
+      buildRuntimeSpawn(
+        "claude",
+        { prompt: "Fix it" },
+        { extensionDir: "/ext" },
+        minimalEnv,
+      ),
+    ).toThrow(/pi-messenger-cli not found in worker PATH/);
+  });
+
+  it("does not throw with skipCommandCheck: true (skips both runtime + CLI checks)", () => {
+    const result = buildRuntimeSpawn(
+      "claude",
+      { prompt: "Fix it" },
+      { extensionDir: "/ext" },
+      { PATH: "/usr/bin" },
+      { skipCommandCheck: true },
+    );
+    expect(result.command).toBe("claude");
+  });
+
+  it("pi runtime skips CLI validation entirely", () => {
+    const result = buildRuntimeSpawn(
+      "pi",
+      { prompt: "Fix it" },
+      { extensionDir: "/ext" },
+      { PATH: "/usr/bin" },
+    );
+    expect(result.command).toBe("pi");
+    // No throw — pi uses typed tool calls, not pi-messenger-cli
+  });
+});
+
+// =============================================================================
 // buildCliInstructions
 // =============================================================================
 
