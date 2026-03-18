@@ -21,7 +21,7 @@ import { result } from "../utils/result.js";
 import { generateMemorableName } from "../../lib.js";
 import { recordMessageInHistory, validateTargetAgent } from "../../store.js";
 import { discoverCrewAgents } from "../utils/discover.js";
-import { loadCrewConfig } from "../utils/config.js";
+import { loadCrewConfig, type CrewConfig } from "../utils/config.js";
 import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../agents.js";
 import { resolveModel } from "../utils/model.js";
 import {
@@ -51,6 +51,25 @@ export const DEFAULT_STALL_THRESHOLD_MS = 120_000;
 export const MIN_STALL_THRESHOLD_MS = 1_000;
 /** Default absolute poll timeout: 5 minutes wall-clock from poll start. Never resets. */
 export const DEFAULT_POLL_TIMEOUT_MS = 300_000;
+/** Default absolute poll timeout for spawn: 15 minutes. Spawn boot sequences
+ *  (system prompt loading, file reads, thinking) legitimately take 5-10 min. */
+export const DEFAULT_SPAWN_POLL_TIMEOUT_MS = 900_000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spawn poll timeout resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the poll timeout for spawn context from crew config.
+ * Reads `collaboration.spawnPollTimeoutMs` with validation, falling back to
+ * DEFAULT_SPAWN_POLL_TIMEOUT_MS (900s). Exported for testing.
+ */
+export function resolveSpawnPollTimeout(config: CrewConfig): number {
+  const raw = config.collaboration?.spawnPollTimeoutMs;
+  return typeof raw === "number" && Number.isFinite(raw)
+    ? Math.max(MIN_STALL_THRESHOLD_MS, raw)
+    : DEFAULT_SPAWN_POLL_TIMEOUT_MS;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Blocking poll for collaborator messages
@@ -487,10 +506,7 @@ export async function executeSpawn(
     const stallThresholdMs = typeof rawStall === "number" && Number.isFinite(rawStall)
       ? Math.max(MIN_STALL_THRESHOLD_MS, rawStall)
       : DEFAULT_STALL_THRESHOLD_MS;
-    const rawPollTimeout = config.collaboration?.pollTimeoutMs;
-    const pollTimeoutMs = typeof rawPollTimeout === "number" && Number.isFinite(rawPollTimeout)
-      ? Math.max(MIN_STALL_THRESHOLD_MS, rawPollTimeout)
-      : DEFAULT_POLL_TIMEOUT_MS;
+    const pollTimeoutMs = resolveSpawnPollTimeout(config);
 
     const pollResult = await pollForCollaboratorMessage({
       inboxDir: path.join(dirs.inbox, state.agentName),
