@@ -1,0 +1,30 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-03-18T22:29:28.287Z
+session: "pi-messenger-32a-007-compound-learnings"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-32a"
+---
+
+goal: "Compound session learnings from spec 007+008 into permanent capabilities. Two critical failures — PATH verification from inside pi, and shipping CLI without spawn/dismiss — need to become reusable artifacts that prevent recurrence."
+now: "Created consumer-context-verify skill and feature-completeness-gate heuristic in global AGENTS.md §7. Both committed and pushed to agent-config repo. Every future session across all agents now has the updated verification standard."
+
+done_this_session:
+  - "Extracted 5 patterns from napkin + finalize artifact, consolidated into 2 actionable artifacts"
+  - "Created skill: consumer-context-verify — verify features from consumer's context, not agent's runtime"
+  - "Added heuristic: feature completeness gate to AGENTS.md §7 Verification Standard"
+  - "Both committed to agent-config repo, pushed to GitHub + mini-ts"
+
+artifacts_produced:
+  - "~/.agent-config/skills/meta/consumer-context-verify/SKILL.md"
+  - "~/.agent-config/instructions/AGENTS.md (§7 amended)"
+
+decisions:
+  - "consumer-context-verify as SKILL (not heuristic) because it's a verification sequence with concrete commands, not a reminder"
+  - "Feature completeness gate as HEURISTIC in §7 (not skill) because it's a single question checkpoint, not a process"
+  - "Skipped spawn-prompt-sizing (already in napkin) and shaping-refines-during-planning (observation, not actionable)"
+git:
+  branch: "feat/002-multi-runtime-support"
+  commit: "380b41276c5ede8d5b4364763179275d4a32d59c"
+  remote: "https://github.com/carmandale/pi-messenger.git"
