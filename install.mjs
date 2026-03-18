@@ -180,9 +180,17 @@ if (path.resolve(PACKAGE_DIR) === path.resolve(EXTENSION_DIR)) {
 	process.exit(0);
 }
 
+// ─── CLI wrapper (runs before collision guard) ───────────────────────────────
+// The wrapper is independent of extension copy — it resolves jiti and points
+// to whichever source directory is active. On collision-guard exit, the wrapper
+// still points to PACKAGE_DIR (the registered package source).
+
+const wrapperCreated = installCliWrapper(PACKAGE_DIR);
+
 // ─── Collision guard: check settings.json packages ───────────────────────────
 // If pi-messenger is already registered as a package (local path or npm),
 // copying to extensions/ creates a collision — two copies loaded by pi.
+// The CLI wrapper was already created above pointing to PACKAGE_DIR.
 
 const isForce = args.includes("--force") || args.includes("-f");
 const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
@@ -198,11 +206,19 @@ if (!isForce && fs.existsSync(settingsPath)) {
 			return name === "pi-messenger";
 		});
 		if (collision) {
+			if (wrapperCreated) {
+				// Wrapper points to PACKAGE_DIR (the registered package). Extension copy
+				// skipped to avoid collision, but CLI is functional. Exit 0 — this is
+				// the normal dev-workflow path.
+				console.log(`⚠ Extension copy skipped (already registered as package at ${collision}).`);
+				console.log(`CLI:      pi-messenger-cli → ${CLI_WRAPPER_PATH}`);
+				process.exit(0);
+			}
 			console.log(`⚠ pi-messenger is already registered in settings.json packages at:
   ${collision}
 
 Copying to extensions/ would create a collision (two copies loaded by pi).
-Skipping extension install. Use --force to override.`);
+CLI wrapper also failed (pi not found). Use --force to override.`);
 			process.exit(1);
 		}
 	} catch {
@@ -242,9 +258,13 @@ function copyDir(src, dest) {
 
 copyDir(PACKAGE_DIR, EXTENSION_DIR);
 
+// Update CLI wrapper to point to canonical extension dir (instead of PACKAGE_DIR)
+installCliWrapper(EXTENSION_DIR);
+
 const action = isUpdate ? "Updated" : "Installed";
 console.log(`${action} pi-messenger v${VERSION} → ${EXTENSION_DIR}
 
 Tools:    pi_messenger
 Commands: /messenger, /messenger config
+CLI:      pi-messenger-cli → ${CLI_WRAPPER_PATH}
 Docs:     ${EXTENSION_DIR}/README.md`);
