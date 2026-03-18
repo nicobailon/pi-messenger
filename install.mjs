@@ -160,11 +160,16 @@ if (isCrewUninstall) {
 // ─── Extension remove ────────────────────────────────────────────────────────
 
 if (isRemove) {
+	// Always clean up CLI wrapper, even if extension dir is already gone
+	if (fs.existsSync(CLI_WRAPPER_PATH)) {
+		fs.unlinkSync(CLI_WRAPPER_PATH);
+		console.log("Removed CLI: " + CLI_WRAPPER_PATH);
+	}
 	if (fs.existsSync(EXTENSION_DIR)) {
 		fs.rmSync(EXTENSION_DIR, { recursive: true });
 		console.log("Removed pi-messenger from " + EXTENSION_DIR);
 	} else {
-		console.log("pi-messenger is not installed");
+		console.log("pi-messenger extension not installed");
 	}
 	process.exit(0);
 }
