@@ -1,3 +1,5 @@
+<!-- code-verify:approved:v1 | harness: codex/gpt-5.4 | date: 2026-03-18T19:20:17Z | rounds: 3 -->
+
 ## Findings
 - No blocking findings.
 - Residual coverage note: the new `executeSend` integration test proves the send path passes `300_000` to the poller `[collab-blocking.test.ts#L1127](/Users/dalecarman/Groove Jones Dropbox/Dale Carman/Projects/dev/pi-messenger/tests/crew/collab-blocking.test.ts#L1127)` `[collab-blocking.test.ts#L1142](/Users/dalecarman/Groove Jones Dropbox/Dale Carman/Projects/dev/pi-messenger/tests/crew/collab-blocking.test.ts#L1142)`, but it does not by itself prove the canonical path fix, because `loadCrewConfig` falls back to defaults when file reads fail `[config.ts#L120](/Users/dalecarman/Groove Jones Dropbox/Dale Carman/Projects/dev/pi-messenger/crew/utils/config.ts#L120)` `[config.ts#L153](/Users/dalecarman/Groove Jones Dropbox/Dale Carman/Projects/dev/pi-messenger/crew/utils/config.ts#L153)`. I’m not blocking on that because the actual path fix in source is straightforward and correct at `[handlers.ts#L392](/Users/dalecarman/Groove Jones Dropbox/Dale Carman/Projects/dev/pi-messenger/handlers.ts#L392)`.
