@@ -63,6 +63,23 @@ export function buildRuntimeSpawn(
 
   const args = adapter.buildArgs(task, config);
   const env = adapter.buildEnv(baseEnv);
+
+  // Validate pi-messenger-cli is reachable in the worker's constructed env.
+  // Non-pi workers are instructed to use pi-messenger-cli for task lifecycle,
+  // reservations, and messaging. Missing CLI = broken worker. Hard error.
+  // Note: only the CLI check uses the constructed env. The runtime-command
+  // check above remains parent-env-based (pre-existing behavior, out of scope).
+  if (runtime !== "pi" && !options?.skipCommandCheck) {
+    try {
+      execFileSync("which", ["pi-messenger-cli"], { stdio: "ignore", env });
+    } catch {
+      throw new Error(
+        `pi-messenger-cli not found in worker PATH (required for ${runtime} workers to communicate with the mesh). ` +
+        `Run: npx pi-messenger`
+      );
+    }
+  }
+
   return { command, args, env, adapter, warnings };
 }
 
