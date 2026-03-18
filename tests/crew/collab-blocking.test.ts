@@ -652,6 +652,37 @@ describe("pollForCollaboratorMessage", () => {
     }
   });
 
+  it("log-stall fires after log growth stops (growth-then-stop transition, R4)", async () => {
+    const logFile = path.join(tmpDir, "growth-stop.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+
+    // Phase 1: Drip log bytes for 200ms (simulates active boot)
+    const drip = setInterval(() => {
+      try { fs.appendFileSync(logFile, "."); } catch {}
+    }, 50);
+
+    // Phase 2: Stop dripping after 200ms — log growth stops, stall clock starts
+    setTimeout(() => clearInterval(drip), 200);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 400,        // fires 400ms after last log growth
+      pollTimeoutMs: 60_000,        // high — should not fire (D5 out of picture)
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("stalled");
+      expect(result.stallType).toBe("log");
+      // Stall should fire ~400ms after log stopped growing at ~200ms → ~600ms total
+      expect(result.stallDurationMs).toBeGreaterThanOrEqual(300);
+    }
+  });
+
   it("pollTimeoutMs is configurable (overrides default)", async () => {
     const logFile = path.join(tmpDir, "config-timeout.log");
     fs.writeFileSync(logFile, "started");
