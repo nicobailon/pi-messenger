@@ -9,3 +9,4 @@
 2026-03-18 14:30 | TrueBear | pi/claude-opus-4-6 | /shape | resumed — spawn fixed (spec 008), spawning challenger
 2026-03-18 14:45 | TrueBear | pi/claude-opus-4-6 | /shape | challenger UltraDragon approved Shape H — jiti wrapper
 2026-03-18 14:50 | TrueBear | pi/claude-opus-4-6 | /shape | completed — shaping-transcript.md
+2026-03-18 14:55 | TrueBear | pi/claude-opus-4-6 | /issue | bead pi-messenger-32a — spec.md updated with Shape H from shaping
