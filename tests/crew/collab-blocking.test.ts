@@ -665,6 +665,7 @@ describe("pollForCollaboratorMessage", () => {
     // Phase 2: Stop dripping after 200ms — log growth stops, stall clock starts
     setTimeout(() => clearInterval(drip), 200);
 
+    const start = Date.now();
     const result = await pollForCollaboratorMessage({
       inboxDir,
       collabName: "TestCollab",
@@ -673,13 +674,18 @@ describe("pollForCollaboratorMessage", () => {
       pollTimeoutMs: 60_000,        // high — should not fire (D5 out of picture)
       state: makeMinimalState(),
     });
+    const elapsed = Date.now() - start;
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe("stalled");
       expect(result.stallType).toBe("log");
       // Stall should fire ~400ms after log stopped growing at ~200ms → ~600ms total
-      expect(result.stallDurationMs).toBeGreaterThanOrEqual(300);
+      // This proves lastLogChangeTime was advanced during the growth phase:
+      // - If stall clock was never reset: would fire at ~400ms (stallThresholdMs from start)
+      // - With reset: fires at ~600ms (200ms growth + 400ms stall threshold)
+      expect(elapsed).toBeGreaterThanOrEqual(500); // Must be > stallThresholdMs alone (400ms)
+      expect(elapsed).toBeLessThan(2000);          // Sanity bound
     }
   });
 
@@ -1114,6 +1120,28 @@ describe("executeSend handler-level behavior", () => {
     const text = result.content[0].text;
     expect(text).toContain("cancelled");
     expect(result.details.error).toBe("cancelled");
+  });
+
+  // ── Spec 008: executeSend uses correct pollTimeoutMs (not spawnPollTimeoutMs) ──
+
+  it("executeSend passes DEFAULT_POLL_TIMEOUT_MS to poll, not spawn timeout (spec 008)", async () => {
+    const executeSend = await importWithMocks({
+      ok: true,
+      message: makeMessage({ text: "Reply from nav" }),
+    });
+
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    await executeSend(state, dirs, tmpDir, "NavAgent", undefined, "Review this", undefined);
+
+    // Verify pollForCollaboratorMessage was called with pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS (300_000)
+    // NOT spawnPollTimeoutMs (900_000) — send path must use the shorter timeout
+    expect(mockPollFn).toHaveBeenCalled();
+    const pollOpts = mockPollFn.mock.calls[0][0];
+    expect(pollOpts.pollTimeoutMs).toBe(300_000);
+    // Also verify stallThresholdMs uses the default (120_000)
+    expect(pollOpts.stallThresholdMs).toBe(120_000);
   });
 
   // ── D2: phase:"complete" → non-blocking send + dismiss (spec 006) ──
