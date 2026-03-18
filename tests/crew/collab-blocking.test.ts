@@ -681,6 +681,40 @@ describe("pollForCollaboratorMessage", () => {
     // Should fire around 800ms, not the default 300_000ms
     expect(elapsed).toBeLessThan(5000);
   });
+
+  // ── Spec 008: Spawn survives past default D5 with larger timeout ────
+
+  it("spawn context survives past default D5 when pollTimeoutMs is larger (spec 008)", async () => {
+    const logFile = path.join(tmpDir, "spawn-timeout.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ logFile });
+    const msg = makeMessage({ text: "First challenge response" });
+
+    // Drip log bytes to simulate active file reads during spawn boot
+    const drip = setInterval(() => {
+      try { fs.appendFileSync(logFile, "."); } catch {}
+    }, 50);
+
+    // Deliver message at 400ms — past what would be a 300ms send-context D5,
+    // but within the 800ms spawn-context ceiling
+    setTimeout(() => writeMessageFile(inboxDir, msg), 400);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 60_000,    // high — should not fire
+      pollTimeoutMs: 800,           // simulates spawnPollTimeoutMs (> default 300ms send)
+      state: makeMinimalState(),
+    });
+
+    clearInterval(drip);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.message.text).toBe("First challenge response");
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
