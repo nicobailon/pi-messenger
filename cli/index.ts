@@ -13,13 +13,18 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { spawn as spawnProcess, execFileSync } from "node:child_process";
 import * as store from "../store.js";
 import * as crewStore from "../crew/store.js";
 import * as handlers from "../handlers.js";
 import { logFeedEvent } from "../feed.js";
 import { generateMemorableName } from "../lib.js";
-import type { MessengerState, Dirs } from "../lib.js";
+import type { MessengerState, Dirs, AgentMailMessage } from "../lib.js";
+import { discoverCrewAgents } from "../crew/utils/discover.js";
+import { loadCrewConfig } from "../crew/utils/config.js";
+import { resolveModel } from "../crew/utils/model.js";
+import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../crew/agents.js";
 
 // =============================================================================
 // Bootstrap
@@ -382,11 +387,376 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
       break;
     }
 
+    case "spawn": {
+      const agent = cmd.args.agent as string;
+      const prompt = cmd.args.prompt as string;
+      if (!agent || !prompt) {
+        process.stderr.write("✗ Usage: pi-messenger-cli spawn --agent <name> --prompt <text>\n");
+        process.exitCode = 1;
+        return;
+      }
+      await runSpawn(state, dirs, cwd, agent, prompt, cmd.args.model as string | undefined);
+      break;
+    }
+
+    case "dismiss": {
+      const name = cmd.args.name as string;
+      if (!name) {
+        process.stderr.write("✗ Usage: pi-messenger-cli dismiss --name <name>\n");
+        process.exitCode = 1;
+        return;
+      }
+      await runDismiss(state, dirs, cwd, name);
+      break;
+    }
+
     default:
       process.stderr.write(`✗ Unknown command: ${cmd.action}\n`);
       printHelp();
       process.exitCode = 1;
   }
+}
+
+// =============================================================================
+// Spawn / Dismiss — collaborator lifecycle for non-pi runtimes
+// =============================================================================
+
+/** Directory for collaborator state files (PID, FIFO path, log file) */
+function getCollabStateDir(): string {
+  const dir = path.join(os.homedir(), ".pi", "agent", "messenger", "collaborators");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+interface CollabState {
+  name: string;
+  pid: number;
+  fifoPath: string;
+  logFile: string;
+  agent: string;
+  spawnedBy: string;
+  startedAt: string;
+}
+
+function readCollabState(name: string): CollabState | null {
+  const filePath = path.join(getCollabStateDir(), `${name}.json`);
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeCollabState(state: CollabState): void {
+  const filePath = path.join(getCollabStateDir(), `${state.name}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(state, null, 2));
+}
+
+function deleteCollabState(name: string): void {
+  const filePath = path.join(getCollabStateDir(), `${name}.json`);
+  try { fs.unlinkSync(filePath); } catch {}
+}
+
+const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+
+async function runSpawn(
+  state: MessengerState,
+  dirs: Dirs,
+  cwd: string,
+  agentName: string,
+  prompt: string,
+  modelOverride?: string,
+): Promise<void> {
+  // 1. Discover agent definition
+  const agents = discoverCrewAgents(cwd);
+  const agentConfig = agents.find(a => a.name === agentName);
+  if (!agentConfig) {
+    const available = agents.map(a => a.name).join(", ");
+    process.stderr.write(`✗ Agent "${agentName}" not found. Available: ${available}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (agentConfig.crewRole !== "collaborator") {
+    process.stderr.write(`✗ Agent "${agentName}" has crewRole "${agentConfig.crewRole ?? "none"}", not "collaborator".\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  // 2. Resolve model
+  const crewDir = path.join(cwd, ".pi", "messenger", "crew");
+  const config = loadCrewConfig(crewDir);
+  const resolved = resolveModel(
+    undefined,
+    modelOverride,
+    config.models?.collaborator,
+    config.defaultModel,
+    agentConfig.model,
+  );
+
+  // 3. Generate unique name
+  let collabName = generateMemorableName();
+  for (let i = 0; i < 5; i++) {
+    const regPath = path.join(dirs.registry, `${collabName}.json`);
+    if (!fs.existsSync(regPath)) break;
+    collabName = generateMemorableName();
+  }
+
+  // 4. Build pi args
+  const args = ["--mode", "rpc", "--no-session"];
+
+  if (resolved.model) {
+    pushModelArgs(args, resolved.model);
+  }
+
+  const thinking = resolveThinking(
+    config.thinking?.collaborator,
+    agentConfig?.thinking,
+  );
+  if (thinking && !modelHasThinkingSuffix(resolved.model)) {
+    args.push("--thinking", thinking);
+  }
+
+  if (agentConfig.tools?.length) {
+    const builtinTools: string[] = [];
+    const extensionPaths: string[] = [];
+    for (const tool of agentConfig.tools) {
+      if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
+        extensionPaths.push(tool);
+      } else if (BUILTIN_TOOLS.has(tool)) {
+        builtinTools.push(tool);
+      }
+    }
+    if (builtinTools.length > 0) args.push("--tools", builtinTools.join(","));
+    for (const ext of extensionPaths) args.push("--extension", ext);
+  }
+
+  // Load pi-messenger extension so collaborator can use pi_messenger
+  const extensionDir = path.resolve(__dirname, "..");
+  args.push("--extension", extensionDir);
+
+  // System prompt
+  let promptTmpDir: string | null = null;
+  if (agentConfig.systemPrompt) {
+    promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cli-collab-"));
+    const promptPath = path.join(promptTmpDir, `${agentName.replace(/[^\w.-]/g, "_")}.md`);
+    fs.writeFileSync(promptPath, agentConfig.systemPrompt, { mode: 0o600 });
+    args.push("--append-system-prompt", promptPath);
+  }
+
+  // 5. Create FIFO for stdin (keeps process alive between CLI invocations)
+  const collabId = randomUUID().slice(0, 8);
+  const tmpBase = promptTmpDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cli-collab-"));
+  if (!promptTmpDir) promptTmpDir = tmpBase;
+  const fifoPath = path.join(tmpBase, "stdin.fifo");
+  const logFile = path.join(tmpBase, "collab.log");
+
+  try {
+    execFileSync("mkfifo", [fifoPath]);
+  } catch (err) {
+    process.stderr.write(`✗ Failed to create FIFO: ${(err as Error).message}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  // Open log file
+  const logFd = fs.openSync(logFile, "w");
+
+  // 6. Spawn pi process with FIFO as stdin
+  const env = {
+    ...process.env,
+    PI_AGENT_NAME: collabName,
+    PI_CREW_COLLABORATOR: "1",
+  };
+
+  // Open FIFO for reading in the child (non-blocking open for spawn)
+  const fifoReadFd = fs.openSync(fifoPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+
+  const proc = spawnProcess("pi", args, {
+    cwd,
+    stdio: [fifoReadFd, logFd, logFd],
+    env,
+    detached: true,
+  });
+
+  // Close the fds in the parent — child owns them now
+  fs.closeSync(fifoReadFd);
+  fs.closeSync(logFd);
+
+  if (!proc.pid) {
+    process.stderr.write("✗ Failed to spawn pi process\n");
+    process.exitCode = 1;
+    return;
+  }
+
+  // Unref so CLI can exit while pi process continues
+  proc.unref();
+
+  // 7. Write initial prompt via FIFO
+  const fullPrompt = `Reply to: ${state.agentName}\n\n${prompt}`;
+  const rpcPrompt = JSON.stringify({ type: "prompt", message: fullPrompt });
+  const fifoWriteFd = fs.openSync(fifoPath, fs.constants.O_WRONLY);
+  fs.writeSync(fifoWriteFd, rpcPrompt + "\n");
+  // Keep FIFO write end open — closing it sends EOF to the reader (kills pi)
+  // We'll store the path and open it again for dismiss
+
+  // 8. Save state file
+  const collabState: CollabState = {
+    name: collabName,
+    pid: proc.pid,
+    fifoPath,
+    logFile,
+    agent: agentName,
+    spawnedBy: state.agentName,
+    startedAt: new Date().toISOString(),
+  };
+  writeCollabState(collabState);
+
+  // Pre-register in mesh registry
+  store.registerSpawnedWorker(
+    dirs.registry, cwd, collabName, proc.pid,
+    resolved.model ?? "unknown", `cli-collab-${collabId}`,
+  );
+
+  logFeedEvent(cwd, state.agentName, "spawn", collabName, agentName);
+
+  process.stderr.write(`Spawning collaborator ${collabName} (${agentName})...\n`);
+
+  // 9. Poll own inbox for first message
+  const inboxDir = path.join(dirs.inbox, state.agentName);
+  const startTime = Date.now();
+  const spawnTimeout = config.collaboration?.spawnPollTimeoutMs ?? 900_000;
+  const stallThreshold = config.collaboration?.stallThresholdMs ?? 120_000;
+  let lastLogSize = 0;
+  let lastLogChangeTime = startTime;
+
+  try {
+    const stat = fs.statSync(logFile);
+    lastLogSize = stat.size;
+  } catch {}
+
+  while (true) {
+    // Check if process crashed
+    try {
+      process.kill(proc.pid, 0); // signal 0 = check alive
+    } catch {
+      process.stderr.write(`✗ Collaborator "${collabName}" crashed.\n`);
+      const tail = readLogTailFromFile(logFile);
+      if (tail) process.stderr.write(`Log tail:\n${tail}\n`);
+      deleteCollabState(collabName);
+      process.exitCode = 1;
+      fs.closeSync(fifoWriteFd);
+      return;
+    }
+
+    // Check inbox for message
+    try {
+      if (fs.existsSync(inboxDir)) {
+        const files = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json")).sort();
+        for (const file of files) {
+          const filePath = path.join(inboxDir, file);
+          try {
+            const msg: AgentMailMessage = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+            if (msg.from === collabName) {
+              fs.unlinkSync(filePath);
+              // Close FIFO write end — but NOT yet. The collaborator needs to stay alive
+              // for subsequent send/dismiss. We close it in dismiss.
+              fs.closeSync(fifoWriteFd);
+              process.stdout.write(`✓ Collaborator "${collabName}" spawned (${agentName}). First message:\n\n${msg.text}\n`);
+              return;
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+
+    // Check log-based stall
+    try {
+      const stat = fs.statSync(logFile);
+      if (stat.size > lastLogSize) {
+        lastLogSize = stat.size;
+        lastLogChangeTime = Date.now();
+      }
+    } catch {}
+
+    const now = Date.now();
+    const stallDuration = now - lastLogChangeTime;
+    if (stallDuration >= stallThreshold) {
+      process.stderr.write(`✗ Collaborator "${collabName}" stalled (${Math.round(stallDuration / 1000)}s no log growth).\n`);
+      fs.closeSync(fifoWriteFd);
+      process.exitCode = 1;
+      return;
+    }
+
+    // Absolute timeout
+    if (now - startTime >= spawnTimeout) {
+      process.stderr.write(`✗ Collaborator "${collabName}" timed out (${Math.round((now - startTime) / 1000)}s).\n`);
+      fs.closeSync(fifoWriteFd);
+      process.exitCode = 1;
+      return;
+    }
+
+    // Progress
+    if ((now - startTime) % 30000 < 100) {
+      const elapsed = Math.round((now - startTime) / 1000);
+      process.stderr.write(`  Waiting for ${collabName}... ${elapsed}s elapsed\n`);
+    }
+
+    await sleep(100);
+  }
+}
+
+function readLogTailFromFile(logFile: string): string {
+  try {
+    const stat = fs.statSync(logFile);
+    if (stat.size === 0) return "";
+    const tailSize = Math.min(stat.size, 2048);
+    const buf = Buffer.alloc(tailSize);
+    const fd = fs.openSync(logFile, "r");
+    fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+    fs.closeSync(fd);
+    return buf.toString("utf-8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function runDismiss(
+  state: MessengerState,
+  dirs: Dirs,
+  cwd: string,
+  name: string,
+): Promise<void> {
+  const collabState = readCollabState(name);
+  if (!collabState) {
+    process.stderr.write(`✗ No active collaborator named "${name}".\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  // Kill the process
+  try {
+    process.kill(collabState.pid, "SIGTERM");
+  } catch {
+    // Already dead
+  }
+
+  // Clean up FIFO
+  try { fs.unlinkSync(collabState.fifoPath); } catch {}
+
+  // Clean up state file
+  deleteCollabState(name);
+
+  // Clean up registry
+  const regPath = path.join(dirs.registry, `${name}.json`);
+  try { fs.unlinkSync(regPath); } catch {}
+
+  logFeedEvent(cwd, state.agentName, "dismiss", name);
+  process.stdout.write(`✓ Collaborator "${name}" dismissed.\n`);
 }
 
 function printHelp(): void {
@@ -404,6 +774,8 @@ Commands:
   task.show <id>                    Show task details
   task.start <id>                   Claim and start a task
   task.done <id> --summary <text>   Complete a task
+  spawn --agent <name> --prompt <text>  Spawn a collaborator (blocks for first message)
+  dismiss --name <name>             Dismiss a collaborator
 
 Environment:
   PI_AGENT_NAME     Agent name (auto-generated if not set)
