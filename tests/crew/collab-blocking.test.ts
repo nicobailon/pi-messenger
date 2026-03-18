@@ -684,6 +684,48 @@ describe("pollForCollaboratorMessage", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// resolveSpawnPollTimeout (spec 008)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("resolveSpawnPollTimeout", () => {
+  let resolveSpawnPollTimeout: typeof import("../../crew/handlers/collab.js").resolveSpawnPollTimeout;
+  let DEFAULT_SPAWN_POLL_TIMEOUT_MS: number;
+  let MIN_STALL_THRESHOLD_MS: number;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const mod = await import("../../crew/handlers/collab.js");
+    resolveSpawnPollTimeout = mod.resolveSpawnPollTimeout;
+    DEFAULT_SPAWN_POLL_TIMEOUT_MS = mod.DEFAULT_SPAWN_POLL_TIMEOUT_MS;
+    MIN_STALL_THRESHOLD_MS = mod.MIN_STALL_THRESHOLD_MS;
+  });
+
+  it("returns configured spawnPollTimeoutMs when present and valid", () => {
+    const config = { collaboration: { stallThresholdMs: 120_000, pollTimeoutMs: 300_000, spawnPollTimeoutMs: 600_000 } } as any;
+    expect(resolveSpawnPollTimeout(config)).toBe(600_000);
+  });
+
+  it("returns DEFAULT_SPAWN_POLL_TIMEOUT_MS when spawnPollTimeoutMs is absent", () => {
+    const config = { collaboration: { stallThresholdMs: 120_000, pollTimeoutMs: 300_000 } } as any;
+    expect(resolveSpawnPollTimeout(config)).toBe(DEFAULT_SPAWN_POLL_TIMEOUT_MS);
+    expect(DEFAULT_SPAWN_POLL_TIMEOUT_MS).toBe(900_000);
+  });
+
+  it("clamps negative values to MIN_STALL_THRESHOLD_MS", () => {
+    const config = { collaboration: { stallThresholdMs: 120_000, pollTimeoutMs: 300_000, spawnPollTimeoutMs: -1 } } as any;
+    expect(resolveSpawnPollTimeout(config)).toBe(MIN_STALL_THRESHOLD_MS);
+  });
+
+  it("returns default for non-finite values (NaN, Infinity)", () => {
+    const nanConfig = { collaboration: { stallThresholdMs: 120_000, pollTimeoutMs: 300_000, spawnPollTimeoutMs: NaN } } as any;
+    expect(resolveSpawnPollTimeout(nanConfig)).toBe(DEFAULT_SPAWN_POLL_TIMEOUT_MS);
+
+    const infConfig = { collaboration: { stallThresholdMs: 120_000, pollTimeoutMs: 300_000, spawnPollTimeoutMs: Infinity } } as any;
+    expect(resolveSpawnPollTimeout(infConfig)).toBe(DEFAULT_SPAWN_POLL_TIMEOUT_MS);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // deliverFn boolean contract (processAllPendingMessages)
 // ─────────────────────────────────────────────────────────────────────────────
 
