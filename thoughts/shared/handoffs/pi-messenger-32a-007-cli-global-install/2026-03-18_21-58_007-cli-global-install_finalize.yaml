@@ -1,0 +1,70 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-03-18T21:58:43.096Z
+session: "pi-messenger-32a-007-cli-global-install"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-32a"
+---
+
+goal: "Make pi-messenger-cli globally available so non-pi runtimes (Codex, Claude Code) can participate in the collaboration protocol. Full pipeline: shape, plan, codex-review, implement, code-verify. Also fix spawn stall regression (spec 008) that was blocking collaborator spawns."
+now: "pi-messenger-cli is installed and working from any terminal on macOS. spawn + dismiss commands added so non-pi agents can orchestrate collaboration. Spec 008 (spawn poll timeout) also shipped — collaborator spawns no longer stall at 300s. Both specs implemented with tests passing (487 total)."
+
+done_this_session:
+  - "Spec 007: shaped with Dale + challenger UltraDragon — 8 shapes explored (A-H), Shape H (jiti wrapper) selected"
+  - "Spec 007: planned with challenger PureZenith — 6 findings addressed (which-pi unreliable, --remove gap, collision guard, skipCommandCheck, PI_MESSENGER_DIR, graceful-failure test)"
+  - "Spec 007: Codex plan review — 3 rounds, 8 findings (collision guard exit code, R4 hard error, worker env check, AC5 crew-spawned test, missing-jiti exit code)"
+  - "Spec 007: implemented — jiti wrapper in ~/.pi/agent/bin/, symlink in /opt/homebrew/bin/, install/remove/idempotent, spawn-time validation"
+  - "Spec 007: POST-VERIFY FIX — Homebrew bin symlink (PATH was only in pi sessions, not regular terminals — missed by entire pipeline, caught by user in 5 seconds)"
+  - "Spec 007: POST-VERIFY FIX — spawn + dismiss commands added to CLI (the critical missing piece — without these, non-pi agents can't orchestrate collaboration)"
+  - "Spec 008: root-caused with LoudArrow — D5 absolute timeout (300s) fires during spawn, killing working collaborators"
+  - "Spec 008: shaped, planned (challenger SwiftCastle), Codex reviewed (2 rounds), implemented, code-verified (3 rounds)"
+  - "Spec 008: fix — spawnPollTimeoutMs config (900s default), resolveSpawnPollTimeout helper, config path bug fix (.pi-crew → canonical)"
+
+decisions:
+  - "Shape H over bundling: jiti wrapper avoids esbuild dependency, __dirname breakage, bundle bloat, dynamic import issues, and R7 violations"
+  - "npm prefix -g over which pi: avoids hard dependency on pi being in PATH at install time"
+  - "Homebrew bin symlink: ~/.pi/agent/bin/ is only in PATH inside pi sessions — /opt/homebrew/bin/ is the real system-wide PATH on macOS"
+  - "Collision guard exits 0 when wrapper succeeds: the wrapper IS the deliverable, extension copy skip is informational"
+  - "R4 as hard error: non-pi workers literally cannot function without pi-messenger-cli — a warning is insufficient"
+  - "Spec 008: different pollTimeoutMs per caller (not context field + D5 gating) — simpler, no PollOptions change, no existing test modifications"
+
+findings:
+  - "CRITICAL LEARNING: every agent in the pipeline runs inside pi where getShellEnv() adds ~/.pi/agent/bin/ to PATH. This masks the fact that regular terminals don't have it. Survived 8 shapes, 3 challengers, 6 Codex rounds before the user caught it in 5 seconds from Terminal."
+  - "Pi ships with jiti (@mariozechner/jiti) that handles .ts → .js import convention — Node's built-in TS support (strip-types, transform-types) cannot"
+  - "Spec 006 D5 (absolute poll timeout) was correct for send context but regressed spawn — the same pollForCollaboratorMessage function handles both with no context awareness"
+  - "The CLI without spawn/dismiss was useless — non-pi agents need to orchestrate collaboration, not just do worker tasks"
+
+failed:
+  - "PATH verification from inside pi — environmental bias that every agent shares. Must use clean env (env -i PATH=... which <cmd>)"
+  - "Shipping CLI without spawn/dismiss — missed the fundamental use case despite extensive shaping and review"
+
+test:
+  command: "npx vitest run"
+  result: "pass"
+  count: 487
+
+files:
+  - install.mjs
+  - cli/index.ts
+  - crew/runtime-spawn.ts
+  - crew/handlers/collab.ts
+  - crew/utils/config.ts
+  - handlers.ts
+  - tests/crew/cli-wrapper.test.ts
+  - tests/crew/adapters.test.ts
+  - tests/crew/collab-blocking.test.ts
+
+artifacts_produced:
+  - specs/007-cli-global-install/ (spec, shaping, plan, tasks, codex-review, implement-receipt)
+  - specs/008-context-aware-poll-timeout/ (spec, shaping, plan, tasks, codex-review, implement-receipt, code-verify)
+
+next:
+  - "Spec 007 code-verify: spawn/dismiss and Homebrew symlink changes are unverified by Codex"
+  - "Resume spec 007 shaping with working spawn — the original trigger for this work"
+  - "Test spawn/dismiss from actual Codex session to verify end-to-end"
+
+git:
+  branch: "feat/002-multi-runtime-support"
+  commit: "b648bb118ce91d85699c6d3a0a57eccf62c23f31"
+  remote: "https://github.com/carmandale/pi-messenger.git"
