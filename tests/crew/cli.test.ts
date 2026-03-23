@@ -418,7 +418,7 @@ describe("pi-messenger-cli", () => {
       expect(result.stdout).toContain("KnownName");
     });
 
-    it("status shows correct identity from session file (read-only path)", () => {
+    it("status shows correct identity AND model from session file (read-only path)", () => {
       writeSession("test-model-status", "StatusAgentName");
 
       const result = runCli(["status", "--self-model", "test-model-status"], {
@@ -427,6 +427,8 @@ describe("pi-messenger-cli", () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("StatusAgentName");
+      // Model propagation: status must also show the session model, not "unknown"
+      expect(result.stdout).toContain("Model: test-model-status");
     });
 
     it("expired session (>8h) generates a new name", () => {
@@ -543,49 +545,102 @@ describe("pi-messenger-cli", () => {
       expect(result.exitCode).toBe(0);
     });
 
-    it("Codex config auto-detection extracts model from config.toml", () => {
-      // Create a fake ~/.codex/config.toml in temp dir
-      const fakeCodexDir = path.join(testDir, "fake-codex");
+    it("Codex config auto-detection reads model from ~/.codex/config.toml (no --self-model)", () => {
+      // Create a fake HOME with a Codex config that has a known model
+      const fakeHome = path.join(testDir, "fake-home");
+      const fakeCodexDir = path.join(fakeHome, ".codex");
       fs.mkdirSync(fakeCodexDir, { recursive: true });
-      const fakeConfigToml = path.join(fakeCodexDir, "config.toml");
-      fs.writeFileSync(fakeConfigToml, `
-tool_output_token_limit = 25000
-model = "gpt-5.3-codex-test"
-model_reasoning_effort = "xhigh"
+      fs.writeFileSync(path.join(fakeCodexDir, "config.toml"), [
+        'tool_output_token_limit = 25000',
+        'model = "gpt-5.3-codex-autodetect-test"',
+        'model_reasoning_effort = "xhigh"',
+        '',
+        '[mcp_servers.foo]',
+        'command = "bar"',
+      ].join("\n"));
 
-[mcp_servers.foo]
-command = "bar"
-`);
-
-      // We can't override HOME in the CLI easily, but we can test via PI_AGENT_MODEL
-      // Instead verify the detection logic via the direct module API by
-      // checking that without PI_AGENT_MODEL set and no real codex config,
-      // we get the expected harness fallback
-      const result = runCli(["join", "--self-model", "gpt-5.3-codex-test"], {
+      // Run join WITHOUT --self-model — detectModel() must read from config.toml via HOME
+      const result = runCli(["join"], {
         PI_MESSENGER_DIR: messengerDir,
+        HOME: fakeHome,
+        // Clear all harness env vars so only config.toml can provide the model
+        PI_AGENT_MODEL: "",
+        GEMINI_API_KEY: "",
+        ANTHROPIC_API_KEY: "",
+        PI_AGENT_NAME: "",
       }, testDir);
 
       expect(result.exitCode).toBe(0);
-      const session = readSession("gpt-5.3-codex-test");
-      expect(session?.model).toBe("gpt-5.3-codex-test");
+      expect(result.stdout).toContain("Joined mesh as");
+
+      // Session must have the model from config.toml, not "unknown"
+      const session = readSession("gpt-5.3-codex-autodetect-test");
+      expect(session).not.toBeNull();
+      expect(session!.model).toBe("gpt-5.3-codex-autodetect-test");
     });
 
-    it("--self-model flag does NOT affect spawn --model (flag isolation)", () => {
-      // spawn --model is used for collaborator model override — verify parsing
-      // doesn't conflate it with --self-model
-      // We can verify by checking that join --self-model creates the right session key
-      // while spawn --model would be a different arg
-      const result = runCli(["join", "--self-model", "driver-model"], {
+    it("--self-model and --model are parsed into separate args (flag isolation)", () => {
+      // spawn uses cmd.args.model for collaborator model override (cli/index.ts:413)
+      // join/status/etc use cmd.args.selfModel for driver identity
+      // This test verifies parseArgs correctly separates them so they can't cross-contaminate.
+      //
+      // We test by: (a) join --self-model X creates session keyed on X,
+      // and (b) the key does NOT match a session keyed on something else.
+      // A real spawn integration test would require the pi binary; this validates
+      // the parseArgs-level contract that protects against the collision.
+
+      const result = runCli(["join", "--self-model", "driver-model-isolation"], {
         PI_MESSENGER_DIR: messengerDir,
+        PI_AGENT_NAME: "",
       }, testDir);
 
       expect(result.exitCode).toBe(0);
-      const session = readSession("driver-model");
-      expect(session?.model).toBe("driver-model");
-      // session key should be based on "driver-model", not some other value
-      const expectedKey = createHash("sha256").update(testDir + "driver-model").digest("hex");
+      const session = readSession("driver-model-isolation");
+      expect(session?.model).toBe("driver-model-isolation");
+
+      // session key must be sha256(cwd + "driver-model-isolation"), not sha256(cwd + something-else)
+      const correctKey = createHash("sha256").update(testDir + "driver-model-isolation").digest("hex");
+      const wrongKey = createHash("sha256").update(testDir + "collaborator-model").digest("hex");
       const sessionsDir = path.join(messengerDir, "cli-sessions");
-      expect(fs.existsSync(path.join(sessionsDir, `${expectedKey}.json`))).toBe(true);
+      expect(fs.existsSync(path.join(sessionsDir, `${correctKey}.json`))).toBe(true);
+      expect(fs.existsSync(path.join(sessionsDir, `${wrongKey}.json`))).toBe(false);
+
+      // Status also shows driver model from session (not collaborator model)
+      const statusResult = runCli(["status", "--self-model", "driver-model-isolation"], {
+        PI_MESSENGER_DIR: messengerDir,
+        PI_AGENT_NAME: "",
+      }, testDir);
+      expect(statusResult.stdout).toContain("Model: driver-model-isolation");
+    });
+
+    it("leave works when model detection fails (CWD-scan fallback)", () => {
+      // Write a session without going through detectModel — simulates a runtime
+      // where model detection is unavailable
+      writeSession("some-model-leave-fallback", "FallbackLeaveAgent");
+      const regPath = path.join(messengerDir, "registry", "FallbackLeaveAgent.json");
+      const inboxDir = path.join(messengerDir, "inbox", "FallbackLeaveAgent");
+      fs.writeFileSync(regPath, JSON.stringify({ name: "FallbackLeaveAgent", pid: 99999999 }));
+      fs.mkdirSync(inboxDir, { recursive: true });
+
+      // Leave WITHOUT --self-model, with no detectable runtime signals (clear HOME, clear API keys)
+      // detectModel() will throw, leave must fall back to CWD scan
+      const fakeHome = path.join(testDir, "empty-home");
+      fs.mkdirSync(fakeHome, { recursive: true });
+      const result = runCli(["leave"], {
+        PI_MESSENGER_DIR: messengerDir,
+        HOME: fakeHome,
+        PI_AGENT_MODEL: "",
+        GEMINI_API_KEY: "",
+        ANTHROPIC_API_KEY: "",
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Left mesh");
+
+      // Session file cleaned up via CWD-scan fallback
+      expect(readSession("some-model-leave-fallback")).toBeNull();
+      expect(fs.existsSync(regPath)).toBe(false);
+      expect(fs.existsSync(inboxDir)).toBe(false);
     });
   });
 });

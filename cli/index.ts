@@ -612,8 +612,34 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
       // We read the session file to find the identity, then clean up.
       let leftMesh = false;
       try {
-        const leaveModel = detectModel(cmd.args.selfModel as string | undefined);
-        const session = readCliSession(dirs, cwd, leaveModel);
+        // Try to find the session file. If model detection fails (no --self-model,
+        // no env, no config), fall back to scanning cli-sessions/ for any file
+        // matching this CWD — so leave works even in environments where model
+        // detection is unavailable (plan task §6: "catch error — leave should work
+        // even without model detection").
+        let session: CliSession | null = null;
+        try {
+          const leaveModel = detectModel(cmd.args.selfModel as string | undefined);
+          session = readCliSession(dirs, cwd, leaveModel);
+        } catch {
+          // Model detection failed — scan all session files for one matching this CWD
+          const sessionsDir = getCliSessionsDir(dirs);
+          if (fs.existsSync(sessionsDir)) {
+            for (const f of fs.readdirSync(sessionsDir)) {
+              if (!f.endsWith(".json") || f.startsWith(".")) continue;
+              try {
+                const candidate = JSON.parse(fs.readFileSync(path.join(sessionsDir, f), "utf-8")) as CliSession;
+                if (candidate.cwd === cwd) {
+                  const age = Date.now() - new Date(candidate.startedAt).getTime();
+                  if (age <= CLI_SESSION_TTL_MS) {
+                    session = candidate;
+                    break;
+                  }
+                }
+              } catch { /* skip malformed file */ }
+            }
+          }
+        }
         if (!session) {
           process.stdout.write("No active session found.\n");
           break;
@@ -643,9 +669,9 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
           }
         }
 
-        // Delete session file (always)
+        // Delete session file (always) — key by the session's actual model
         const sessionsDir = getCliSessionsDir(dirs);
-        const key = getCliSessionKey(cwd, leaveModel);
+        const key = getCliSessionKey(cwd, session.model);
         try { fs.unlinkSync(path.join(sessionsDir, `${key}.json`)); } catch {}
 
         if (canCleanRegistry) {
