@@ -658,7 +658,7 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
 
         leftMesh = true;
       } catch {
-        // detectModel may call process.exit(1) if no model found.
+        // detectModel may throw if no model detected.
         // If we get here some other error occurred.
         process.stderr.write("✗ Failed to leave mesh cleanly. Session file may still exist.\n");
         process.exitCode = 1;
