@@ -136,14 +136,162 @@ function bootstrapCrewSpawned(dirs: Dirs): string | null {
   return null;
 }
 
-/**
- * External agent mode: Self-register with a memorable name.
- * Re-registers on every command to stay current.
- */
-function bootstrapExternal(dirs: Dirs, cwd: string): string {
-  const name = process.env.PI_AGENT_NAME || generateMemorableName();
-  const regDir = dirs.registry;
+// =============================================================================
+// Model Detection (Task 1)
+// =============================================================================
 
+interface CliSession {
+  name: string;
+  model: string;
+  cwd: string;
+  startedAt: string;
+}
+
+/**
+ * Detect the model/harness identifier for a non-pi runtime.
+ *
+ * Priority stack (first match wins):
+ * 1. `--self-model` CLI flag (explicit override)
+ * 2. PI_AGENT_MODEL environment variable
+ * 3. Codex config probe: ~/.codex/config.toml → top-level `model = "..."` field
+ * 4. Harness detection: presence of known config files / API key env vars
+ * 5. Error — caller must supply --self-model or set PI_AGENT_MODEL
+ *
+ * Never returns "unknown".
+ */
+function detectModel(modelFlag?: string): string {
+  // 1. Explicit flag
+  if (modelFlag) return modelFlag;
+
+  // 2. Environment variable
+  const envModel = process.env.PI_AGENT_MODEL;
+  if (envModel && envModel !== "unknown") return envModel;
+
+  // 3. Codex config probe: read ~/.codex/config.toml, extract top-level model field
+  const codexConfigPath = path.join(os.homedir(), ".codex", "config.toml");
+  if (fs.existsSync(codexConfigPath)) {
+    try {
+      const content = fs.readFileSync(codexConfigPath, "utf-8");
+      for (const line of content.split("\n")) {
+        // Stop at first [section] header — we only want top-level keys
+        if (/^\s*\[/.test(line)) break;
+        // Skip comment lines
+        if (/^\s*#/.test(line)) continue;
+        // Match: model = "value"
+        const m = line.match(/^\s*model\s*=\s*"([^"]+)"/);
+        if (m) return m[1];
+      }
+      // Config exists but has no top-level model — fall through to harness detection
+      // Still identify as codex harness
+      return "codex";
+    } catch {
+      // Read error — fall through
+    }
+  }
+
+  // 4. Harness detection via environment signals
+  if (process.env.GEMINI_API_KEY) return "gemini";
+  if (process.env.ANTHROPIC_API_KEY) return "claude-code";
+
+  // 5. Nothing detected — throw so callers can decide whether to exit or fall back
+  throw new Error(
+    "No model detected. Use --self-model <model> or set PI_AGENT_MODEL.\n" +
+    "  Examples: pi-messenger-cli join --self-model gpt-5.3-codex\n" +
+    "            PI_AGENT_MODEL=gemini-2.5-pro pi-messenger-cli join",
+  );
+}
+
+// =============================================================================
+// Session Persistence (Task 2)
+// =============================================================================
+
+const CLI_SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
+
+function getCliSessionsDir(dirs: Dirs): string {
+  return path.join(dirs.base, "cli-sessions");
+}
+
+function getCliSessionKey(cwd: string, model: string): string {
+  return createHash("sha256").update(cwd + model).digest("hex");
+}
+
+/**
+ * Read an existing CLI session for this CWD+model combination.
+ * Returns null if not found or expired (TTL exceeded).
+ * Exact key only — no fuzzy fallback (preserves harness isolation).
+ */
+function readCliSession(dirs: Dirs, cwd: string, model: string): CliSession | null {
+  const sessionsDir = getCliSessionsDir(dirs);
+  const key = getCliSessionKey(cwd, model);
+  const sessionPath = path.join(sessionsDir, `${key}.json`);
+
+  if (!fs.existsSync(sessionPath)) return null;
+
+  try {
+    const data = JSON.parse(fs.readFileSync(sessionPath, "utf-8")) as CliSession;
+    // Validate required fields
+    if (!data.name || !data.model || !data.cwd || !data.startedAt) return null;
+    // Check TTL
+    const age = Date.now() - new Date(data.startedAt).getTime();
+    if (age > CLI_SESSION_TTL_MS) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write a CLI session file atomically.
+ */
+function writeCliSession(dirs: Dirs, cwd: string, model: string, name: string): void {
+  const sessionsDir = getCliSessionsDir(dirs);
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+  } catch {}
+
+  const key = getCliSessionKey(cwd, model);
+  const session: CliSession = { name, model, cwd, startedAt: new Date().toISOString() };
+  const tmpPath = path.join(sessionsDir, `.${key}.tmp`);
+  const finalPath = path.join(sessionsDir, `${key}.json`);
+  fs.writeFileSync(tmpPath, JSON.stringify(session, null, 2));
+  fs.renameSync(tmpPath, finalPath);
+}
+
+// =============================================================================
+// External Bootstrap (Task 3)
+// =============================================================================
+
+/**
+ * External agent mode: Self-register with a stable name.
+ *
+ * Uses a session file (keyed by sha256(cwd+model)) to persist identity across
+ * CLI invocations. Agents get the same name + model on every command within a
+ * session (8h TTL), fixing the identity rotation problem for non-pi runtimes.
+ *
+ * Returns { name, model } so bootstrap() can propagate model to state.
+ */
+function bootstrapExternal(dirs: Dirs, cwd: string, modelFlag?: string): { name: string; model: string } {
+  let resolvedModel: string;
+  try {
+    resolvedModel = detectModel(modelFlag);
+  } catch (e) {
+    process.stderr.write(`✗ ${(e as Error).message}\n`);
+    process.exit(1);
+  }
+
+  // Check for existing session
+  const existing = readCliSession(dirs, cwd, resolvedModel);
+  // Always use generateMemorableName() for new sessions — do NOT fall back to PI_AGENT_NAME.
+  // PI_AGENT_NAME leaks from parent environments and would defeat harness isolation: two
+  // different models in the same CWD would inherit the same name from the env var.
+  const name = existing ? existing.name : generateMemorableName();
+
+  // Write session if new
+  if (!existing) {
+    writeCliSession(dirs, cwd, resolvedModel, name);
+  }
+
+  const regDir = dirs.registry;
   try {
     fs.mkdirSync(regDir, { recursive: true });
   } catch {}
@@ -153,7 +301,7 @@ function bootstrapExternal(dirs: Dirs, cwd: string): string {
     pid: process.pid,
     sessionId: `cli-${process.pid}`,
     cwd,
-    model: process.env.PI_AGENT_MODEL ?? "unknown",
+    model: resolvedModel,
     startedAt: new Date().toISOString(),
     isHuman: false,
     session: { toolCalls: 0, tokens: 0, filesModified: [] },
@@ -166,7 +314,7 @@ function bootstrapExternal(dirs: Dirs, cwd: string): string {
   fs.writeFileSync(tmpPath, JSON.stringify(registration, null, 2));
   fs.renameSync(tmpPath, finalPath);
 
-  return name;
+  return { name, model: resolvedModel };
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -205,7 +353,11 @@ function parseArgs(argv: string[]): ParsedCommand {
         i++;
       } else {
         // Collect multiple values for known array args
-        if (key === "paths") {
+        if (key === "self-model") {
+          // Normalize --self-model to args.selfModel for camelCase access
+          args["selfModel"] = next;
+          i += 2;
+        } else if (key === "paths") {
           const paths: string[] = [];
           while (i + 1 < rest.length && !rest[i + 1].startsWith("--")) {
             paths.push(rest[++i]);
@@ -258,14 +410,19 @@ function printResult(result: { content: Array<{ text: string }>; details: Record
  */
 const READ_ONLY_COMMANDS = new Set([
   "list", "status", "feed", "task.list", "task.show", "help", "version",
+  // leave reads session file to find identity, then cleans up — must NOT re-register
+  // (re-registration would clobber the PID before ownership validation can run)
+  "leave",
 ]);
 
-function bootstrap(cwd: string, options?: { register?: boolean }): { state: MessengerState; dirs: Dirs } {
+function bootstrap(cwd: string, options?: { register?: boolean; selfModel?: string }): { state: MessengerState; dirs: Dirs } {
   const dirs = getMessengerDirs();
   const isCrewSpawned = process.env.PI_CREW_WORKER === "1";
   const shouldRegister = options?.register !== false;
 
   let name: string;
+  let resolvedModel: string | undefined;
+
   if (isCrewSpawned) {
     const crewName = bootstrapCrewSpawned(dirs);
     if (!crewName) {
@@ -273,14 +430,36 @@ function bootstrap(cwd: string, options?: { register?: boolean }): { state: Mess
       process.exit(1);
     }
     name = crewName;
+    // pi-native crew workers get model from their own registration — no override needed
   } else if (shouldRegister) {
-    name = bootstrapExternal(dirs, cwd);
+    // Registering path: bootstrapExternal handles model detection + session persistence
+    const result = bootstrapExternal(dirs, cwd, options?.selfModel);
+    name = result.name;
+    resolvedModel = result.model;
   } else {
-    // Read-only: resolve name from env or existing registration, but do NOT write to registry
-    name = process.env.PI_AGENT_NAME || "anonymous";
+    // Read-only path: check session file for identity, fall back to env/anonymous
+    let sessionModel: string | undefined;
+    try {
+      const detectedModel = detectModel(options?.selfModel);
+      const session = readCliSession(dirs, cwd, detectedModel);
+      if (session) {
+        name = session.name;
+        sessionModel = session.model;
+      } else {
+        name = process.env.PI_AGENT_NAME || "anonymous";
+      }
+    } catch {
+      // detectModel may throw (error exit) — for read-only commands, fall back gracefully
+      name = process.env.PI_AGENT_NAME || "anonymous";
+    }
+    resolvedModel = sessionModel;
   }
 
   const state = createMinimalState(name, cwd);
+  // Propagate resolved model to state — overrides the env-based default in createMinimalState
+  if (resolvedModel !== undefined) {
+    state.model = resolvedModel;
+  }
   return { state, dirs };
 }
 
@@ -296,7 +475,10 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
     return;
   }
 
-  const { state, dirs } = bootstrap(cwd, { register: !READ_ONLY_COMMANDS.has(cmd.action) });
+  const { state, dirs } = bootstrap(cwd, {
+    register: !READ_ONLY_COMMANDS.has(cmd.action),
+    selfModel: cmd.args.selfModel as string | undefined,
+  });
 
   // Validate nonce for mutating commands on crew-spawned workers
   if (MUTATING_COMMANDS.has(cmd.action) && process.env.PI_CREW_WORKER === "1") {
@@ -422,6 +604,69 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
         return;
       }
       await runDismiss(state, dirs, cwd, name);
+      break;
+    }
+
+    case "leave": {
+      // leave is in READ_ONLY_COMMANDS — bootstrap did NOT re-register.
+      // We read the session file to find the identity, then clean up.
+      let leftMesh = false;
+      try {
+        const leaveModel = detectModel(cmd.args.selfModel as string | undefined);
+        const session = readCliSession(dirs, cwd, leaveModel);
+        if (!session) {
+          process.stdout.write("No active session found.\n");
+          break;
+        }
+        const sessionName = session.name;
+
+        // Ownership validation: if registry entry has an active PID that isn't us, don't touch it
+        const regPath = path.join(dirs.registry, `${sessionName}.json`);
+        let canCleanRegistry = true;
+        if (fs.existsSync(regPath)) {
+          try {
+            const reg = JSON.parse(fs.readFileSync(regPath, "utf-8")) as { pid: number };
+            if (reg.pid && reg.pid !== process.pid) {
+              try {
+                process.kill(reg.pid, 0); // probe — throws if dead
+                // PID is alive and not us
+                process.stdout.write(
+                  `Session identity "${sessionName}" is in use by PID ${reg.pid} — clearing session file only.\n`,
+                );
+                canCleanRegistry = false;
+              } catch {
+                // PID is dead — safe to clean
+              }
+            }
+          } catch {
+            // Can't read registry — safe to proceed
+          }
+        }
+
+        // Delete session file (always)
+        const sessionsDir = getCliSessionsDir(dirs);
+        const key = getCliSessionKey(cwd, leaveModel);
+        try { fs.unlinkSync(path.join(sessionsDir, `${key}.json`)); } catch {}
+
+        if (canCleanRegistry) {
+          // Delete registry entry
+          try { fs.unlinkSync(regPath); } catch {}
+          // Delete inbox directory
+          const inboxDir = path.join(dirs.inbox, sessionName);
+          try { fs.rmSync(inboxDir, { recursive: true, force: true }); } catch {}
+        }
+
+        leftMesh = true;
+      } catch {
+        // detectModel may call process.exit(1) if no model found.
+        // If we get here some other error occurred.
+        process.stderr.write("✗ Failed to leave mesh cleanly. Session file may still exist.\n");
+        process.exitCode = 1;
+        break;
+      }
+      if (leftMesh) {
+        process.stdout.write("✓ Left mesh. Session cleared.\n");
+      }
       break;
     }
 
@@ -778,23 +1023,30 @@ function printHelp(): void {
   process.stdout.write(`pi-messenger-cli — Mesh access for non-pi runtimes
 
 Commands:
-  join                              Register on the mesh
-  status                            Show your status
-  list                              List active agents
-  send --to <name> --message <text> Send a message
-  reserve --paths <path...>         Reserve files
-  release [--paths <path...>]       Release reservations
-  feed [--limit <n>]                Show activity feed
-  task.list                         List all tasks
-  task.show <id>                    Show task details
-  task.start <id>                   Claim and start a task
-  task.done <id> --summary <text>   Complete a task
-  spawn --agent <name> --prompt <text>  Spawn a collaborator (blocks for first message)
-  dismiss --name <name>             Dismiss a collaborator
+  join [--self-model <model>]        Register on the mesh
+  leave                              Leave mesh and clear session
+  status                             Show your status
+  list                               List active agents
+  send --to <name> --message <text>  Send a message
+  reserve --paths <path...>          Reserve files
+  release [--paths <path...>]        Release reservations
+  feed [--limit <n>]                 Show activity feed
+  task.list                          List all tasks
+  task.show <id>                     Show task details
+  task.start <id>                    Claim and start a task
+  task.done <id> --summary <text>    Complete a task
+  spawn --agent <name> --prompt <text>   Spawn a collaborator (blocks for first message)
+  dismiss --name <name>              Dismiss a collaborator
+
+Flags:
+  --self-model <model>  Set your model identity (e.g., 'gpt-5.3-codex').
+                        Auto-detected for Codex from ~/.codex/config.toml.
+                        Distinct from --model on spawn (which sets collaborator model).
 
 Environment:
   PI_AGENT_NAME     Agent name (auto-generated if not set)
-  PI_AGENT_MODEL    Model identifier for registration
+  PI_AGENT_MODEL    Model identifier for registration (auto-detected if not set;
+                    Codex reads from ~/.codex/config.toml, others from API key env vars)
   PI_CREW_WORKER=1  Crew-spawned mode (reads pre-registration)
   PI_MESSENGER_DIR  Override messenger directory
 `);

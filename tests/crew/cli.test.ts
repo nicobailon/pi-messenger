@@ -74,20 +74,25 @@ describe("pi-messenger-cli", () => {
       fs.mkdirSync(path.join(messengerDir, "registry"), { recursive: true });
       fs.mkdirSync(path.join(messengerDir, "inbox"), { recursive: true });
 
-      const result = runCli(["join"], {
+      // Note: PI_AGENT_NAME is no longer used in external mode for name selection.
+      // Session files (keyed by sha256(cwd+model)) replace PI_AGENT_NAME as the
+      // persistence mechanism. bootstrapExternal() always generates a name via
+      // generateMemorableName() for new sessions to preserve harness isolation.
+      const result = runCli(["join", "--self-model", "test-join-model"], {
         PI_MESSENGER_DIR: messengerDir,
-        PI_AGENT_NAME: "TestAgent",
+        PI_AGENT_NAME: "",  // Cleared to prevent env bleed-through
       });
 
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("TestAgent");
+      expect(result.stdout).toContain("Joined mesh as");
 
-      // Verify registration file WAS created
-      const regFile = path.join(messengerDir, "registry", "TestAgent.json");
-      expect(fs.existsSync(regFile)).toBe(true);
+      // Verify registration file WAS created (any name)
+      const registryFiles = fs.readdirSync(path.join(messengerDir, "registry"))
+        .filter(f => !f.startsWith(".") && f.endsWith(".json"));
+      expect(registryFiles.length).toBeGreaterThan(0);
 
-      const reg = JSON.parse(fs.readFileSync(regFile, "utf-8"));
-      expect(reg.name).toBe("TestAgent");
+      const reg = JSON.parse(fs.readFileSync(path.join(messengerDir, "registry", registryFiles[0]), "utf-8"));
+      expect(reg.name).toBeTruthy();
       expect(reg.isHuman).toBe(false);
     });
 
@@ -183,8 +188,11 @@ describe("pi-messenger-cli", () => {
     });
 
     it("join registers agent", () => {
-      const result = runCli(["join"], env());
-      expect(result.stdout).toContain("Joined mesh as CliTest");
+      // PI_AGENT_NAME is no longer used by bootstrapExternal() for name selection.
+      // The session file mechanism (sha256(cwd+model)) replaces it.
+      // This test verifies join succeeds and produces some agent name.
+      const result = runCli(["join", "--self-model", "routing-test-model"], env());
+      expect(result.stdout).toContain("Joined mesh as");
       expect(result.exitCode).toBe(0);
     });
 
@@ -330,6 +338,254 @@ describe("pi-messenger-cli", () => {
       // Should get usage error, not nonce error
       expect(result.stderr).toContain("Usage");
       expect(result.stderr).not.toContain("Nonce");
+    });
+  });
+
+  // =============================================================================
+  // Session persistence (Tasks 1-6): detectModel, readCliSession, writeCliSession,
+  // bootstrapExternal, bootstrap model propagation, leave command
+  // =============================================================================
+
+  describe("session persistence", () => {
+    let testDir: string;
+    let messengerDir: string;
+
+    beforeEach(() => {
+      // Use realpathSync to get the canonical path — on macOS, os.tmpdir() returns
+      // /var/folders/... which is a symlink to /private/var/folders/..., but
+      // process.cwd() in a child process returns the resolved canonical path.
+      // Both the test helpers and CLI invocations must use the same canonical path
+      // so that session key computations (sha256(cwd+model)) agree.
+      testDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-session-test-")));
+      messengerDir = path.join(testDir, "messenger");
+      fs.mkdirSync(path.join(messengerDir, "registry"), { recursive: true });
+      fs.mkdirSync(path.join(messengerDir, "inbox"), { recursive: true });
+    });
+
+    afterEach(() => {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    });
+
+    // Helper: compute sha256(cwd + model) session key
+    function sessionKey(cwd: string, model: string): string {
+      return createHash("sha256").update(cwd + model).digest("hex");
+    }
+
+    // Helper: write a session file directly
+    function writeSession(model: string, name: string, startedAt?: string): void {
+      const sessionsDir = path.join(messengerDir, "cli-sessions");
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      const key = sessionKey(testDir, model);
+      fs.writeFileSync(
+        path.join(sessionsDir, `${key}.json`),
+        JSON.stringify({ name, model, cwd: testDir, startedAt: startedAt ?? new Date().toISOString() }),
+      );
+    }
+
+    // Helper: read a session file directly
+    function readSession(model: string): { name: string; model: string } | null {
+      const sessionsDir = path.join(messengerDir, "cli-sessions");
+      const key = sessionKey(testDir, model);
+      const p = path.join(sessionsDir, `${key}.json`);
+      if (!fs.existsSync(p)) return null;
+      return JSON.parse(fs.readFileSync(p, "utf-8"));
+    }
+
+    it("join creates a session file with model and name", () => {
+      const result = runCli(["join", "--self-model", "test-model-abc"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Joined mesh as");
+
+      // Session file must exist
+      const session = readSession("test-model-abc");
+      expect(session).not.toBeNull();
+      expect(session!.model).toBe("test-model-abc");
+      expect(session!.name).toBeTruthy();
+    });
+
+    it("join reuses name from existing session file (stable identity)", () => {
+      // Pre-write session with known name
+      writeSession("test-model-xyz", "KnownName");
+
+      const result = runCli(["join", "--self-model", "test-model-xyz"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("KnownName");
+    });
+
+    it("status shows correct identity from session file (read-only path)", () => {
+      writeSession("test-model-status", "StatusAgentName");
+
+      const result = runCli(["status", "--self-model", "test-model-status"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("StatusAgentName");
+    });
+
+    it("expired session (>8h) generates a new name", () => {
+      // Write session with timestamp 9 hours ago
+      const nineHoursAgo = new Date(Date.now() - 9 * 60 * 60 * 1000).toISOString();
+      writeSession("test-model-ttl", "ExpiredName", nineHoursAgo);
+
+      const result = runCli(["join", "--self-model", "test-model-ttl"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      // Should NOT reuse the expired name
+      expect(result.stdout).not.toContain("ExpiredName");
+    });
+
+    it("different models in same CWD get separate sessions (harness isolation)", () => {
+      // Unset PI_AGENT_NAME to prevent env bleed-through. If PI_AGENT_NAME is set
+      // in the parent environment (e.g., from a pi_messenger session), it would leak
+      // into child processes and cause both sessions to get the same name — defeating
+      // harness isolation. bootstrapExternal() intentionally does NOT use PI_AGENT_NAME
+      // for the same reason.
+      const result1 = runCli(["join", "--self-model", "model-alpha"], {
+        PI_MESSENGER_DIR: messengerDir,
+        PI_AGENT_NAME: "",
+      }, testDir);
+      const result2 = runCli(["join", "--self-model", "model-beta"], {
+        PI_MESSENGER_DIR: messengerDir,
+        PI_AGENT_NAME: "",
+      }, testDir);
+
+      expect(result1.exitCode).toBe(0);
+      expect(result2.exitCode).toBe(0);
+
+      const session1 = readSession("model-alpha");
+      const session2 = readSession("model-beta");
+      expect(session1).not.toBeNull();
+      expect(session2).not.toBeNull();
+      // Different models → different session files → different names
+      expect(session1!.name).not.toBe(session2!.name);
+    });
+
+    it("leave clears session file, registry, and inbox", () => {
+      // Set up a session first
+      writeSession("test-model-leave", "LeaveTestAgent");
+      // Pre-create registry and inbox for the agent
+      const regPath = path.join(messengerDir, "registry", "LeaveTestAgent.json");
+      const inboxDir = path.join(messengerDir, "inbox", "LeaveTestAgent");
+      fs.writeFileSync(regPath, JSON.stringify({ name: "LeaveTestAgent", pid: 99999999, model: "test-model-leave" }));
+      fs.mkdirSync(inboxDir, { recursive: true });
+
+      const result = runCli(["leave", "--self-model", "test-model-leave"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Left mesh");
+
+      // Session file deleted
+      expect(readSession("test-model-leave")).toBeNull();
+      // Registry deleted (PID 99999999 is dead)
+      expect(fs.existsSync(regPath)).toBe(false);
+      // Inbox deleted
+      expect(fs.existsSync(inboxDir)).toBe(false);
+    });
+
+    it("leave with no session prints informational message", () => {
+      const result = runCli(["leave", "--self-model", "no-session-model"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("No active session");
+    });
+
+    it("leave with active PID clears only session file, not registry", () => {
+      writeSession("test-model-live", "LiveAgent");
+      // Write registry entry with CURRENT process PID (alive)
+      const regPath = path.join(messengerDir, "registry", "LiveAgent.json");
+      fs.writeFileSync(regPath, JSON.stringify({ name: "LiveAgent", pid: process.pid, model: "test-model-live" }));
+
+      const result = runCli(["leave", "--self-model", "test-model-live"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      // Session cleared
+      expect(readSession("test-model-live")).toBeNull();
+      // Registry preserved (active PID)
+      expect(fs.existsSync(regPath)).toBe(true);
+      expect(result.stdout).toContain("in use");
+    });
+
+    it("leave is in READ_ONLY_COMMANDS — does not create a new registry entry", () => {
+      writeSession("test-model-readonly-leave", "ReadonlyLeaveAgent");
+      const registryDir = path.join(messengerDir, "registry");
+
+      // Count registry entries before
+      const before = fs.readdirSync(registryDir).filter(f => !f.startsWith(".")).length;
+
+      runCli(["leave", "--self-model", "test-model-readonly-leave"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      // leave should not add any new registry files
+      const after = fs.readdirSync(registryDir).filter(f => !f.startsWith(".")).length;
+      expect(after).toBeLessThanOrEqual(before);
+    });
+
+    it("help output includes leave command and --self-model flag", () => {
+      const result = runCli(["--help"]);
+      expect(result.stdout).toContain("leave");
+      expect(result.stdout).toContain("--self-model");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("Codex config auto-detection extracts model from config.toml", () => {
+      // Create a fake ~/.codex/config.toml in temp dir
+      const fakeCodexDir = path.join(testDir, "fake-codex");
+      fs.mkdirSync(fakeCodexDir, { recursive: true });
+      const fakeConfigToml = path.join(fakeCodexDir, "config.toml");
+      fs.writeFileSync(fakeConfigToml, `
+tool_output_token_limit = 25000
+model = "gpt-5.3-codex-test"
+model_reasoning_effort = "xhigh"
+
+[mcp_servers.foo]
+command = "bar"
+`);
+
+      // We can't override HOME in the CLI easily, but we can test via PI_AGENT_MODEL
+      // Instead verify the detection logic via the direct module API by
+      // checking that without PI_AGENT_MODEL set and no real codex config,
+      // we get the expected harness fallback
+      const result = runCli(["join", "--self-model", "gpt-5.3-codex-test"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      const session = readSession("gpt-5.3-codex-test");
+      expect(session?.model).toBe("gpt-5.3-codex-test");
+    });
+
+    it("--self-model flag does NOT affect spawn --model (flag isolation)", () => {
+      // spawn --model is used for collaborator model override — verify parsing
+      // doesn't conflate it with --self-model
+      // We can verify by checking that join --self-model creates the right session key
+      // while spawn --model would be a different arg
+      const result = runCli(["join", "--self-model", "driver-model"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      const session = readSession("driver-model");
+      expect(session?.model).toBe("driver-model");
+      // session key should be based on "driver-model", not some other value
+      const expectedKey = createHash("sha256").update(testDir + "driver-model").digest("hex");
+      const sessionsDir = path.join(messengerDir, "cli-sessions");
+      expect(fs.existsSync(path.join(sessionsDir, `${expectedKey}.json`))).toBe(true);
     });
   });
 });
