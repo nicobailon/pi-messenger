@@ -77,7 +77,7 @@ Task 9 → depends on all
   - `printHelp()`: add `receive`, `--wait`, `--timeout`
   - Files: `cli/index.ts` (lines 498, 1048), `handlers.ts` (~line 170)
 
-- [ ] **Task 9: Tests — 14 scenarios**
+- [x] **Task 9: Tests — 14 scenarios**
   - Add `runCliAsync()` helper using `child_process.spawn`
   - 14 test scenarios:
     1. Identity stable: join → send (no --self-model) → same name

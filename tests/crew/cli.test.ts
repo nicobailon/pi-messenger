@@ -663,4 +663,411 @@ describe("pi-messenger-cli", () => {
       expect(fs.existsSync(inboxDir)).toBe(false);
     });
   });
+
+  // =============================================================================
+  // Messaging round-trip (spec 010): identity stability, receive, send --wait, UX
+  // =============================================================================
+
+  describe("messaging round-trip", () => {
+    let testDir: string;
+    let messengerDir: string;
+
+    beforeEach(() => {
+      testDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-roundtrip-")));
+      messengerDir = path.join(testDir, "messenger");
+      fs.mkdirSync(path.join(messengerDir, "registry"), { recursive: true });
+      fs.mkdirSync(path.join(messengerDir, "inbox"), { recursive: true });
+    });
+
+    afterEach(() => {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    });
+
+    // Helper: compute session key
+    function sessionKey(cwd: string, model: string): string {
+      return createHash("sha256").update(cwd + model).digest("hex");
+    }
+
+    // Helper: write a session file
+    function writeSession(model: string, name: string, startedAt?: string): void {
+      const sessionsDir = path.join(messengerDir, "cli-sessions");
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      const key = sessionKey(testDir, model);
+      fs.writeFileSync(
+        path.join(sessionsDir, `${key}.json`),
+        JSON.stringify({ name, model, cwd: testDir, startedAt: startedAt ?? new Date().toISOString() }),
+      );
+    }
+
+    // Helper: write a message to an agent's inbox
+    function writeInboxMessage(agentName: string, from: string, text: string, extra?: Record<string, unknown>): string {
+      const inboxDir = path.join(messengerDir, "inbox", agentName);
+      fs.mkdirSync(inboxDir, { recursive: true });
+      const timestamp = new Date().toISOString();
+      const random = Math.random().toString(36).substring(2, 8);
+      const filename = `${Date.now()}-${random}.json`;
+      const msg = {
+        id: randomUUID(),
+        from,
+        to: agentName,
+        text,
+        timestamp,
+        replyTo: null,
+        ...extra,
+      };
+      fs.writeFileSync(path.join(inboxDir, filename), JSON.stringify(msg, null, 2));
+      return filename;
+    }
+
+    // Helper: extract name from join output
+    function extractJoinName(stdout: string): string {
+      const match = stdout.match(/Joined mesh as (\S+)/);
+      if (!match) throw new Error(`Could not extract name from: ${stdout}`);
+      return match[1];
+    }
+
+    // Helper: environment with no auto-detection signals
+    function cleanEnv(extra?: Record<string, string>): Record<string, string> {
+      const fakeHome = path.join(testDir, "fake-home");
+      fs.mkdirSync(fakeHome, { recursive: true });
+      return {
+        PI_MESSENGER_DIR: messengerDir,
+        HOME: fakeHome,
+        PI_AGENT_MODEL: "",
+        PI_AGENT_NAME: "",
+        GEMINI_API_KEY: "",
+        ANTHROPIC_API_KEY: "",
+        ...extra,
+      };
+    }
+
+    // =========================================================================
+    // Test 1: Identity stable — join --self-model X → send (no flag) → same name
+    // =========================================================================
+    it("identity stable: join with --self-model, send without → same name", () => {
+      // Join with explicit model
+      const joinResult = runCli(["join", "--self-model", "claude-opus-4-6"], cleanEnv(), testDir);
+      expect(joinResult.exitCode).toBe(0);
+      const joinName = extractJoinName(joinResult.stdout);
+
+      // Send without --self-model. Since cleanEnv has no detection signals,
+      // detectModel throws → CWD fallback finds the session
+      const sendResult = runCli(
+        ["send", "--to", "NonExistent", "--message", "test"],
+        cleanEnv(),
+        testDir,
+      );
+      // Send will fail (NonExistent not found) but the agent name should be stable
+      // Check stderr for the agent name — it's in the error output from executeSend
+      // The key assertion: it should NOT say "No active session" (which would mean identity was lost)
+      expect(sendResult.stderr).not.toContain("No active session");
+
+      // Verify the session file still has the original name
+      const sessionsDir = path.join(messengerDir, "cli-sessions");
+      const files = fs.readdirSync(sessionsDir).filter(f => f.endsWith(".json") && !f.startsWith("."));
+      expect(files.length).toBe(1);
+      const session = JSON.parse(fs.readFileSync(path.join(sessionsDir, files[0]), "utf-8"));
+      expect(session.name).toBe(joinName);
+    });
+
+    // =========================================================================
+    // Test 2: Identity stable — join → detectModel throw → CWD fallback
+    // =========================================================================
+    it("identity stable: detectModel throws → CWD fallback finds session", () => {
+      // Pre-write a session
+      writeSession("original-model", "StableAgent");
+
+      // Status without any detection signals → CWD fallback
+      const result = runCli(["status"], cleanEnv(), testDir);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("StableAgent");
+      expect(result.stdout).toContain("Model: original-model");
+    });
+
+    // =========================================================================
+    // Test 3: CWD ambiguity — two sessions same CWD → error
+    // =========================================================================
+    it("CWD ambiguity: two sessions same CWD → error mentions --self-model", () => {
+      writeSession("model-a", "AgentA");
+      writeSession("model-b", "AgentB");
+
+      // Status without --self-model → ambiguity error
+      const result = runCli(["status"], cleanEnv(), testDir);
+      expect(result.stderr).toContain("Multiple sessions");
+      expect(result.stderr).toContain("--self-model");
+    });
+
+    // =========================================================================
+    // Test 4: Receive reads inbox → prints → deletes
+    // =========================================================================
+    it("receive reads inbox: prints message, deletes file", () => {
+      writeSession("test-model", "RecvAgent");
+      writeInboxMessage("RecvAgent", "SenderBot", "Hello from SenderBot!");
+
+      const result = runCli(["receive", "--self-model", "test-model"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("[SenderBot");
+      expect(result.stdout).toContain("Hello from SenderBot!");
+      expect(result.stdout).toContain("1 message received");
+
+      // File should be deleted
+      const inboxDir = path.join(messengerDir, "inbox", "RecvAgent");
+      const remaining = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"));
+      expect(remaining.length).toBe(0);
+    });
+
+    // =========================================================================
+    // Test 5: Receive malformed → file NOT deleted, valid messages still read
+    // =========================================================================
+    it("receive malformed: file preserved, valid messages processed", () => {
+      writeSession("test-model", "MalAgent");
+      const inboxDir = path.join(messengerDir, "inbox", "MalAgent");
+      fs.mkdirSync(inboxDir, { recursive: true });
+      // Write a malformed file (sorts first alphabetically)
+      fs.writeFileSync(path.join(inboxDir, "0000-bad.json"), "not valid json {{{");
+      // Write a valid message (sorts second)
+      writeInboxMessage("MalAgent", "GoodSender", "valid message");
+
+      const result = runCli(["receive", "--self-model", "test-model"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      // Valid message was read and printed
+      expect(result.stdout).toContain("GoodSender");
+      expect(result.stdout).toContain("valid message");
+      expect(result.stdout).toContain("1 message received");
+
+      // Malformed file should NOT be deleted
+      expect(fs.existsSync(path.join(inboxDir, "0000-bad.json"))).toBe(true);
+      // Valid message file SHOULD be deleted (only malformed remains)
+      const remaining = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"));
+      expect(remaining.length).toBe(1);
+      expect(remaining[0]).toBe("0000-bad.json");
+    });
+
+    // =========================================================================
+    // Test 6: Receive before join → guidance
+    // =========================================================================
+    it("receive before join: anonymous → guidance", () => {
+      const result = runCli(["receive"], cleanEnv(), testDir);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("No active session");
+      expect(result.stdout).toContain("join");
+    });
+
+    // =========================================================================
+    // Test 7: Receive empty → "No new messages."
+    // =========================================================================
+    it("receive empty inbox: prints 'No new messages.'", () => {
+      writeSession("test-model", "EmptyAgent");
+
+      const result = runCli(["receive", "--self-model", "test-model"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("No new messages");
+    });
+
+    // =========================================================================
+    // Test 8: Send --wait gets reply (async)
+    // =========================================================================
+    it("send --wait gets reply from inbox", async () => {
+      // Set up: join first, create a target agent registration
+      const joinResult = runCli(["join", "--self-model", "wait-model"], cleanEnv(), testDir);
+      const agentName = extractJoinName(joinResult.stdout);
+
+      // Create a fake target agent registration so send doesn't fail on "not found"
+      const targetReg = {
+        name: "TargetAgent",
+        pid: process.pid, // use our PID so it appears alive
+        sessionId: "test",
+        cwd: testDir,
+        model: "target-model",
+        startedAt: new Date().toISOString(),
+        isHuman: false,
+        session: { toolCalls: 0, tokens: 0, filesModified: [] },
+        activity: { lastActivityAt: new Date().toISOString() },
+      };
+      fs.writeFileSync(
+        path.join(messengerDir, "registry", "TargetAgent.json"),
+        JSON.stringify(targetReg, null, 2),
+      );
+
+      // Write a "reply" to our inbox with a small delay
+      const replyDelay = setTimeout(() => {
+        writeInboxMessage(agentName, "TargetAgent", "This is the reply!");
+      }, 500);
+
+      // Run send --wait with short timeout
+      const { spawn } = await import("node:child_process");
+      const proc = spawn("npx", ["tsx", CLI_PATH, "send", "--to", "TargetAgent", "--message", "ping", "--wait", "--timeout", "5", "--self-model", "wait-model"], {
+        cwd: testDir,
+        env: { ...process.env, ...cleanEnv() },
+      });
+
+      let stdout = "";
+      let stderr = "";
+      proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+      proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+      const exitCode = await new Promise<number>(resolve => proc.on("exit", (code) => resolve(code ?? 1)));
+      clearTimeout(replyDelay);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("Reply from TargetAgent");
+      expect(stdout).toContain("This is the reply!");
+    }, 15000);
+
+    // =========================================================================
+    // Test 9: Send --wait timeout
+    // =========================================================================
+    it("send --wait timeout: no reply → error", async () => {
+      const joinResult = runCli(["join", "--self-model", "timeout-model"], cleanEnv(), testDir);
+      expect(joinResult.exitCode).toBe(0);
+
+      // Create target registration
+      const targetReg = {
+        name: "SlowAgent",
+        pid: process.pid,
+        sessionId: "test",
+        cwd: testDir,
+        model: "slow-model",
+        startedAt: new Date().toISOString(),
+        isHuman: false,
+        session: { toolCalls: 0, tokens: 0, filesModified: [] },
+        activity: { lastActivityAt: new Date().toISOString() },
+      };
+      fs.writeFileSync(
+        path.join(messengerDir, "registry", "SlowAgent.json"),
+        JSON.stringify(targetReg, null, 2),
+      );
+
+      const { spawn } = await import("node:child_process");
+      const proc = spawn("npx", ["tsx", CLI_PATH, "send", "--to", "SlowAgent", "--message", "ping", "--wait", "--timeout", "1", "--self-model", "timeout-model"], {
+        cwd: testDir,
+        env: { ...process.env, ...cleanEnv() },
+      });
+
+      let stderr = "";
+      proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+      const exitCode = await new Promise<number>(resolve => proc.on("exit", (code) => resolve(code ?? 1)));
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain("No reply from SlowAgent");
+      expect(stderr).toContain("receive");
+    }, 15000);
+
+    // =========================================================================
+    // Test 10: Send --wait non-consumption — other agent's message untouched
+    // =========================================================================
+    it("send --wait leaves non-matching messages in inbox", async () => {
+      const joinResult = runCli(["join", "--self-model", "nc-model"], cleanEnv(), testDir);
+      const agentName = extractJoinName(joinResult.stdout);
+
+      // Create target registration
+      const targetReg = {
+        name: "WaitTarget",
+        pid: process.pid,
+        sessionId: "test",
+        cwd: testDir,
+        model: "wait-target-model",
+        startedAt: new Date().toISOString(),
+        isHuman: false,
+        session: { toolCalls: 0, tokens: 0, filesModified: [] },
+        activity: { lastActivityAt: new Date().toISOString() },
+      };
+      fs.writeFileSync(
+        path.join(messengerDir, "registry", "WaitTarget.json"),
+        JSON.stringify(targetReg, null, 2),
+      );
+
+      // Pre-write a message from OtherAgent (not WaitTarget)
+      writeInboxMessage(agentName, "OtherAgent", "I am not the reply you're looking for");
+
+      const { spawn } = await import("node:child_process");
+      const proc = spawn("npx", ["tsx", CLI_PATH, "send", "--to", "WaitTarget", "--message", "ping", "--wait", "--timeout", "1", "--self-model", "nc-model"], {
+        cwd: testDir,
+        env: { ...process.env, ...cleanEnv() },
+      });
+
+      const exitCode = await new Promise<number>(resolve => proc.on("exit", (code) => resolve(code ?? 1)));
+
+      // Should timeout (no reply from WaitTarget)
+      expect(exitCode).toBe(1);
+
+      // OtherAgent's message should still be in inbox
+      const inboxDir = path.join(messengerDir, "inbox", agentName);
+      const remaining = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json") && !f.startsWith("."));
+      // At least 1 remaining (OtherAgent's message; WaitTarget's "send" message may also be there)
+      const contents = remaining.map(f => JSON.parse(fs.readFileSync(path.join(inboxDir, f), "utf-8")));
+      const otherMsg = contents.find((m: any) => m.from === "OtherAgent");
+      expect(otherMsg).toBeDefined();
+      expect(otherMsg.text).toBe("I am not the reply you're looking for");
+    }, 15000);
+
+    // =========================================================================
+    // Test 11: UX — join mentions receive
+    // =========================================================================
+    it("join output mentions receive", () => {
+      const result = runCli(["join", "--self-model", "ux-test-model"], cleanEnv(), testDir);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("receive");
+    });
+
+    // =========================================================================
+    // Test 12: UX — status anonymous mentions join
+    // =========================================================================
+    it("status anonymous mentions join", () => {
+      const result = runCli(["status"], cleanEnv(), testDir);
+      expect(result.stdout).toContain("anonymous");
+      expect(result.stdout).toContain("join");
+    });
+
+    // =========================================================================
+    // Test 13: Full round-trip — join → send → receive reply
+    // =========================================================================
+    it("full round-trip: join → inbox write → receive reads reply", () => {
+      // Join
+      const joinResult = runCli(["join", "--self-model", "rt-model"], cleanEnv(), testDir);
+      expect(joinResult.exitCode).toBe(0);
+      const agentName = extractJoinName(joinResult.stdout);
+
+      // Simulate a reply arriving (same format as sendMessageToAgent)
+      writeInboxMessage(agentName, "ReplyBot", "Here is your answer!");
+
+      // Receive
+      const recvResult = runCli(["receive", "--self-model", "rt-model"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      expect(recvResult.exitCode).toBe(0);
+      expect(recvResult.stdout).toContain("[ReplyBot");
+      expect(recvResult.stdout).toContain("Here is your answer!");
+      expect(recvResult.stdout).toContain("1 message received");
+
+      // Inbox should be empty now
+      const inboxDir = path.join(messengerDir, "inbox", agentName);
+      const remaining = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"));
+      expect(remaining.length).toBe(0);
+    });
+
+    // =========================================================================
+    // Test 14: Leave ambiguity — two sessions same CWD → error
+    // =========================================================================
+    it("leave ambiguity: two sessions same CWD → error", () => {
+      writeSession("model-x", "AgentX");
+      writeSession("model-y", "AgentY");
+
+      const result = runCli(["leave"], cleanEnv(), testDir);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Multiple sessions");
+      expect(result.stderr).toContain("--self-model");
+    });
+  });
 });
