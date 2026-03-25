@@ -31,7 +31,7 @@ Task 6 (verify) — depends on all
   - Dedicated try/catch for resolveSettingsEntry (no fall-through to extension copy)
   - File: `install.mjs`
 
-- [ ] **Task 3: Create `scripts/health-check.sh`**
+- [x] **Task 3: Create `scripts/health-check.sh`**
   - Pure bash, no node dependency
   - Checks: which pi-messenger-cli, parse wrapper SOURCE_DIR + JITI_PATH, version comparison, settings.json entry
   - `--quiet` flag, exit 0/1
