@@ -6,6 +6,9 @@ shaped: true
 ---
 
 <!-- gate:issue:complete pi/claude-opus-4-6 | date: 2026-03-25T15:05:00Z -->
+<!-- Codex Review: APPROVED after 4 rounds | model: gpt-5.3-codex | date: 2026-03-25 -->
+<!-- Status: UNCHANGED -->
+<!-- Revisions: none -->
 
 # 011 — Deploy Parity: Bulletproof Laptop/Mini-ts Sync
 
