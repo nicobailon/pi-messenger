@@ -96,5 +96,5 @@ Task 9 → depends on all
     14. Leave ambiguity: two sessions → error
   - File: `tests/crew/cli.test.ts`
 
-- [ ] **Task 10: Verify no regressions**
+- [x] **Task 10: Verify no regressions**
   - Run `npx vitest run` — all tests pass
