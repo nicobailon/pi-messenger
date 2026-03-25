@@ -45,7 +45,7 @@ Task 6 (verify) — depends on all
   - Runs install.mjs + health-check.sh as verification gate
   - File: `scripts/setup-machine.sh`
 
-- [ ] **Task 5: Update mini-ts post-receive hook**
+- [x] **Task 5: Update mini-ts post-receive hook**
   - Add `node install.mjs >/dev/null` (keep stderr visible)
   - Add `bash scripts/health-check.sh --quiet` with marker file on failure
   - Remove marker on success
