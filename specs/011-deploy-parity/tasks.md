@@ -51,7 +51,7 @@ Task 6 (verify) — depends on all
   - Remove marker on success
   - File: `mini-ts:~/dev/pi-messenger-fork/.git/hooks/post-receive`
 
-- [ ] **Task 6: Verify on both machines**
+- [x] **Task 6: Verify on both machines**
   - Push after install.mjs fix → mini-ts CLI works
   - health-check.sh all green on laptop + mini-ts
   - No stale extensions copy on mini-ts
