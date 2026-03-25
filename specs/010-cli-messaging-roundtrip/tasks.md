@@ -63,7 +63,7 @@ Task 9 → depends on all
   - `receive` command: anonymous → guidance, empty → "No new messages.", print format `[Sender Timestamp] text`, delete after print, warn+skip malformed
   - File: `cli/index.ts` (~line 533)
 
-- [ ] **Task 7: Add `send --wait` with double-wait guard**
+- [x] **Task 7: Add `send --wait` with double-wait guard**
   - **Double-wait guard:** Skip poll if `details.reply || details.conversationComplete`
   - Parse `--wait` flag, `--timeout` with fail-fast validation (NaN/≤0 → error)
   - Poll using `readInboxMessages()`, match `msg.from === to`

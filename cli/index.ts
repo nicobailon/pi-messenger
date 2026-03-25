@@ -665,12 +665,55 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
     case "send": {
       const to = cmd.args.to as string;
       const message = cmd.args.message as string;
-      if (!to || !message) {
-        process.stderr.write("✗ Usage: pi-messenger-cli send --to <name> --message <text>\n");
+      const wait = cmd.args.wait === true;
+      const rawTimeout = cmd.args.timeout ? parseInt(cmd.args.timeout as string, 10) : undefined;
+      if (rawTimeout !== undefined && (isNaN(rawTimeout) || rawTimeout <= 0)) {
+        process.stderr.write("✗ Invalid --timeout value. Must be a positive integer (seconds).\n");
         process.exitCode = 1;
         return;
       }
-      printResult(await handlers.executeSend(state, dirs, cwd, to, false, message));
+      const timeoutSec = rawTimeout ?? 300;
+
+      if (!to || !message) {
+        process.stderr.write("✗ Usage: pi-messenger-cli send --to <name> --message <text> [--wait] [--timeout <seconds>]\n");
+        process.exitCode = 1;
+        return;
+      }
+
+      const sendResult = await handlers.executeSend(state, dirs, cwd, to, false, message);
+      printResult(sendResult);
+
+      const sendDetails = sendResult.details as Record<string, unknown>;
+      // Double-wait guard: skip CLI poll when executeSend already returned a
+      // collaborator reply (handlers.ts:373-463 blocks and returns reply inline)
+      if (!wait || sendDetails.error || sendDetails.reply || sendDetails.conversationComplete) break;
+
+      // Non-collaborator send: poll inbox for reply from recipient
+      const sendInboxDir = path.join(dirs.inbox, state.agentName);
+      const deadline = Date.now() + (timeoutSec * 1000);
+      const failedFiles = new Set<string>();
+      process.stderr.write(`Waiting for reply from ${to}... (timeout: ${timeoutSec}s)\n`);
+
+      while (Date.now() < deadline) {
+        const { messages: waitMessages, malformed: waitMalformed } = readInboxMessages(sendInboxDir);
+        for (const mf of waitMalformed) {
+          if (!failedFiles.has(mf)) {
+            failedFiles.add(mf);
+            process.stderr.write(`⚠ Skipping malformed inbox file: ${mf}\n`);
+          }
+        }
+        for (const { msg: waitMsg, filePath: waitFilePath } of waitMessages) {
+          if (waitMsg.from === to) {
+            try { fs.unlinkSync(waitFilePath); } catch {} // race-safe
+            process.stdout.write(`\n✓ Reply from ${to}:\n\n${waitMsg.text}\n`);
+            return;
+          }
+        }
+        await sleep(100);
+      }
+
+      process.stderr.write(`✗ No reply from ${to} within ${timeoutSec}s. Check later with: pi-messenger-cli receive\n`);
+      process.exitCode = 1;
       break;
     }
 
