@@ -38,7 +38,7 @@ Task 6 (verify) — depends on all
   - Grep pattern: `pi-messenger` (not bare "messenger")
   - File: `scripts/health-check.sh`
 
-- [ ] **Task 4: Create `scripts/setup-machine.sh`**
+- [x] **Task 4: Create `scripts/setup-machine.sh`**
   - Takes `[path]` argument (CWD default), resolves to absolute
   - Validates package.json name === "pi-messenger"
   - Adds to settings.json via env vars (no shell→JS injection)
