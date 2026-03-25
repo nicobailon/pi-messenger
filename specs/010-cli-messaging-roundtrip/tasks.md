@@ -48,7 +48,7 @@ Task 9 → depends on all
   - **Ambiguity (2+ matches) → error with guidance** (consistent with registering/leave paths)
   - File: `cli/index.ts` (lines 441-456)
 
-- [ ] **Task 4: Refactor `leave` to use `findSessionByCwd()`**
+- [x] **Task 4: Refactor `leave` to use `findSessionByCwd()`**
   - Same three-step chain for both success-but-miss AND throw paths
   - Ambiguity error: print guidance, set exitCode, break
   - File: `cli/index.ts` (lines 609-695)

@@ -723,42 +723,39 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
 
     case "leave": {
       // leave is in NO_REGISTER_COMMANDS — bootstrap did NOT re-register.
-      // We read the session file to find the identity, then clean up.
-      let leftMesh = false;
+      // Same three-step chain as bootstrapExternal + read-only bootstrap:
+      // exact key → CWD fallback (only if no --self-model) → "no session"
+      const explicitLeaveModel = !!cmd.args.selfModel;
+      let leaveSession: CliSession | null = null;
       try {
-        // Try to find the session file. If model detection fails (no --self-model,
-        // no env, no config), fall back to scanning cli-sessions/ for any file
-        // matching this CWD — so leave works even in environments where model
-        // detection is unavailable (plan task §6: "catch error — leave should work
-        // even without model detection").
-        let session: CliSession | null = null;
         try {
           const leaveModel = detectModel(cmd.args.selfModel as string | undefined);
-          session = readCliSession(dirs, cwd, leaveModel);
-        } catch {
-          // Model detection failed — scan all session files for one matching this CWD
-          const sessionsDir = getCliSessionsDir(dirs);
-          if (fs.existsSync(sessionsDir)) {
-            for (const f of fs.readdirSync(sessionsDir)) {
-              if (!f.endsWith(".json") || f.startsWith(".")) continue;
-              try {
-                const candidate = JSON.parse(fs.readFileSync(path.join(sessionsDir, f), "utf-8")) as CliSession;
-                if (candidate.cwd === cwd) {
-                  const age = Date.now() - new Date(candidate.startedAt).getTime();
-                  if (age <= CLI_SESSION_TTL_MS) {
-                    session = candidate;
-                    break;
-                  }
-                }
-              } catch { /* skip malformed file */ }
+          leaveSession = readCliSession(dirs, cwd, leaveModel);
+          if (!leaveSession && !explicitLeaveModel) {
+            leaveSession = findSessionByCwd(dirs, cwd); // may throw on 2+
+          }
+        } catch (e) {
+          if (e instanceof Error && e.message.includes("Multiple sessions")) {
+            process.stderr.write(`✗ ${e.message}\n`);
+            process.exitCode = 1;
+            break;
+          }
+          // detectModel threw — CWD fallback
+          try {
+            leaveSession = findSessionByCwd(dirs, cwd);
+          } catch (e2) {
+            if (e2 instanceof Error && e2.message.includes("Multiple sessions")) {
+              process.stderr.write(`✗ ${(e2 as Error).message}\n`);
+              process.exitCode = 1;
+              break;
             }
           }
         }
-        if (!session) {
+        if (!leaveSession) {
           process.stdout.write("No active session found.\n");
           break;
         }
-        const sessionName = session.name;
+        const sessionName = leaveSession.name;
 
         // Ownership validation: if registry entry has an active PID that isn't us, don't touch it
         const regPath = path.join(dirs.registry, `${sessionName}.json`);
@@ -769,7 +766,6 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
             if (reg.pid && reg.pid !== process.pid) {
               try {
                 process.kill(reg.pid, 0); // probe — throws if dead
-                // PID is alive and not us
                 process.stdout.write(
                   `Session identity "${sessionName}" is in use by PID ${reg.pid} — clearing session file only.\n`,
                 );
@@ -778,34 +774,24 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
                 // PID is dead — safe to clean
               }
             }
-          } catch {
-            // Can't read registry — safe to proceed
-          }
+          } catch { /* Can't read registry — safe to proceed */ }
         }
 
         // Delete session file (always) — key by the session's actual model
         const sessionsDir = getCliSessionsDir(dirs);
-        const key = getCliSessionKey(cwd, session.model);
+        const key = getCliSessionKey(cwd, leaveSession.model);
         try { fs.unlinkSync(path.join(sessionsDir, `${key}.json`)); } catch {}
 
         if (canCleanRegistry) {
-          // Delete registry entry
           try { fs.unlinkSync(regPath); } catch {}
-          // Delete inbox directory
           const inboxDir = path.join(dirs.inbox, sessionName);
           try { fs.rmSync(inboxDir, { recursive: true, force: true }); } catch {}
         }
 
-        leftMesh = true;
+        process.stdout.write("✓ Left mesh. Session cleared.\n");
       } catch {
-        // detectModel may throw if no model detected.
-        // If we get here some other error occurred.
         process.stderr.write("✗ Failed to leave mesh cleanly. Session file may still exist.\n");
         process.exitCode = 1;
-        break;
-      }
-      if (leftMesh) {
-        process.stdout.write("✓ Left mesh. Session cleared.\n");
       }
       break;
     }
