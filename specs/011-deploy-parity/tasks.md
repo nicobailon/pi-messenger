@@ -23,7 +23,7 @@ Task 6 (verify) — depends on all
 
 ## Tasks
 
-- [ ] **Task 1+2: Fix install.mjs collision guard + three-way resolution**
+- [x] **Task 1+2: Fix install.mjs collision guard + three-way resolution**
   - Match: `name === "pi-messenger" || name.startsWith("pi-messenger-")`
   - New `resolveSettingsEntry(entry)` function: npm/absolute/relative
   - Move `installCliWrapper()` inside collision block with resolved path

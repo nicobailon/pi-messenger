@@ -83,6 +83,21 @@ function resolveBrewBinDir() {
 	return null;
 }
 
+/**
+ * Resolve a settings.json package entry to an absolute filesystem path.
+ * Three-way resolution: npm: → global prefix, absolute → direct, relative → resolve against settings dir.
+ */
+function resolveSettingsEntry(entry) {
+	if (entry.startsWith("npm:")) {
+		const npmPrefix = execFileSync("npm", ["prefix", "-g"], { encoding: "utf-8" }).trim();
+		return path.join(npmPrefix, "lib", "node_modules", entry.slice(4));
+	}
+	if (path.isAbsolute(entry)) return entry;
+	// Relative paths are relative to settings.json's directory (~/.pi/agent/)
+	const settingsDir = path.join(os.homedir(), ".pi", "agent");
+	return path.resolve(settingsDir, entry);
+}
+
 function installCliWrapper(sourceDir) {
 	const jitiPath = resolveJitiPath();
 	if (!jitiPath) {
@@ -219,51 +234,54 @@ if (path.resolve(PACKAGE_DIR) === path.resolve(EXTENSION_DIR)) {
 	process.exit(0);
 }
 
-// ─── CLI wrapper (runs before collision guard) ───────────────────────────────
-// The wrapper is independent of extension copy — it resolves jiti and points
-// to whichever source directory is active. On collision-guard exit, the wrapper
-// still points to PACKAGE_DIR (the registered package source).
-
-const wrapperCreated = installCliWrapper(PACKAGE_DIR);
-
 // ─── Collision guard: check settings.json packages ───────────────────────────
 // If pi-messenger is already registered as a package (local path or npm),
 // copying to extensions/ creates a collision — two copies loaded by pi.
-// The CLI wrapper was already created above pointing to PACKAGE_DIR.
+// On collision, the CLI wrapper is created pointing to the RESOLVED settings
+// entry path (not PACKAGE_DIR), so it always points to the live source.
 
 const isForce = args.includes("--force") || args.includes("-f");
 const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
 
 if (!isForce && fs.existsSync(settingsPath)) {
+	let settings;
 	try {
-		const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+		settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+	} catch (e) {
+		// Fail closed — malformed settings.json could hide a collision
+		console.error(`⚠ Cannot parse ${settingsPath}: ${e.message}`);
+		process.exit(1);
+	}
+	if (settings) {
 		const packages = settings.packages ?? [];
 		const collision = packages.find((entry) => {
 			if (typeof entry !== "string") return false;
-			// Match by basename: "npm:pi-messenger", "/some/path/pi-messenger", etc.
 			const name = entry.startsWith("npm:") ? entry.slice(4) : path.basename(entry);
-			return name === "pi-messenger";
+			return name === "pi-messenger" || name.startsWith("pi-messenger-");
 		});
 		if (collision) {
-			if (wrapperCreated) {
-				// Wrapper points to PACKAGE_DIR (the registered package). Extension copy
-				// skipped to avoid collision, but CLI is functional. Exit 0 — this is
-				// the normal dev-workflow path.
-				console.log(`⚠ Extension copy skipped (already registered as package at ${collision}).`);
+			let resolved;
+			try {
+				resolved = resolveSettingsEntry(collision);
+			} catch (err) {
+				console.error(`⚠ Cannot resolve "${collision}": ${err.message}`);
+				console.error("Extension copy skipped. CLI wrapper not updated.");
+				process.exit(1);
+			}
+			if (installCliWrapper(resolved)) {
+				console.log(`⚠ Extension copy skipped (registered at ${collision}).`);
 				console.log(`CLI:      pi-messenger-cli → ${CLI_WRAPPER_PATH}`);
 				process.exit(0);
 			}
-			console.log(`⚠ pi-messenger is already registered in settings.json packages at:
-  ${collision}
-
-Copying to extensions/ would create a collision (two copies loaded by pi).
-CLI wrapper also failed (pi not found). Use --force to override.`);
+			console.error(`⚠ Registered at ${collision} but CLI wrapper failed (jiti not found).`);
+			console.error("Install pi first, then re-run: node install.mjs");
 			process.exit(1);
 		}
-	} catch {
-		// settings.json parse error — proceed with install
 	}
 }
+
+// No collision — standard install path
+const wrapperCreated = installCliWrapper(PACKAGE_DIR);
 
 const isUpdate = fs.existsSync(EXTENSION_DIR);
 
