@@ -651,7 +651,7 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
     case "join":
       // External agents: self-register (already done in bootstrap)
       logFeedEvent(cwd, state.agentName, "join");
-      process.stdout.write(`✓ Joined mesh as ${state.agentName}\n`);
+      process.stdout.write(`✓ Joined mesh as ${state.agentName}\nTo check for messages: pi-messenger-cli receive\n`);
       break;
 
     case "status":
@@ -1269,6 +1269,8 @@ Commands:
   status                             Show your status
   list                               List active agents
   send --to <name> --message <text>  Send a message
+    [--wait] [--timeout <seconds>]   Block for reply (default 300s)
+  receive                            Check for new messages
   reserve --paths <path...>          Reserve files
   release [--paths <path...>]        Release reservations
   feed [--limit <n>]                 Show activity feed
@@ -1283,6 +1285,8 @@ Flags:
   --self-model <model>  Set your model identity (e.g., 'gpt-5.3-codex').
                         Auto-detected for Codex from ~/.codex/config.toml.
                         Distinct from --model on spawn (which sets collaborator model).
+  --wait                Block after send until recipient replies.
+  --timeout <seconds>   Timeout for --wait (default: 300).
 
 Environment:
   PI_AGENT_NAME     Agent name (auto-generated if not set)

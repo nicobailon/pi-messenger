@@ -71,7 +71,7 @@ Task 9 → depends on all
   - Timeout → clear error with `receive` hint
   - File: `cli/index.ts` (~lines 510-518)
 
-- [ ] **Task 8: UX guidance text**
+- [x] **Task 8: UX guidance text**
   - `join` output: append "To check for messages: pi-messenger-cli receive"
   - `executeStatus()`: if agentName === "anonymous", append join guidance
   - `printHelp()`: add `receive`, `--wait`, `--timeout`

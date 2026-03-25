@@ -159,6 +159,9 @@ export function executeStatus(state: MessengerState, dirs: Dirs, cwd: string = p
     const myRes = state.reservations.map(r => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
     text += `Reservations: ${myRes.join(", ")}\n`;
   }
+  if (state.agentName === "anonymous") {
+    text += `\nRun: pi-messenger-cli join --self-model <model> to register on the mesh.`;
+  }
   text += `\nUse pi_messenger({ action: "list" }) for details, pi_messenger({ action: "task.list" }) for tasks.`;
 
   return result(text, {
