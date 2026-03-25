@@ -398,6 +398,48 @@ function bootstrapExternal(dirs: Dirs, cwd: string, modelFlag?: string, action?:
   return { name, model: resolvedModel! };
 }
 
+// =============================================================================
+// Inbox Reader (shared by receive and send --wait)
+// =============================================================================
+
+interface InboxMessage {
+  msg: AgentMailMessage;
+  filePath: string;
+}
+
+function isValidInboxMessage(obj: unknown): obj is AgentMailMessage {
+  return typeof obj === "object" && obj !== null
+    && typeof (obj as any).from === "string"
+    && typeof (obj as any).text === "string"
+    && typeof (obj as any).timestamp === "string";
+}
+
+/**
+ * Read all valid messages from an inbox directory.
+ * Returns parsed messages and filenames of malformed files (for caller to warn).
+ * Shape-validates required fields (from, text, timestamp) — parseable JSON
+ * without these fields is treated as malformed.
+ */
+function readInboxMessages(inboxDir: string): { messages: InboxMessage[]; malformed: string[] } {
+  if (!fs.existsSync(inboxDir)) return { messages: [], malformed: [] };
+  const files = fs.readdirSync(inboxDir)
+    .filter(f => f.endsWith(".json") && !f.startsWith("."))
+    .sort();
+  const messages: InboxMessage[] = [];
+  const malformed: string[] = [];
+  for (const file of files) {
+    const filePath = path.join(inboxDir, file);
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      if (!isValidInboxMessage(parsed)) throw new Error("missing required fields");
+      messages.push({ msg: parsed, filePath });
+    } catch {
+      malformed.push(file);
+    }
+  }
+  return { messages, malformed };
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -654,6 +696,36 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
     case "feed":
       printResult(handlers.executeFeed(cwd, cmd.args.limit ? parseInt(cmd.args.limit as string, 10) : undefined));
       break;
+
+    case "receive": {
+      if (state.agentName === "anonymous") {
+        process.stdout.write("No active session. Run: pi-messenger-cli join --self-model <model>\n");
+        break;
+      }
+      const recvInboxDir = path.join(dirs.inbox, state.agentName);
+      const { messages: recvMessages, malformed: recvMalformed } = readInboxMessages(recvInboxDir);
+
+      for (const mf of recvMalformed) {
+        process.stderr.write(`⚠ Skipping malformed message: ${mf}\n`);
+      }
+
+      if (recvMessages.length === 0 && recvMalformed.length === 0) {
+        process.stdout.write("No new messages.\n");
+        break;
+      }
+
+      let recvCount = 0;
+      for (const { msg, filePath } of recvMessages) {
+        process.stdout.write(`[${msg.from} ${msg.timestamp}] ${msg.text}\n`);
+        try { fs.unlinkSync(filePath); } catch {} // race-safe
+        recvCount++;
+      }
+
+      if (recvCount > 0) {
+        process.stdout.write(`\n${recvCount} message${recvCount === 1 ? "" : "s"} received.\n`);
+      }
+      break;
+    }
 
     case "task.start": {
       const id = cmd.args.id as string;

@@ -58,7 +58,7 @@ Task 9 → depends on all
   - Add `"receive"` to the set
   - File: `cli/index.ts` (line 411-416, line 479)
 
-- [ ] **Task 6: Extract `readInboxMessages()` + Add `receive` command**
+- [x] **Task 6: Extract `readInboxMessages()` + Add `receive` command**
   - Extract shared `readInboxMessages(inboxDir)` returning `{ messages, malformed }` with `isValidInboxMessage()` shape validation (from/text/timestamp)
   - `receive` command: anonymous → guidance, empty → "No new messages.", print format `[Sender Timestamp] text`, delete after print, warn+skip malformed
   - File: `cli/index.ts` (~line 533)
