@@ -37,7 +37,9 @@ read({ path: ".pi/messenger/crew/tasks/<TASK_ID>.md" })
 
 ## Phase 2.5: Load Relevant Skills
 
-If your task prompt includes an **Available Skills** section, read any that match what you're building before starting implementation.
+If your task prompt includes an **Available Skills** section, read skills that match what you're **building** (e.g. a framework, testing library, or domain-specific tool).
+
+**Do NOT read `pi-messenger-crew`** — you already have every `pi_messenger` action you need in this prompt.
 
 If skills are marked **Recommended for this task**, read those first.
 
@@ -45,7 +47,7 @@ If skills are marked **Recommended for this task**, read those first.
 read({ path: "<skill-path-from-the-list>" })
 ```
 
-Skip this phase if no Available Skills section is present.
+Skip this phase if no Available Skills section is present or no skills match your implementation work.
 
 ## Phase 3: Start Task & Reserve Files
 
