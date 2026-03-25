@@ -9,6 +9,7 @@
 | 2026-03-12 | Dale correction | Messaged WildNova by wrong name (called them WildNova, they are HappyFalcon) | Agent name ≠ session name. WildNova is the session/mesh identity; HappyFalcon is the agent who was in the shaping session. Check context before assuming identity |
 | 2026-03-18 | Dale correction | `~/.pi/agent/bin/` assumed to be in system PATH — survived shaping, planning, 6 Codex rounds, implementation, and code verification. User caught it in 5 seconds from Terminal. | Every agent runs inside pi where getShellEnv() adds the bin dir. That's an environmental bias, not reality. ALWAYS test PATH-dependent features with `env -i PATH=... which <cmd>` from a clean shell. The Homebrew bin (`/opt/homebrew/bin/`) is the real system-wide PATH on macOS. |
 | 2026-03-18 | Codex agent logs | CLI read-only commands (list, status, feed) re-registered the caller's PID, clobbering the spawn process's registration. Collaborators then failed to deliver messages because `validateTargetAgent` saw the dead PID from the short-lived list process. | Read-only CLI commands must NEVER write to the registry. Only mutating commands (join, send, reserve, spawn, etc.) should register. Fixed in `READ_ONLY_COMMANDS` set + `bootstrap({ register: false })`. |
+| 2026-03-25 | Real Claude Code interaction | CLI session key uses `sha256(cwd+model)` but `--self-model` on `join` and auto-detection on `send` produce different model strings → different keys → identity rotates. Also: no `receive` command exists at all — agents can send but can never read replies. | Session lookup must fall back to CWD scan when exact key misses. `receive` command is a day-one requirement for any messaging system. Test the headline use case (send→receive round-trip) before shipping. |
 
 ## User Preferences
 - "Best in class, tested, repeatable, updatable, installed and ready to use" — no quick fixes, no bandaids without explicit approval
@@ -26,6 +27,8 @@
 - Lighter spawn prompts: only include what's needed for FIRST response. File reads can happen during conversation.
 
 ## Patterns That Don't Work
+- **Session key including model string** — `sha256(cwd+model)` as session key means any change in how the model is detected (flag vs env var vs config) produces a different key. CWD-only fallback with ambiguity guard is the fix (spec 010).
+- **Shipping a messaging CLI without a receive command** — The pi extension has push delivery via fs.watch(). The CLI has nothing. "Can I send and get a reply?" must be tested before any messaging feature ships.
 - **CLI read-only commands clobbering spawn registrations** — Every CLI invocation used to re-register, so `list` would overwrite the PID left by `spawn`. When `list` exits, collaborators see the caller as dead. Fixed: `READ_ONLY_COMMANDS` bypass registration.
 - **Dismissing collaborators before they respond** — challengers need 3-10 min on large codebases. Check token count delta (increasing = still working) before assuming stuck.
 - **D5 absolute timeout kills working spawns** — spec 006 D5 (300s absolute timeout) fires during spawn when collaborator is actively reading files. Root cause: pollForCollaboratorMessage has no context awareness. Fix: spec 008 adds `context: "spawn" | "send"` to PollOptions, gates D5 to send-only.
@@ -40,11 +43,11 @@
 - Crew agents are spawned as `pi --mode json` subprocesses
 - Author: Nico Bailon (nicobailon on GitHub)
 - **FORK MGMT**: We don't own pi-messenger. Upstream = `nicobailon/pi-messenger`, fork = `carmandale/pi-messenger`. We are NOT ready to submit upstream — don't propose it.
-- **Install path**: Dev repo at `~/Groove Jones Dropbox/Dale Carman/Projects/dev/pi-messenger` → run `node install.mjs` → copies files to `~/.pi/agent/extensions/pi-messenger/` → pi loads from there at session start. No npm publish needed.
-- **Current versions**: Extensions dir = v0.14.0 (our fork, spec 004 blocking). Global npm = v0.13.0 (upstream, untouched). Pi loads from extensions dir, NOT from npm global.
-- **Never `pi install npm:pi-messenger` on laptop** — overwrites fork with older upstream
-- **After code changes**: Must re-run `node install.mjs` from dev repo to update the extensions dir. New pi sessions pick up changes automatically (no pi restart needed for extension file changes, but agents in-flight use old code).
-- **Mini-ts**: Still on v0.13.0 (upstream npm). Not urgent — HappyFalcon handling separately. Would need `scp -r` or similar to push extension files there.
+- **Install path**: Dev repo registered as local path package in `~/.pi/agent/settings.json`. Pi loads extension directly from the dev repo — **no copy step needed**. Code changes are live on next pi session start.
+- **CLI wrapper**: `/opt/homebrew/bin/pi-messenger-cli` → shell wrapper that uses jiti to run `cli/index.ts` from the dev repo. Created once by `node install.mjs`, persists across commits.
+- **After code changes**: `git push` is the only deploy step. Dual-push syncs to mini-ts, post-receive hook handles setup. **No need to re-run install.mjs** after code changes.
+- **First-time setup only**: Run `node install.mjs` once on a new machine to create the CLI wrapper. After that, changes are live via the local path package.
+- **Mini-ts**: Running fork from `~/dev/pi-messenger-fork`, synced via dual-push. CLI wrapper installed and pointing to dev repo. Settings.json uses relative path `../../dev/pi-messenger-fork`.
 - Mac mini SSH: `ssh mini-ts` (user chipcarman@chips-mac-mini)
 - **Branch**: `feat/002-multi-runtime-support` is active dev branch on fork. PR #9 open against upstream but NOT for merging yet.
 
