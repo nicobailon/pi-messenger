@@ -25,7 +25,7 @@ Task 9 → depends on all
 
 ## Tasks
 
-- [ ] **Task 1: Extract `findSessionByCwd()`**
+- [x] **Task 1: Extract `findSessionByCwd()`**
   - Extract CWD-scan logic from `leave` into standalone function
   - Validate `name/model/cwd/startedAt` fields (same as `readCliSession` line 231)
   - Returns: null (0 matches), session (1 match), throws (2+ matches)

@@ -258,7 +258,48 @@ function writeCliSession(dirs: Dirs, cwd: string, model: string, name: string): 
 }
 
 // =============================================================================
-// External Bootstrap (Task 3)
+// CWD Fallback Session Lookup
+// =============================================================================
+
+/**
+ * Find a CLI session by CWD alone (ignoring model in key).
+ * Used as fallback when exact sha256(cwd+model) lookup misses and
+ * --self-model was NOT explicitly provided.
+ *
+ * Returns: null (0 matches), CliSession (exactly 1 match),
+ * throws Error (2+ matches — ambiguous, user must specify --self-model).
+ */
+function findSessionByCwd(dirs: Dirs, cwd: string): CliSession | null {
+  const sessionsDir = getCliSessionsDir(dirs);
+  if (!fs.existsSync(sessionsDir)) return null;
+
+  const matches: CliSession[] = [];
+  for (const f of fs.readdirSync(sessionsDir)) {
+    if (!f.endsWith(".json") || f.startsWith(".")) continue;
+    try {
+      const candidate = JSON.parse(
+        fs.readFileSync(path.join(sessionsDir, f), "utf-8"),
+      ) as CliSession;
+      // Same field validation as readCliSession (line ~231)
+      if (!candidate.name || !candidate.model || !candidate.cwd || !candidate.startedAt) continue;
+      if (candidate.cwd === cwd) {
+        const age = Date.now() - new Date(candidate.startedAt).getTime();
+        if (age <= CLI_SESSION_TTL_MS) {
+          matches.push(candidate);
+        }
+      }
+    } catch { /* skip malformed */ }
+  }
+
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0];
+  throw new Error(
+    "Multiple sessions found for this CWD. Use --self-model to specify which session.",
+  );
+}
+
+// =============================================================================
+// External Bootstrap
 // =============================================================================
 
 /**
