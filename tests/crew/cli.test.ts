@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
+import { spawnSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -8,21 +8,40 @@ import * as os from "node:os";
 const CLI_PATH = path.resolve(__dirname, "../../cli/index.ts");
 
 function runCli(args: string[], env?: Record<string, string>, cwd?: string): { stdout: string; stderr: string; exitCode: number } {
-  try {
-    const stdout = execFileSync("npx", ["tsx", CLI_PATH, ...args], {
-      encoding: "utf-8",
-      cwd: cwd ?? process.cwd(),
-      env: { ...process.env, ...env },
-      timeout: 15000,
-    });
-    return { stdout, stderr: "", exitCode: 0 };
-  } catch (err: any) {
-    return {
-      stdout: err.stdout?.toString() ?? "",
-      stderr: err.stderr?.toString() ?? "",
-      exitCode: err.status ?? 1,
-    };
-  }
+  const result = spawnSync("npx", ["tsx", CLI_PATH, ...args], {
+    encoding: "utf-8",
+    cwd: cwd ?? process.cwd(),
+    env: { ...process.env, ...env },
+    timeout: 15000,
+  });
+  return {
+    stdout: result.stdout?.toString() ?? "",
+    stderr: result.stderr?.toString() ?? "",
+    exitCode: result.status ?? (result.error ? 1 : 0),
+  };
+}
+
+/**
+ * Async CLI runner using child_process.spawn.
+ * Doesn't block the event loop — allows setTimeout file writes during poll.
+ */
+function runCliAsync(
+  args: string[], env?: Record<string, string>, cwd?: string,
+): { proc: ChildProcess; stdout: () => string; stderr: () => string; waitForExit: () => Promise<number> } {
+  const proc = spawn("npx", ["tsx", CLI_PATH, ...args], {
+    cwd: cwd ?? process.cwd(),
+    env: { ...process.env, ...env },
+  });
+  let stdoutBuf = "";
+  let stderrBuf = "";
+  proc.stdout?.on("data", (d: Buffer) => { stdoutBuf += d.toString(); });
+  proc.stderr?.on("data", (d: Buffer) => { stderrBuf += d.toString(); });
+  return {
+    proc,
+    stdout: () => stdoutBuf,
+    stderr: () => stderrBuf,
+    waitForExit: () => new Promise(resolve => proc.on("exit", (code) => resolve(code ?? 1))),
+  };
 }
 
 describe("pi-messenger-cli", () => {
@@ -822,7 +841,7 @@ describe("pi-messenger-cli", () => {
     // =========================================================================
     // Test 5: Receive malformed → file NOT deleted, valid messages still read
     // =========================================================================
-    it("receive malformed: file preserved, valid messages processed", () => {
+    it("receive malformed: warns on stderr, file preserved, valid messages processed", () => {
       writeSession("test-model", "MalAgent");
       const inboxDir = path.join(messengerDir, "inbox", "MalAgent");
       fs.mkdirSync(inboxDir, { recursive: true });
@@ -836,6 +855,9 @@ describe("pi-messenger-cli", () => {
       }, testDir);
 
       expect(result.exitCode).toBe(0);
+      // R8: Warning on stderr for malformed file
+      expect(result.stderr).toContain("malformed");
+      expect(result.stderr).toContain("0000-bad.json");
       // Valid message was read and printed
       expect(result.stdout).toContain("GoodSender");
       expect(result.stdout).toContain("valid message");
@@ -903,24 +925,19 @@ describe("pi-messenger-cli", () => {
         writeInboxMessage(agentName, "TargetAgent", "This is the reply!");
       }, 500);
 
-      // Run send --wait with short timeout
-      const { spawn } = await import("node:child_process");
-      const proc = spawn("npx", ["tsx", CLI_PATH, "send", "--to", "TargetAgent", "--message", "ping", "--wait", "--timeout", "5", "--self-model", "wait-model"], {
-        cwd: testDir,
-        env: { ...process.env, ...cleanEnv() },
-      });
+      // Run send --wait with short timeout using shared async helper
+      const cli = runCliAsync(
+        ["send", "--to", "TargetAgent", "--message", "ping", "--wait", "--timeout", "5", "--self-model", "wait-model"],
+        { ...process.env as Record<string, string>, ...cleanEnv() },
+        testDir,
+      );
 
-      let stdout = "";
-      let stderr = "";
-      proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
-      proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-
-      const exitCode = await new Promise<number>(resolve => proc.on("exit", (code) => resolve(code ?? 1)));
+      const exitCode = await cli.waitForExit();
       clearTimeout(replyDelay);
 
       expect(exitCode).toBe(0);
-      expect(stdout).toContain("Reply from TargetAgent");
-      expect(stdout).toContain("This is the reply!");
+      expect(cli.stdout()).toContain("Reply from TargetAgent");
+      expect(cli.stdout()).toContain("This is the reply!");
     }, 15000);
 
     // =========================================================================
@@ -947,20 +964,17 @@ describe("pi-messenger-cli", () => {
         JSON.stringify(targetReg, null, 2),
       );
 
-      const { spawn } = await import("node:child_process");
-      const proc = spawn("npx", ["tsx", CLI_PATH, "send", "--to", "SlowAgent", "--message", "ping", "--wait", "--timeout", "1", "--self-model", "timeout-model"], {
-        cwd: testDir,
-        env: { ...process.env, ...cleanEnv() },
-      });
+      const cli = runCliAsync(
+        ["send", "--to", "SlowAgent", "--message", "ping", "--wait", "--timeout", "1", "--self-model", "timeout-model"],
+        { ...process.env as Record<string, string>, ...cleanEnv() },
+        testDir,
+      );
 
-      let stderr = "";
-      proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-
-      const exitCode = await new Promise<number>(resolve => proc.on("exit", (code) => resolve(code ?? 1)));
+      const exitCode = await cli.waitForExit();
 
       expect(exitCode).toBe(1);
-      expect(stderr).toContain("No reply from SlowAgent");
-      expect(stderr).toContain("receive");
+      expect(cli.stderr()).toContain("No reply from SlowAgent");
+      expect(cli.stderr()).toContain("receive");
     }, 15000);
 
     // =========================================================================
@@ -990,13 +1004,13 @@ describe("pi-messenger-cli", () => {
       // Pre-write a message from OtherAgent (not WaitTarget)
       writeInboxMessage(agentName, "OtherAgent", "I am not the reply you're looking for");
 
-      const { spawn } = await import("node:child_process");
-      const proc = spawn("npx", ["tsx", CLI_PATH, "send", "--to", "WaitTarget", "--message", "ping", "--wait", "--timeout", "1", "--self-model", "nc-model"], {
-        cwd: testDir,
-        env: { ...process.env, ...cleanEnv() },
-      });
+      const cli = runCliAsync(
+        ["send", "--to", "WaitTarget", "--message", "ping", "--wait", "--timeout", "1", "--self-model", "nc-model"],
+        { ...process.env as Record<string, string>, ...cleanEnv() },
+        testDir,
+      );
 
-      const exitCode = await new Promise<number>(resolve => proc.on("exit", (code) => resolve(code ?? 1)));
+      const exitCode = await cli.waitForExit();
 
       // Should timeout (no reply from WaitTarget)
       expect(exitCode).toBe(1);
@@ -1004,12 +1018,34 @@ describe("pi-messenger-cli", () => {
       // OtherAgent's message should still be in inbox
       const inboxDir = path.join(messengerDir, "inbox", agentName);
       const remaining = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json") && !f.startsWith("."));
-      // At least 1 remaining (OtherAgent's message; WaitTarget's "send" message may also be there)
       const contents = remaining.map(f => JSON.parse(fs.readFileSync(path.join(inboxDir, f), "utf-8")));
       const otherMsg = contents.find((m: any) => m.from === "OtherAgent");
       expect(otherMsg).toBeDefined();
       expect(otherMsg.text).toBe("I am not the reply you're looking for");
     }, 15000);
+
+    // =========================================================================
+    // Test 10b: Double-wait guard — send --wait skips poll when executeSend returns error
+    // (Proxy for collaborator-inline-reply guard: details.error/reply/conversationComplete → no poll)
+    // =========================================================================
+    it("send --wait skips poll when send fails (double-wait guard)", () => {
+      // Join first
+      runCli(["join", "--self-model", "guard-model"], cleanEnv(), testDir);
+
+      // Send to non-existent target with --wait — executeSend returns error,
+      // double-wait guard should break immediately, NOT enter 300s poll loop
+      // If the guard is broken, this test would hang for 300s (timeout).
+      const result = runCli(
+        ["send", "--to", "NonExistentAgent", "--message", "test", "--wait", "--self-model", "guard-model"],
+        cleanEnv(),
+        testDir,
+      );
+
+      // Should fail quickly with send error, NOT with timeout error
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).not.toContain("No reply from");  // timeout message
+      expect(result.stderr).not.toContain("Waiting for reply"); // poll loop message
+    });
 
     // =========================================================================
     // Test 11: UX — join mentions receive
@@ -1030,9 +1066,10 @@ describe("pi-messenger-cli", () => {
     });
 
     // =========================================================================
-    // Test 13: Full round-trip — join → send → receive reply
+    // Test 13: Round-trip — join → inbox-level message → receive
+    // (True CLI send requires live PID; send path proven by tests 8-10)
     // =========================================================================
-    it("full round-trip: join → inbox write → receive reads reply", () => {
+    it("round-trip: join → inbox write (sendMessageToAgent format) → receive reads reply", () => {
       // Join
       const joinResult = runCli(["join", "--self-model", "rt-model"], cleanEnv(), testDir);
       expect(joinResult.exitCode).toBe(0);
