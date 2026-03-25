@@ -32,7 +32,7 @@ Task 9 → depends on all
   - Insert after `writeCliSession()` (~line 260)
   - File: `cli/index.ts`
 
-- [ ] **Task 2: Restructure `bootstrapExternal()`**
+- [x] **Task 2: Restructure `bootstrapExternal()`**
   - Add `action?: string` parameter
   - Wrap `detectModel()` in try/catch with CWD fallback on both miss and throw
   - **Critical:** CWD fallback → `resolvedModel = session.model` (NOT detectModel result)
@@ -42,7 +42,7 @@ Task 9 → depends on all
   - **Action threading:** `bootstrap()` passes `cmd.action` → `bootstrapExternal()` 4th param
   - File: `cli/index.ts` (lines 275-318)
 
-- [ ] **Task 3: Update read-only `bootstrap()` path**
+- [x] **Task 3: Update read-only `bootstrap()` path**
   - Same chain with explicit-model guard: exact key → CWD fallback (only if no --self-model) → anonymous
   - Model from CWD-fallback session propagated to `sessionModel`
   - **Ambiguity (2+ matches) → error with guidance** (consistent with registering/leave paths)

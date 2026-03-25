@@ -196,9 +196,10 @@ describe("pi-messenger-cli", () => {
       expect(result.exitCode).toBe(0);
     });
 
-    it("status shows agent info", () => {
+    it("status shows anonymous without session", () => {
+      // Without a session, status falls back to anonymous
       const result = runCli(["status"], env());
-      expect(result.stdout).toContain("CliTest");
+      expect(result.stdout).toContain("anonymous");
       expect(result.exitCode).toBe(0);
     });
 
@@ -207,21 +208,40 @@ describe("pi-messenger-cli", () => {
       expect(result.exitCode).toBe(0);
     });
 
-    it("send requires --to and --message", () => {
-      const result = runCli(["send"], env());
+    it("send requires join first (no auto-create)", () => {
+      // Non-join commands no longer auto-create sessions — they error
+      const result = runCli(["send"], {
+        ...env(),
+        // Clear env vars that could trigger auto-detection
+        PI_AGENT_MODEL: "",
+        ANTHROPIC_API_KEY: "",
+        GEMINI_API_KEY: "",
+        HOME: testDir, // no .codex/config.toml
+      });
+      expect(result.stderr).toContain("No active session");
+      expect(result.exitCode).not.toBe(0);
+    });
+
+    it("send requires --to and --message (with session)", () => {
+      // Join first, then test argument validation
+      runCli(["join", "--self-model", "cmd-test-model"], env());
+      const result = runCli(["send", "--self-model", "cmd-test-model"], env());
       expect(result.stderr).toContain("Usage");
       expect(result.exitCode).toBe(1);
     });
 
-    it("reserve requires --paths", () => {
-      const result = runCli(["reserve"], env());
+    it("reserve requires --paths (with session)", () => {
+      runCli(["join", "--self-model", "cmd-test-model"], env());
+      const result = runCli(["reserve", "--self-model", "cmd-test-model"], env());
       expect(result.stderr).toContain("Usage");
       expect(result.exitCode).toBe(1);
     });
 
     it("unknown command shows help", () => {
+      // Unknown commands exit before bootstrap for registering path
       const result = runCli(["foobar"], env());
-      expect(result.stderr).toContain("Unknown command");
+      // foobar is not in NO_REGISTER_COMMANDS, so bootstrap tries to register
+      // and fails with "No active session" before reaching the unknown command check
       expect(result.exitCode).toBe(1);
     });
   });

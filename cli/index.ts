@@ -309,29 +309,70 @@ function findSessionByCwd(dirs: Dirs, cwd: string): CliSession | null {
  * CLI invocations. Agents get the same name + model on every command within a
  * session (8h TTL), fixing the identity rotation problem for non-pi runtimes.
  *
+ * Session lookup chain:
+ * 1. detectModel() in try/catch
+ * 2. Exact key: readCliSession(dirs, cwd, model)
+ * 3. CWD fallback: findSessionByCwd(dirs, cwd) — ONLY when --self-model was NOT explicit
+ *
+ * Session creation is join-only. Non-join commands error if no session found.
+ * CWD fallback overrides resolvedModel with session.model for identity stability.
+ *
  * Returns { name, model } so bootstrap() can propagate model to state.
  */
-function bootstrapExternal(dirs: Dirs, cwd: string, modelFlag?: string): { name: string; model: string } {
-  let resolvedModel: string;
+function bootstrapExternal(dirs: Dirs, cwd: string, modelFlag?: string, action?: string): { name: string; model: string } {
+  const explicitModel = !!modelFlag;
+  let resolvedModel: string | undefined;
+  let session: CliSession | null = null;
+
   try {
     resolvedModel = detectModel(modelFlag);
+    session = readCliSession(dirs, cwd, resolvedModel);
+    if (!session && !explicitModel) {
+      // CWD fallback ONLY when model was auto-detected (not explicit --self-model)
+      const cwdSession = findSessionByCwd(dirs, cwd); // may throw on 2+
+      if (cwdSession) {
+        session = cwdSession;
+        resolvedModel = cwdSession.model; // identity stability: use session's model
+      }
+    }
   } catch (e) {
-    process.stderr.write(`✗ ${(e as Error).message}\n`);
+    if (e instanceof Error && e.message.includes("Multiple sessions")) {
+      // Ambiguity error from findSessionByCwd — rethrow for caller to handle
+      throw e;
+    }
+    // detectModel() threw — try CWD fallback (no explicit model available)
+    try {
+      const cwdSession = findSessionByCwd(dirs, cwd);
+      if (cwdSession) {
+        session = cwdSession;
+        resolvedModel = cwdSession.model;
+      }
+    } catch (e2) {
+      if (e2 instanceof Error && e2.message.includes("Multiple sessions")) throw e2;
+      // Both detectModel and CWD scan failed — fall through to error handling below
+    }
+  }
+
+  let name: string;
+
+  if (session) {
+    // Reuse existing session identity
+    name = session.name;
+  } else if (action === "join" && resolvedModel) {
+    // Only join creates new sessions
+    name = generateMemorableName();
+    writeCliSession(dirs, cwd, resolvedModel, name);
+  } else if (action === "join") {
+    // join but no model detected and no existing session
+    process.stderr.write("✗ No model detected. Use --self-model <model> to join.\n");
+    process.exit(1);
+  } else {
+    // Non-join command with no session found
+    process.stderr.write("✗ No active session. Run: pi-messenger-cli join --self-model <model>\n");
     process.exit(1);
   }
 
-  // Check for existing session
-  const existing = readCliSession(dirs, cwd, resolvedModel);
-  // Always use generateMemorableName() for new sessions — do NOT fall back to PI_AGENT_NAME.
-  // PI_AGENT_NAME leaks from parent environments and would defeat harness isolation: two
-  // different models in the same CWD would inherit the same name from the env var.
-  const name = existing ? existing.name : generateMemorableName();
-
-  // Write session if new
-  if (!existing) {
-    writeCliSession(dirs, cwd, resolvedModel, name);
-  }
-
+  // Write/update registration
   const regDir = dirs.registry;
   try {
     fs.mkdirSync(regDir, { recursive: true });
@@ -342,20 +383,19 @@ function bootstrapExternal(dirs: Dirs, cwd: string, modelFlag?: string): { name:
     pid: process.pid,
     sessionId: `cli-${process.pid}`,
     cwd,
-    model: resolvedModel,
+    model: resolvedModel!,
     startedAt: new Date().toISOString(),
     isHuman: false,
     session: { toolCalls: 0, tokens: 0, filesModified: [] },
     activity: { lastActivityAt: new Date().toISOString() },
   };
 
-  // Atomic write: tmp file + rename
   const tmpPath = path.join(regDir, `.${name}.tmp`);
   const finalPath = path.join(regDir, `${name}.json`);
   fs.writeFileSync(tmpPath, JSON.stringify(registration, null, 2));
   fs.renameSync(tmpPath, finalPath);
 
-  return { name, model: resolvedModel };
+  return { name, model: resolvedModel! };
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -453,7 +493,7 @@ const NO_REGISTER_COMMANDS = new Set([
   "receive",
 ]);
 
-function bootstrap(cwd: string, options?: { register?: boolean; selfModel?: string }): { state: MessengerState; dirs: Dirs } {
+function bootstrap(cwd: string, options?: { register?: boolean; selfModel?: string; action?: string }): { state: MessengerState; dirs: Dirs } {
   const dirs = getMessengerDirs();
   const isCrewSpawned = process.env.PI_CREW_WORKER === "1";
   const shouldRegister = options?.register !== false;
@@ -471,11 +511,12 @@ function bootstrap(cwd: string, options?: { register?: boolean; selfModel?: stri
     // pi-native crew workers get model from their own registration — no override needed
   } else if (shouldRegister) {
     // Registering path: bootstrapExternal handles model detection + session persistence
-    const result = bootstrapExternal(dirs, cwd, options?.selfModel);
+    const result = bootstrapExternal(dirs, cwd, options?.selfModel, options?.action);
     name = result.name;
     resolvedModel = result.model;
   } else {
-    // Read-only path: check session file for identity, fall back to env/anonymous
+    // Read-only path: same three-step chain with CWD fallback
+    const explicitModel = !!options?.selfModel;
     let sessionModel: string | undefined;
     try {
       const detectedModel = detectModel(options?.selfModel);
@@ -483,12 +524,46 @@ function bootstrap(cwd: string, options?: { register?: boolean; selfModel?: stri
       if (session) {
         name = session.name;
         sessionModel = session.model;
+      } else if (!explicitModel) {
+        // CWD fallback (only when --self-model was NOT explicit)
+        try {
+          const cwdSession = findSessionByCwd(dirs, cwd);
+          if (cwdSession) {
+            name = cwdSession.name;
+            sessionModel = cwdSession.model;
+          } else {
+            name = "anonymous";
+          }
+        } catch (e) {
+          // Ambiguity error — surface it for read-only commands too
+          if (e instanceof Error && e.message.includes("Multiple sessions")) {
+            process.stderr.write(`✗ ${e.message}\n`);
+            process.exitCode = 1;
+            name = "anonymous";
+          } else {
+            name = "anonymous";
+          }
+        }
       } else {
-        name = process.env.PI_AGENT_NAME || "anonymous";
+        name = "anonymous";
       }
     } catch {
-      // detectModel may throw (error exit) — for read-only commands, fall back gracefully
-      name = process.env.PI_AGENT_NAME || "anonymous";
+      // detectModel threw — CWD fallback
+      try {
+        const cwdSession = findSessionByCwd(dirs, cwd);
+        if (cwdSession) {
+          name = cwdSession.name;
+          sessionModel = cwdSession.model;
+        } else {
+          name = "anonymous";
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message.includes("Multiple sessions")) {
+          process.stderr.write(`✗ ${e.message}\n`);
+          process.exitCode = 1;
+        }
+        name = "anonymous";
+      }
     }
     resolvedModel = sessionModel;
   }
@@ -516,6 +591,7 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
   const { state, dirs } = bootstrap(cwd, {
     register: !NO_REGISTER_COMMANDS.has(cmd.action),
     selfModel: cmd.args.selfModel as string | undefined,
+    action: cmd.action,
   });
 
   // Validate nonce for mutating commands on crew-spawned workers
