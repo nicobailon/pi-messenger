@@ -402,17 +402,14 @@ function printResult(result: { content: Array<{ text: string }>; details: Record
 // =============================================================================
 
 /**
- * Commands that only read state — these must NOT re-register in the mesh
- * because re-registration overwrites the PID in the registry file. If a
- * long-running command (spawn) is active in another process, a short-lived
- * read-only command would clobber its PID, causing collaborators to see the
- * caller as "not active" and fail to deliver messages.
+ * Commands that must NOT re-register in the mesh — prevents PID clobber
+ * of long-running processes (e.g., spawn). These commands may still
+ * read or write state (e.g., receive deletes inbox files).
  */
-const READ_ONLY_COMMANDS = new Set([
+const NO_REGISTER_COMMANDS = new Set([
   "list", "status", "feed", "task.list", "task.show", "help", "version",
-  // leave reads session file to find identity, then cleans up — must NOT re-register
-  // (re-registration would clobber the PID before ownership validation can run)
   "leave",
+  "receive",
 ]);
 
 function bootstrap(cwd: string, options?: { register?: boolean; selfModel?: string }): { state: MessengerState; dirs: Dirs } {
@@ -476,7 +473,7 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
   }
 
   const { state, dirs } = bootstrap(cwd, {
-    register: !READ_ONLY_COMMANDS.has(cmd.action),
+    register: !NO_REGISTER_COMMANDS.has(cmd.action),
     selfModel: cmd.args.selfModel as string | undefined,
   });
 
@@ -608,7 +605,7 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
     }
 
     case "leave": {
-      // leave is in READ_ONLY_COMMANDS — bootstrap did NOT re-register.
+      // leave is in NO_REGISTER_COMMANDS — bootstrap did NOT re-register.
       // We read the session file to find the identity, then clean up.
       let leftMesh = false;
       try {
