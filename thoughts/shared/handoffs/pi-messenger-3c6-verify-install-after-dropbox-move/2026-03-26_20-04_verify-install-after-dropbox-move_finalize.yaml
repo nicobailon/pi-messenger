@@ -1,0 +1,39 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-03-26T20:04:18.148Z
+session: "pi-messenger-3c6-verify-install-after-dropbox-move"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-3c6"
+---
+
+goal: "Confirm pi-messenger is fully and properly installed for use by pi-agents and other agents after moving from Dropbox to ~/dev"
+now: "All installation components verified: extension registered in settings.json pointing to ~/dev/pi-messenger, CLI wrapper symlinked and functional from clean shell, jiti runtime and cli/index.ts exist, smoke test passes (mesh returns 2 agents), no stale Dropbox references remain"
+
+final_solutions:
+  - "Extension path in ~/.pi/agent/settings.json already points to /Users/dalecarman/dev/pi-messenger — correct after move"
+  - "CLI wrapper at ~/.pi/agent/bin/pi-messenger-cli (symlinked from /opt/homebrew/bin/) has SOURCE_DIR pointing to ~/dev/pi-messenger — correct"
+  - "jiti runtime and cli/index.ts both exist at expected paths"
+  - "Clean shell test (env -i PATH=/opt/homebrew/bin:...) resolves pi-messenger-cli and executes successfully"
+  - "Smoke test: mesh returns 2 online agents, CLI is fully functional"
+  - "Zero stale Dropbox references found across settings.json, CLI wrappers, and config files"
+
+final_decisions:
+  - "No re-installation needed — all paths were already updated to ~/dev before this session"
+  - "No code changes required — verification-only session"
+
+artifacts_produced:
+  - "Installation verification checklist covering 10 components (extension registration, CLI wrapper, jiti, source files, clean shell access, smoke test, skill, crew agents, stale refs, config)"
+
+done_this_session:
+  - "Full ground/orientation of pi-messenger codebase"
+  - "Verified all 10 installation components after Dropbox → ~/dev move"
+  - "Confirmed no stale Dropbox references remain"
+
+next:
+  - "Verify mini-ts is also updated if it was pointing to Dropbox path"
+  - "Continue with remaining deploy parity work (bead pi-messenger-3c6)"
+git:
+  branch: "feat/002-multi-runtime-support"
+  commit: "49f3f5a7cad73987429c38ca134a9e1e55ef8bf2"
+  remote: "git@github.com:carmandale/pi-messenger.git"
