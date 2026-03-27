@@ -25,6 +25,7 @@
 - Mode 2 collaboration (user-directed existing agent) works well — LoudArrow diagnosed spawn stall root cause via mesh messaging
 - Pi has `~/.pi/agent/bin/` managed bin dir with PATH injection via `getShellEnv()` — but this is pi-internal only. For system-wide CLI access, symlink into `/opt/homebrew/bin/` (Homebrew's bin, always in PATH on macOS)
 - Lighter spawn prompts: only include what's needed for FIRST response. File reads can happen during conversation.
+- **Side-effect-free reads** — Any operation whose purpose is to observe (list, status, query, detect) must NEVER write shared state (registry, session files, identity). Three bugs traced to reads that silently mutated: CLI `list` clobbered spawn PID (spec 1tz), `send` auto-created sessions (spec 010), model detection changed identity (spec 010). Design rule: read paths and write paths must be completely separate code branches.
 
 ## Patterns That Don't Work
 - **Session key including model string** — `sha256(cwd+model)` as session key means any change in how the model is detected (flag vs env var vs config) produces a different key. CWD-only fallback with ambiguity guard is the fix (spec 010).
