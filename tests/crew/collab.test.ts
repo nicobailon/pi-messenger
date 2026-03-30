@@ -272,3 +272,117 @@ describe("collaborator config support", () => {
     expect(result).toEqual({ model: "anthropic/claude-sonnet-4-6", source: "param" });
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// T6d: gracefulDismiss heartbeat cleanup (spec 009, AD4/R2e)
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe("gracefulDismiss — heartbeat cleanup (spec 009)", () => {
+  let tmpDir: string;
+  let gracefulDismissFn: typeof import("../../crew/handlers/collab.js").gracefulDismiss;
+
+  beforeEach(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "graceful-dismiss-hb-"));
+    vi.resetModules();
+    const mod = await import("../../crew/handlers/collab.js");
+    gracefulDismissFn = mod.gracefulDismiss;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeProcAlreadyExited() {
+    return {
+      exitCode: 0,  // already exited
+      killed: true,
+      pid: 99999,
+      kill: vi.fn(),
+      once: vi.fn().mockImplementation((_event: string, cb: () => void) => cb()),
+      on: vi.fn(),
+      stdin: { end: vi.fn() },
+    } as unknown as import("node:child_process").ChildProcess;
+  }
+
+  function makeProcAlive() {
+    const proc = {
+      exitCode: null,
+      killed: false,
+      pid: 88888,
+      kill: vi.fn(),
+      once: vi.fn().mockImplementation((_event: string, cb: () => void) => {
+        // Simulate process exiting after stdin is closed
+        setTimeout(cb, 10);
+      }),
+      on: vi.fn(),
+      stdin: { end: vi.fn() },
+    } as unknown as import("node:child_process").ChildProcess;
+    return proc;
+  }
+
+  it("gracefulDismiss with already-exited process → heartbeat file unlinked (early-return branch)", async () => {
+    const heartbeatFile = path.join(tmpDir, "already-exited.heartbeat");
+    fs.writeFileSync(heartbeatFile, Date.now().toString());
+
+    const entry = {
+      type: "collaborator" as const,
+      name: "DeadCollab",
+      cwd: tmpDir,
+      proc: makeProcAlreadyExited(),
+      taskId: "__collab-dead__",
+      spawnedBy: process.pid,
+      startedAt: Date.now() - 5000,
+      promptTmpDir: null,
+      logFile: null,
+      heartbeatFile,
+    };
+
+    expect(fs.existsSync(heartbeatFile)).toBe(true);
+
+    await gracefulDismissFn(entry);
+
+    // Heartbeat file must be unlinked even though process was already dead
+    expect(fs.existsSync(heartbeatFile)).toBe(false);
+  });
+
+  it("gracefulDismiss with live process → heartbeat file unlinked after exit", async () => {
+    const heartbeatFile = path.join(tmpDir, "live.heartbeat");
+    fs.writeFileSync(heartbeatFile, Date.now().toString());
+
+    const entry = {
+      type: "collaborator" as const,
+      name: "LiveCollab",
+      cwd: tmpDir,
+      proc: makeProcAlive(),
+      taskId: "__collab-live__",
+      spawnedBy: process.pid,
+      startedAt: Date.now() - 1000,
+      promptTmpDir: null,
+      logFile: null,
+      heartbeatFile,
+    };
+
+    expect(fs.existsSync(heartbeatFile)).toBe(true);
+
+    await gracefulDismissFn(entry);
+
+    expect(fs.existsSync(heartbeatFile)).toBe(false);
+  });
+
+  it("gracefulDismiss with no heartbeatFile → no error (optional field)", async () => {
+    const entry = {
+      type: "collaborator" as const,
+      name: "NoHbCollab",
+      cwd: tmpDir,
+      proc: makeProcAlreadyExited(),
+      taskId: "__collab-nohb__",
+      spawnedBy: process.pid,
+      startedAt: Date.now() - 1000,
+      promptTmpDir: null,
+      logFile: null,
+      // heartbeatFile: undefined (not set)
+    };
+
+    await expect(gracefulDismissFn(entry)).resolves.toBeUndefined();
+  });
+});

@@ -757,6 +757,180 @@ describe("pollForCollaboratorMessage", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spec 009: heartbeat-aware stall detection in pollForCollaboratorMessage
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("pollForCollaboratorMessage — heartbeat-aware (spec 009)", () => {
+  let hbTmpDir: string;
+  let hbInboxDir: string;
+  let hbPollFn: typeof import("../../crew/handlers/collab.js").pollForCollaboratorMessage;
+
+  beforeEach(async () => {
+    hbTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "collab-hb-test-"));
+    hbInboxDir = path.join(hbTmpDir, "inbox", "TestSpawner");
+    fs.mkdirSync(hbInboxDir, { recursive: true });
+    vi.resetModules();
+    const mod = await import("../../crew/handlers/collab.js");
+    hbPollFn = mod.pollForCollaboratorMessage;
+  });
+
+  afterEach(() => {
+    fs.rmSync(hbTmpDir, { recursive: true, force: true });
+  });
+
+  function makeHbProc(alive = true) {
+    return {
+      exitCode: alive ? null : 0,
+      kill: vi.fn(),
+      once: vi.fn(),
+      on: vi.fn(),
+      stdin: { write: vi.fn(), end: vi.fn() },
+    } as unknown as import("node:child_process").ChildProcess;
+  }
+
+  function makeHbEntry(overrides: Partial<import("../../crew/registry.js").CollaboratorEntry> = {}) {
+    return {
+      type: "collaborator" as const,
+      name: "TestCollab",
+      cwd: "/tmp/test",
+      proc: makeHbProc(),
+      taskId: "__collab-hb__",
+      spawnedBy: process.pid,
+      startedAt: Date.now() - 60_000, // 60s ago — past any grace period
+      promptTmpDir: null,
+      logFile: null,
+      heartbeatFile: undefined as string | undefined,
+      ...overrides,
+    };
+  }
+
+  function makeHbState(): import("../../lib.js").MessengerState {
+    return {
+      agentName: "TestSpawner",
+      registered: true,
+      watcher: null,
+      watcherRetries: 0,
+      watcherRetryTimer: null,
+      watcherDebounceTimer: null,
+      reservations: [],
+      unreadCounts: new Map(),
+      chatHistory: new Map(),
+      blockingCollaborators: new Set(),
+      completedCollaborators: new Set(),
+      spec: undefined,
+      isHuman: false,
+      model: "test",
+      gitBranch: undefined,
+      activity: { lastActivityAt: new Date().toISOString() },
+      session: { toolCalls: 0, tokens: 0, filesModified: [] },
+      statusMessage: undefined,
+      registrationContextSent: false,
+      registryFlushTimer: null,
+      customStatus: undefined,
+    };
+  }
+
+  it("heartbeat fresh + static log → NOT stalled, message delivered (AC5 happy path)", async () => {
+    const logFile = path.join(hbTmpDir, "static.log");
+    const heartbeatFile = path.join(hbTmpDir, "active.heartbeat");
+
+    fs.writeFileSync(logFile, "started");
+    const staleDate = new Date(Date.now() - 2000);
+    fs.utimesSync(logFile, staleDate, staleDate); // stale log
+
+    fs.writeFileSync(heartbeatFile, Date.now().toString()); // fresh heartbeat
+
+    const msg = { id: "hb1", from: "TestCollab", to: "TestSpawner",
+      text: "OK", timestamp: new Date().toISOString(), replyTo: null };
+    setTimeout(() => {
+      fs.writeFileSync(path.join(hbInboxDir, `${Date.now()}-m.json`), JSON.stringify(msg));
+    }, 200);
+
+    const entry = makeHbEntry({ logFile, heartbeatFile });
+    const result = await hbPollFn({
+      inboxDir: hbInboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 400,  // would fire on stale log alone (old behavior)
+      pollTimeoutMs: 60_000,
+      heartbeatFile,
+      hardCeilingMs: 3600_000,
+      state: makeHbState(),
+    });
+
+    expect(result.ok).toBe(true); // heartbeat prevented false-positive stall
+  });
+
+  it("hardCeilingMs exceeded with active heartbeat → stallType:'timeout'", async () => {
+    const heartbeatFile = path.join(hbTmpDir, "active2.heartbeat");
+    fs.writeFileSync(heartbeatFile, Date.now().toString()); // fresh
+
+    const entry = makeHbEntry({ heartbeatFile });
+    const result = await hbPollFn({
+      inboxDir: hbInboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 60_000,
+      pollTimeoutMs: 60_000,
+      heartbeatFile,
+      hardCeilingMs: 300, // tiny — fires before liveness check would
+      state: makeHbState(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.stallType).toBe("timeout");
+    }
+  });
+
+  it("hardCeilingMs not exceeded, active heartbeat → not stalled (ceiling not firing prematurely)", async () => {
+    const heartbeatFile = path.join(hbTmpDir, "active3.heartbeat");
+    fs.writeFileSync(heartbeatFile, Date.now().toString());
+
+    const msg = { id: "hb3", from: "TestCollab", to: "TestSpawner",
+      text: "reply", timestamp: new Date().toISOString(), replyTo: null };
+    setTimeout(() => {
+      fs.writeFileSync(path.join(hbInboxDir, `${Date.now()}-m3.json`), JSON.stringify(msg));
+    }, 100);
+
+    const entry = makeHbEntry({ heartbeatFile });
+    const result = await hbPollFn({
+      inboxDir: hbInboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 60_000,
+      pollTimeoutMs: 60_000,
+      heartbeatFile,
+      hardCeilingMs: 3600_000, // far future
+      state: makeHbState(),
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("stallType is a valid PollStallType on error", async () => {
+    const entry = makeHbEntry();
+    // pollTimeoutMs fires since no heartbeat (hardCeiling only applies with active heartbeat)
+    const result = await hbPollFn({
+      inboxDir: hbInboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 60_000,
+      pollTimeoutMs: 300, // tiny D5 fallback — fires fast since no heartbeat
+      hardCeilingMs: 60_000,
+      state: makeHbState(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const validTypes = ["log-only", "heartbeat+log", "timeout", "not-stalled", "within-grace"];
+      expect(validTypes).toContain(result.stallType);
+    }
+  });
+});
+
 // resolveSpawnPollTimeout (spec 008)
 // ─────────────────────────────────────────────────────────────────────────────
 
