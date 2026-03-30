@@ -987,6 +987,36 @@ function deleteCollabState(name: string): void {
   try { fs.unlinkSync(filePath); } catch {}
 }
 
+/**
+ * Exported cleanup helper for collaborator state (spec 009, R2a/R2b/R2c).
+ * Exported to allow unit testing of the cleanup sequence without a live process.
+ * Called by cleanupCollaborator() inside runSpawn.
+ */
+export async function cleanupCollaboratorState(opts: {
+  pid: number;
+  killFirst: boolean;
+  fifoPath: string;
+  collabName: string;
+  heartbeatFile: string;
+  registryDir: string;
+  fifoWriteFd: number;
+}): Promise<void> {
+  const { pid, killFirst, fifoPath, collabName, heartbeatFile, registryDir, fifoWriteFd } = opts;
+  if (killFirst) {
+    // SIGTERM → 5s grace → SIGKILL (R2a/R2b)
+    try { process.kill(pid, "SIGTERM"); } catch {}
+    await sleep(5000);
+    try { process.kill(pid, 0); process.kill(pid, "SIGKILL"); } catch {}
+  }
+  // Full state cleanup
+  try { fs.unlinkSync(fifoPath); } catch {}                                      // FIFO
+  deleteCollabState(collabName);                                                  // collab state JSON
+  try { fs.unlinkSync(heartbeatFile); } catch {}                                  // heartbeat file
+  const regPath = path.join(registryDir, `${collabName}.json`);
+  try { fs.unlinkSync(regPath); } catch {}                                        // registry entry
+  try { fs.closeSync(fifoWriteFd); } catch {}                                     // FIFO write fd
+}
+
 const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
 async function runSpawn(
@@ -1164,22 +1194,18 @@ async function runSpawn(
   const hardCeilingMs = 3600_000; // R5.1: spawn hard ceiling
   const heartbeatFile = path.join(dirs.registry, `${collabName}.heartbeat`);
 
-  // T5b: Cleanup helper — single path for stall, timeout, and crash (spec 009, R2a/R2b/R2c)
-  // Extracted as named function to enable unit testing of the cleanup sequence.
+  // T5b: Cleanup helper — delegates to exported cleanupCollaboratorState (spec 009, R2a/R2b/R2c)
+  // Using the exported function ensures unit tests cover the production code path.
   async function cleanupCollaborator(killFirst: boolean): Promise<void> {
-    if (killFirst) {
-      // SIGTERM → 5s grace → SIGKILL (R2a/R2b)
-      try { process.kill(proc.pid, "SIGTERM"); } catch {}
-      await sleep(5000);
-      try { process.kill(proc.pid, 0); process.kill(proc.pid, "SIGKILL"); } catch {}
-    }
-    // Full state cleanup (R2a/R2b/R2c expanded per Codex finding 1)
-    try { fs.unlinkSync(fifoPath); } catch {}        // FIFO
-    deleteCollabState(collabName);                    // collab state JSON
-    try { fs.unlinkSync(heartbeatFile); } catch {}    // heartbeat file (new)
-    const regPath = path.join(dirs.registry, `${collabName}.json`);
-    try { fs.unlinkSync(regPath); } catch {}           // registry entry
-    try { fs.closeSync(fifoWriteFd); } catch {}        // close FIFO write end
+    await cleanupCollaboratorState({
+      pid: proc.pid,
+      killFirst,
+      fifoPath,
+      collabName,
+      heartbeatFile,
+      registryDir: dirs.registry,
+      fifoWriteFd,
+    });
   }
 
   while (true) {

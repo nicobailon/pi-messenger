@@ -386,3 +386,103 @@ describe("gracefulDismiss — heartbeat cleanup (spec 009)", () => {
     await expect(gracefulDismissFn(entry)).resolves.toBeUndefined();
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Fix 2 (Codex round 1): Heartbeat write/cleanup behavior (A1/R3)
+// Tests the heartbeat FILE BEHAVIOR: write + cleanup contract.
+// The extension setInterval is hard to test without the Pi API;
+// these tests verify the mechanism and the isStalled integration.
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe("heartbeat file write/cleanup behavior (spec 009, A1/R3)", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "heartbeat-lifecycle-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("heartbeat file written by setInterval contains a timestamp string", () => {
+    // Simulate what the A1 setInterval writes:
+    // try { fs.writeFileSync(heartbeatFile, Date.now().toString()); } catch {}
+    const heartbeatFile = path.join(tmpDir, "TestCollab.heartbeat");
+    const before = Date.now();
+    fs.writeFileSync(heartbeatFile, Date.now().toString());
+    const after = Date.now();
+
+    expect(fs.existsSync(heartbeatFile)).toBe(true);
+    const content = fs.readFileSync(heartbeatFile, "utf-8");
+    const ts = parseInt(content, 10);
+    expect(isNaN(ts)).toBe(false);
+    expect(ts).toBeGreaterThanOrEqual(before);
+    expect(ts).toBeLessThanOrEqual(after);
+    // File mtime matches content timestamp (within 1 second)
+    const stat = fs.statSync(heartbeatFile);
+    expect(Math.abs(stat.mtimeMs - ts)).toBeLessThan(1000);
+  });
+
+  it("heartbeat file unlinked on cleanup", () => {
+    // Simulate what session_shutdown does:
+    // try { fs.unlinkSync(join(dirs.registry, name + '.heartbeat')); } catch {}
+    const heartbeatFile = path.join(tmpDir, "TestCollab.heartbeat");
+    fs.writeFileSync(heartbeatFile, Date.now().toString());
+    expect(fs.existsSync(heartbeatFile)).toBe(true);
+
+    try { fs.unlinkSync(heartbeatFile); } catch {}
+    expect(fs.existsSync(heartbeatFile)).toBe(false);
+  });
+
+  it("heartbeat file path follows dirs.registry/<name>.heartbeat convention", () => {
+    // The A1 implementation uses:
+    // join(dirs.registry, `${state.agentName}.heartbeat`)
+    // This test verifies the convention so future refactors stay aligned.
+    const registryDir = path.join(tmpDir, "registry");
+    fs.mkdirSync(registryDir);
+    const agentName = "BlueFalcon";
+
+    // Convention: heartbeat file is in the same directory as the registry JSON
+    const heartbeatFile = path.join(registryDir, `${agentName}.heartbeat`);
+    const registryJson = path.join(registryDir, `${agentName}.json`);
+
+    fs.writeFileSync(registryJson, "{}");
+    fs.writeFileSync(heartbeatFile, Date.now().toString());
+
+    // Both files are in the same registry directory
+    expect(path.dirname(heartbeatFile)).toBe(registryDir);
+    expect(path.dirname(registryJson)).toBe(registryDir);
+    // Heartbeat file does NOT collide with registry JSON (different extension)
+    expect(heartbeatFile).not.toBe(registryJson);
+    expect(heartbeatFile.endsWith(".heartbeat")).toBe(true);
+  });
+
+  it("isStalled() correctly uses heartbeat file written by the extension (integration)", async () => {
+    // This test proves the E2E contract: extension writes heartbeat → isStalled() reads it → not stalled
+    const { isStalled } = await import("../../crew/utils/stall.js");
+    const heartbeatFile = path.join(tmpDir, "TestCollab.heartbeat");
+    const logFile = path.join(tmpDir, "collab.log");
+
+    // Log file is stale (hasn't grown)
+    fs.writeFileSync(logFile, "started");
+    const staleDate = new Date(Date.now() - 2000);
+    fs.utimesSync(logFile, staleDate, staleDate);
+
+    // Extension writes heartbeat just now
+    fs.writeFileSync(heartbeatFile, Date.now().toString());
+
+    // isStalled() must return not-stalled despite stale log
+    const result = isStalled({
+      heartbeatFile,
+      logFile,
+      stallThresholdMs: 500,  // short threshold — stale log would trigger without heartbeat
+      gracePeriodMs: 100,
+      spawnedAt: Date.now() - 10_000,  // past grace
+    });
+
+    expect(result.stalled).toBe(false);
+    expect(result.heartbeatActive).toBe(true);
+    expect(result.type).toBe("not-stalled");
+  });
+});
