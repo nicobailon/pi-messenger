@@ -415,7 +415,11 @@ export async function executeSend(
           onUpdate,
           stallThresholdMs,
           pollTimeoutMs,                           // D5 fallback (used when no heartbeat)
-          heartbeatFile: collabEntry.heartbeatFile, // A4d: dual-signal (spec 009)
+          // Convention fallback: if entry was created by old session code (before spec 009),
+          // heartbeatFile won't be set. Derive from naming convention — same path the
+          // collaborator writes to. Works without restarting the spawner session.
+          heartbeatFile: collabEntry.heartbeatFile
+            ?? path.join(dirs.registry, `${recipient}.heartbeat`), // spec 009 convention
           hardCeilingMs: sendHardCeiling,           // R5.2: send hard ceiling
           state,
         });
