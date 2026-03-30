@@ -975,6 +975,7 @@ describe("pi-messenger-cli", () => {
       expect(exitCode).toBe(1);
       expect(cli.stderr()).toContain("No reply from SlowAgent");
       expect(cli.stderr()).toContain("receive");
+      expect(cli.stderr()).toContain("collaborator");  // T-B2R: R5 recovery hint present
     }, 15000);
 
     // =========================================================================
@@ -1105,6 +1106,112 @@ describe("pi-messenger-cli", () => {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Multiple sessions");
       expect(result.stderr).toContain("--self-model");
+    });
+
+    // =========================================================================
+    // T-B1 (spec 055 R1): send --wait to known collaborator → error instead of timeout
+    // =========================================================================
+    it("send --wait to known collaborator: error instead of timeout", () => {
+      // Uses cleanEnv() HOME override — getCollabStateDir() resolves to fake-home
+      const env = cleanEnv();
+      const fakeHome = path.join(testDir, "fake-home");
+      const collabDir = path.join(fakeHome, ".pi", "agent", "messenger", "collaborators");
+      fs.mkdirSync(collabDir, { recursive: true });
+      fs.writeFileSync(path.join(collabDir, "OakStorm.json"), JSON.stringify({
+        name: "OakStorm", pid: 99999, fifoPath: "/tmp/fake.fifo",
+        logFile: "/tmp/fake.log", agent: "crew-challenger",
+        spawnedBy: "TestDriver", startedAt: new Date().toISOString(),
+      }, null, 2));
+      runCli(["join", "--self-model", "test-model"], env, testDir);
+
+      // synchronous runCli — 15s spawnSync timeout self-validates guard fires before inbox poll
+      const result = runCli(
+        ["send", "--to", "OakStorm", "--message", "re-review", "--wait", "--self-model", "test-model"],
+        env, testDir,
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("OakStorm");
+      expect(result.stderr).toContain("collaborator");
+      expect(result.stderr).toContain("spawn-per-turn");
+    });
+
+    // =========================================================================
+    // T-B2 (spec 055 R2): send --phase writes phase field to recipient inbox JSON
+    // =========================================================================
+    it("send --phase writes phase field to recipient inbox JSON", () => {
+      const env = cleanEnv();
+      runCli(["join", "--self-model", "phase-test-model"], env, testDir);
+      fs.writeFileSync(path.join(messengerDir, "registry", "PhaseTarget.json"), JSON.stringify({
+        name: "PhaseTarget", pid: process.pid, sessionId: "test",
+        cwd: testDir, model: "target-model", startedAt: new Date().toISOString(),
+        isHuman: false, session: { toolCalls: 0, tokens: 0, filesModified: [] },
+        activity: { lastActivityAt: new Date().toISOString() },
+      }, null, 2));
+
+      const result = runCli(
+        ["send", "--to", "PhaseTarget", "--message", "here is my review", "--phase", "review", "--self-model", "phase-test-model"],
+        env, testDir,
+      );
+      expect(result.exitCode).toBe(0);
+
+      const inboxDir = path.join(messengerDir, "inbox", "PhaseTarget");
+      const files = fs.readdirSync(inboxDir).filter((f: string) => f.endsWith(".json")).sort();
+      expect(files.length).toBe(1);  // exactly one message
+      const msg = JSON.parse(fs.readFileSync(path.join(inboxDir, files[files.length - 1]), "utf-8"));
+      expect(msg.phase).toBe("review");
+      expect(msg.text).toBe("here is my review");
+    });
+
+    // =========================================================================
+    // T-B3 (spec 055 R0): spawn-per-turn lifecycle via CLI commands
+    // spawn is intentionally out of unit coverage (requires live Pi process).
+    // This test proves the protocol: guard blocks → dismiss cleans up → second turn deliverable.
+    // =========================================================================
+    it("spawn-per-turn lifecycle: guard blocks → dismiss cleans up → second turn proceeds", () => {
+      const env = cleanEnv();
+      const fakeHome = path.join(testDir, "fake-home");
+      const collabDir = path.join(fakeHome, ".pi", "agent", "messenger", "collaborators");
+      fs.mkdirSync(collabDir, { recursive: true });
+
+      const collabFile = path.join(collabDir, "OakStorm.json");
+      fs.writeFileSync(collabFile, JSON.stringify({
+        name: "OakStorm", pid: 99999, fifoPath: "/tmp/fake-oak-storm.fifo",
+        logFile: "/tmp/fake-oak-storm.log", agent: "crew-challenger",
+        spawnedBy: "TestDriver", startedAt: new Date().toISOString(),
+      }, null, 2));
+
+      // Join — capture output to extract driver name deterministically (same as Tests 1, 8, 10, 13)
+      const joinResult = runCli(["join", "--self-model", "lifecycle-model"], env, testDir);
+      expect(joinResult.exitCode).toBe(0);
+      const driverName = extractJoinName(joinResult.stdout);
+      expect(driverName).toBeTruthy();  // hard assert — no optional path below
+
+      // Step 1: send --wait to active collaborator is blocked by B1 guard
+      const blocked = runCli(
+        ["send", "--to", "OakStorm", "--message", "turn 1 re-review", "--wait", "--self-model", "lifecycle-model"],
+        env, testDir,
+      );
+      expect(blocked.exitCode).toBe(1);
+      expect(blocked.stderr).toContain("spawn-per-turn");
+
+      // Step 2: dismiss via CLI command — exercises runDismiss path, calls deleteCollabState
+      // PID 99999 is likely dead — SIGTERM throws ESRCH, caught silently; FIFO unlink also silent
+      const dismissed = runCli(
+        ["dismiss", "--name", "OakStorm", "--self-model", "lifecycle-model"],
+        env, testDir,
+      );
+      expect(dismissed.exitCode).toBe(0);
+      expect(dismissed.stdout).toContain("dismissed");
+      expect(fs.existsSync(collabFile)).toBe(false);  // state file cleaned up by CLI
+
+      // Step 3: simulate second-turn spawn — fresh collaborator writes review to driver inbox
+      writeInboxMessage(driverName, "OakJaguar", "Approved — fix looks correct.");
+
+      // Step 4: receive confirms second-turn message is deliverable
+      const received = runCli(["receive", "--self-model", "lifecycle-model"], env, testDir);
+      expect(received.exitCode).toBe(0);
+      expect(received.stdout).toContain("OakJaguar");
+      expect(received.stdout).toContain("Approved");
     });
   });
 });

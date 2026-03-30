@@ -19,7 +19,7 @@ import * as store from "../store.js";
 import * as crewStore from "../crew/store.js";
 import * as handlers from "../handlers.js";
 import { logFeedEvent } from "../feed.js";
-import { generateMemorableName } from "../lib.js";
+import { generateMemorableName, isValidAgentName } from "../lib.js";
 import type { MessengerState, Dirs, AgentMailMessage } from "../lib.js";
 import { discoverCrewAgents } from "../crew/utils/discover.js";
 import { loadCrewConfig } from "../crew/utils/config.js";
@@ -675,12 +675,32 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
       const timeoutSec = rawTimeout ?? 300;
 
       if (!to || !message) {
-        process.stderr.write("✗ Usage: pi-messenger-cli send --to <name> --message <text> [--wait] [--timeout <seconds>]\n");
+        process.stderr.write("✗ Usage: pi-messenger-cli send --to <name> --message <text> [--wait] [--timeout <seconds>] [--phase <phase>]\n");
         process.exitCode = 1;
         return;
       }
 
-      const sendResult = await handlers.executeSend(state, dirs, cwd, to, false, message);
+      // B1: Block send --wait to known collaborators. Collaborators exit after their first
+      // turn (FIFO EOF). send --wait will always time out on a dead process.
+      // Guard is --wait only: non-wait sends are fire-and-forget and don't block.
+      // isValidAgentName enforced inside readCollabState (defense in depth per B0).
+      if (wait) {
+        const collabCheck = readCollabState(to);
+        if (collabCheck) {
+          process.stderr.write(
+            `✗ "${to}" is a known collaborator (spawned ${new Date(collabCheck.startedAt).toLocaleString()}).\n` +
+            `  Collaborators exit after their first turn — send --wait will always time out.\n` +
+            `  Use spawn-per-turn: dismiss "${to}", fix your code, then spawn fresh with accumulated context.\n` +
+            `  See: docs/agent-collaboration.md § CLI Agents (Mode 3)\n`
+          );
+          process.exitCode = 1;
+          break;
+        }
+      }
+
+      const phase = cmd.args.phase as string | undefined;
+      const sendResult = await handlers.executeSend(state, dirs, cwd, to, false, message, undefined, phase);
+      // replyTo (pos 7) not exposed via CLI yet — explicit undefined prevents positional confusion
       printResult(sendResult);
 
       const sendDetails = sendResult.details as Record<string, unknown>;
@@ -712,7 +732,12 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
         await sleep(100);
       }
 
-      process.stderr.write(`✗ No reply from ${to} within ${timeoutSec}s. Check later with: pi-messenger-cli receive\n`);
+      process.stderr.write(
+        `✗ No reply from ${to} within ${timeoutSec}s.\n` +
+        `  If "${to}" was a collaborator, it may have exited after its first turn.\n` +
+        `  Dismiss it and re-spawn with accumulated context (see: docs/agent-collaboration.md § CLI Agents).\n` +
+        `  Otherwise, check for delayed replies with: pi-messenger-cli receive\n`
+      );
       process.exitCode = 1;
       break;
     }
@@ -940,6 +965,7 @@ interface CollabState {
 }
 
 function readCollabState(name: string): CollabState | null {
+  if (!isValidAgentName(name)) return null;   // prevents path traversal on raw CLI input
   const filePath = path.join(getCollabStateDir(), `${name}.json`);
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -949,11 +975,13 @@ function readCollabState(name: string): CollabState | null {
 }
 
 function writeCollabState(state: CollabState): void {
+  if (!isValidAgentName(state.name)) return;  // prevents path traversal
   const filePath = path.join(getCollabStateDir(), `${state.name}.json`);
   fs.writeFileSync(filePath, JSON.stringify(state, null, 2));
 }
 
 function deleteCollabState(name: string): void {
+  if (!isValidAgentName(name)) return;        // prevents path traversal
   const filePath = path.join(getCollabStateDir(), `${name}.json`);
   try { fs.unlinkSync(filePath); } catch {}
 }
@@ -1269,7 +1297,7 @@ Commands:
   status                             Show your status
   list                               List active agents
   send --to <name> --message <text>  Send a message
-    [--wait] [--timeout <seconds>]   Block for reply (default 300s)
+    [--wait] [--timeout <seconds>] [--phase <phase>]   Block for reply (default 300s)
   receive                            Check for new messages
   reserve --paths <path...>          Reserve files
   release [--paths <path...>]        Release reservations
@@ -1287,6 +1315,7 @@ Flags:
                         Distinct from --model on spawn (which sets collaborator model).
   --wait                Block after send until recipient replies.
   --timeout <seconds>   Timeout for --wait (default: 300).
+  --phase <phase>       Phase marker forwarded to recipient (review|challenge|revise|approved|complete).
 
 Environment:
   PI_AGENT_NAME     Agent name (auto-generated if not set)
