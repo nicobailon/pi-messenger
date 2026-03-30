@@ -402,6 +402,8 @@ export async function executeSend(
         const pollTimeoutMs = typeof rawPollTimeout === "number" && Number.isFinite(rawPollTimeout)
           ? Math.max(MIN_STALL_THRESHOLD_MS, rawPollTimeout)
           : DEFAULT_POLL_TIMEOUT_MS;
+        // A4d: send hard ceiling — max(D5×3, 900s) per R5.2 (spec 009)
+        const sendHardCeiling = Math.max(pollTimeoutMs * 3, 900_000);
 
         const pollResult = await pollForCollaboratorMessage({
           inboxDir: path.join(dirs.inbox, state.agentName),
@@ -412,7 +414,9 @@ export async function executeSend(
           signal,
           onUpdate,
           stallThresholdMs,
-          pollTimeoutMs,
+          pollTimeoutMs,                           // D5 fallback (used when no heartbeat)
+          heartbeatFile: collabEntry.heartbeatFile, // A4d: dual-signal (spec 009)
+          hardCeilingMs: sendHardCeiling,           // R5.2: send hard ceiling
           state,
         });
 

@@ -631,7 +631,7 @@ describe("pollForCollaboratorMessage", () => {
     }
   });
 
-  it("log-stall returns stallType:'log'", async () => {
+  it("log-stall returns stallType:'log-only' (no heartbeat file → log-only fallback)", async () => {
     const logFile = path.join(tmpDir, "log-stall.log");
     fs.writeFileSync(logFile, "started");
     const entry = makeCollabEntry({ logFile });
@@ -648,14 +648,16 @@ describe("pollForCollaboratorMessage", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe("stalled");
-      expect(result.stallType).toBe("log");
+      expect(result.stallType).toBe("log-only"); // no heartbeat → log-only fallback (spec 009)
     }
   });
 
-  it("log-stall fires after log growth stops (growth-then-stop transition, R4)", async () => {
+  it("log-stall fires after log growth stops (growth-then-stop transition, R4 — mtime-based)", async () => {
     const logFile = path.join(tmpDir, "growth-stop.log");
     fs.writeFileSync(logFile, "started");
-    const entry = makeCollabEntry({ logFile });
+    // startedAt in the past: grace period = max(1000, min(10000, 400/8))*2 = 2000ms.
+    // Setting startedAt 10s ago skips grace period so stall fires at stallThresholdMs.
+    const entry = makeCollabEntry({ logFile, startedAt: Date.now() - 10_000 });
 
     // Phase 1: Drip log bytes for 200ms (simulates active boot)
     const drip = setInterval(() => {
@@ -679,11 +681,11 @@ describe("pollForCollaboratorMessage", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe("stalled");
-      expect(result.stallType).toBe("log");
-      // Stall should fire ~400ms after log stopped growing at ~200ms → ~600ms total
-      // This proves lastLogChangeTime was advanced during the growth phase:
-      // - If stall clock was never reset: would fire at ~400ms (stallThresholdMs from start)
-      // - With reset: fires at ~600ms (200ms growth + 400ms stall threshold)
+      expect(result.stallType).toBe("log-only"); // no heartbeat → log-only fallback (spec 009)
+      // Stall fires ~400ms after last log write (mtime-based, no heartbeat → log-only)
+      // With mtime: last write ~t=200ms → stall fires ~t=600ms
+      // - No heartbeat: falls back to log mtime check
+      // - Stale when now - mtime >= 400ms (stallThresholdMs)
       expect(elapsed).toBeGreaterThanOrEqual(500); // Must be > stallThresholdMs alone (400ms)
       expect(elapsed).toBeLessThan(2000);          // Sanity bound
     }

@@ -32,6 +32,11 @@ import {
   type CollaboratorEntry,
 } from "../registry.js";
 import { logFeedEvent } from "../../feed.js";
+import { isStalled, type LivenessType } from "../utils/stall.js";
+
+/** Stall type for PollResult — includes poll-loop ceiling hits ("timeout") in addition
+ *  to the liveness types emitted by isStalled(). */
+export type PollStallType = LivenessType | "timeout";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -83,16 +88,20 @@ export interface PollOptions {
   entry: CollaboratorEntry;
   signal?: AbortSignal;
   onUpdate?: (update: string) => void;
-  /** Stall threshold: log must grow within this interval or collaborator is considered stalled. */
+  /** Stall threshold: both heartbeat and log must exceed this for a stall (spec 009, R1). */
   stallThresholdMs?: number;
-  /** Absolute wall-clock timeout from poll start. Never resets. Catches log-drip case. */
+  /** D5 fallback ceiling: fires when no heartbeat active (old absolute timeout, backward compat). */
   pollTimeoutMs?: number;
+  /** Heartbeat file for dual-signal stall detection. Falls back to entry.heartbeatFile. */
+  heartbeatFile?: string;
+  /** Hard ceiling — fires regardless of heartbeat freshness. spawn=3600s, send=max(D5×3,900s). */
+  hardCeilingMs?: number;
   state: MessengerState;
 }
 
 export type PollResult =
   | { ok: true; message: AgentMailMessage; peerComplete?: boolean }
-  | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number; stallType?: "log" | "timeout" };
+  | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number; stallType?: PollStallType };
 
 /**
  * Poll the spawner's inbox for a message from a specific collaborator.
@@ -112,19 +121,23 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
   const resolvedStallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
   const resolvedPollTimeoutMs = opts.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
 
+  // A4: Setup for dual-signal stall detection (spec 009)
+  const heartbeatFile = opts.heartbeatFile ?? entry.heartbeatFile;
+  const heartbeatIntervalMs = Math.max(1000, Math.min(10000, resolvedStallThresholdMs / 8));
+  const gracePeriodMs = heartbeatIntervalMs * 2;
+  const spawnedAt = entry.startedAt;
+  const hardCeilingMs = opts.hardCeilingMs ?? 3600_000;
+
   return new Promise<PollResult>((resolve) => {
     const startTime = Date.now();
-    // Separate accumulators: stall detection (100ms) vs progress reporting (30s)
-    let stallLastLogSize = 0;
+    // Progress reporting accumulators (size-based) — separate from stall detection
     let progressLastLogSize = 0;
-    let lastLogChangeTime = startTime;
     let lastProgressTime = startTime;
 
-    // Initialize log size tracking
+    // Initialize progress size tracking
     if (entry.logFile) {
       try {
         const stat = fs.statSync(entry.logFile);
-        stallLastLogSize = stat.size;
         progressLastLogSize = stat.size;
       } catch {
         // Log file may not exist yet
@@ -243,35 +256,33 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
 
       const now = Date.now();
 
-      // Check stall — only when log file exists (degraded mode skips stall detection)
-      if (entry.logFile) {
-        try {
-          const stat = fs.statSync(entry.logFile);
-          if (stat.size > stallLastLogSize) {
-            stallLastLogSize = stat.size;
-            lastLogChangeTime = now;
-          }
-        } catch {
-          // Log file may have been removed
-        }
-        const stallDurationMs = now - lastLogChangeTime;
-        if (stallDurationMs >= resolvedStallThresholdMs) {
-          clearInterval(timer);
-          const logTail = readLogTail();
-          resolve({
-            ok: false,
-            error: "stalled",
-            logTail: logTail || undefined,
-            stallDurationMs,
-            stallType: "log",
-          });
-          return;
-        }
+      // A4: Three-tier stall detection (spec 009, AD2)
+      // Tier 1: liveness via isStalled() — replaces log-size check + log-drip heuristic
+      const stallResult = isStalled({
+        heartbeatFile,
+        logFile: entry.logFile,
+        stallThresholdMs: resolvedStallThresholdMs,
+        gracePeriodMs,
+        spawnedAt,
+      });
+      if (stallResult.stalled) {
+        clearInterval(timer);
+        const logTail = readLogTail();
+        resolve({
+          ok: false,
+          error: "stalled",
+          logTail: logTail || undefined,
+          stallDurationMs: stallResult.stalledMs,
+          stallType: stallResult.type,
+        });
+        return;
       }
 
-      // D5: Absolute wall-clock timeout — catches log-drip case
-      // (independent of log-growth stall, never resets)
-      if (now - startTime >= resolvedPollTimeoutMs) {
+      // Tier 2/3: ceiling — heartbeat freshness selects which ceiling applies
+      // Active heartbeat → hard ceiling (D5 suppressed per R5)
+      // No heartbeat → resolvedPollTimeoutMs (old D5 behavior, backward compat)
+      const ceiling = stallResult.heartbeatActive ? hardCeilingMs : resolvedPollTimeoutMs;
+      if (now - startTime >= ceiling) {
         clearInterval(timer);
         const logTail = readLogTail();
         resolve({
@@ -470,6 +481,8 @@ export async function executeSpawn(
     startedAt: Date.now(),
     promptTmpDir,
     logFile,
+    // A4c: heartbeat file path — convention-based, same dir as registry JSON (spec 009)
+    heartbeatFile: path.join(dirs.registry, `${collabName}.heartbeat`),
   };
   registerWorker(entry);
 
@@ -516,7 +529,9 @@ export async function executeSpawn(
       signal,
       onUpdate,
       stallThresholdMs,
-      pollTimeoutMs,
+      pollTimeoutMs,                    // D5 fallback ceiling (used when no heartbeat)
+      heartbeatFile: entry.heartbeatFile, // A4c: dual-signal stall detection (spec 009)
+      hardCeilingMs: 3600_000,            // R5.1: spawn hard ceiling
       state,
     });
 
@@ -621,10 +636,19 @@ export async function executeDismiss(
 export async function gracefulDismiss(
   entry: CollaboratorEntry,
 ): Promise<void> {
-  // Already exited?
+  // A5: Helper to unlink heartbeat file — called from BOTH branches (spec 009, AD4/R2e)
+  // Crash path takes the early-return branch; without this the file would be orphaned.
+  const unlinkHeartbeat = () => {
+    if (entry.heartbeatFile) {
+      try { fs.unlinkSync(entry.heartbeatFile); } catch {}
+    }
+  };
+
+  // Already exited? (crash path)
   if (entry.proc.exitCode !== null) {
     unregisterWorker(entry.cwd, entry.taskId);
     cleanupTmpDir(entry.promptTmpDir);
+    unlinkHeartbeat(); // ← ADDED: early-return branch (crash path)
     return;
   }
 
@@ -645,6 +669,7 @@ export async function gracefulDismiss(
 
   unregisterWorker(entry.cwd, entry.taskId);
   cleanupTmpDir(entry.promptTmpDir);
+  unlinkHeartbeat(); // ← normal exit path
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
