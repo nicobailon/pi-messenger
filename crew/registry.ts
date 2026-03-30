@@ -35,6 +35,9 @@ export interface CollaboratorEntry extends BaseWorkerEntry {
   startedAt: number;
   promptTmpDir: string | null;
   logFile: string | null;
+  /** Heartbeat file path written by the collaborator's extension heartbeat writer (spec 009, A1).
+   *  Used for dual-signal stall detection in pollForCollaboratorMessage and gracefulDismiss. */
+  heartbeatFile?: string;
   peerTerminal?: boolean;  // set when collaborator sends phase:"complete"
 }
 

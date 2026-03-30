@@ -298,6 +298,12 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   let latestCtx: ExtensionContext | null = null;
   let statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
+  // A1: Heartbeat writer for collaborator mode (spec 009)
+  // statusHeartbeatTimer above is a no-op for headless collaborators (updateStatus
+  // returns immediately when !ctx.hasUI). This new timer fires during API processing
+  // gaps to prevent false-positive stall detection.
+  let collabHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
   function startStatusHeartbeat(): void {
     if (statusHeartbeatTimer) return;
     statusHeartbeatTimer = setInterval(() => {
@@ -794,6 +800,18 @@ Usage (action-based API - preferred):
       if (config.registrationContext) {
         sendRegistrationContext(ctx);
       }
+
+      // A1: Start collaborator heartbeat writer (spec 009, R3/R4)
+      // Fires on the Node.js event loop — keeps heartbeat fresh during API
+      // processing gaps when the model is silent but the process is alive.
+      if (isCollaborator) {
+        const stallThresholdMs = config.collaboration?.stallThresholdMs ?? 120_000;
+        const heartbeatIntervalMs = Math.max(1000, Math.min(10000, stallThresholdMs / 8));
+        const heartbeatFile = join(dirs.registry, `${state.agentName}.heartbeat`);
+        collabHeartbeatTimer = setInterval(() => {
+          try { fs.writeFileSync(heartbeatFile, Date.now().toString()); } catch {}
+        }, heartbeatIntervalMs);
+      }
     }
 
     maybeAutoOpenCrewOverlay(ctx);
@@ -1045,6 +1063,13 @@ Usage (action-based API - preferred):
     if (recentEditTimer) { clearTimeout(recentEditTimer); recentEditTimer = null; }
     store.stopWatcher(state);
     store.unregister(state, dirs);
+
+    // A1: Stop collaborator heartbeat and remove the file (spec 009)
+    if (collabHeartbeatTimer) {
+      clearInterval(collabHeartbeatTimer);
+      collabHeartbeatTimer = null;
+      try { fs.unlinkSync(join(dirs.registry, `${state.agentName}.heartbeat`)); } catch {}
+    }
   });
 
   // ===========================================================================
