@@ -1,183 +1,177 @@
 ---
-title: "Deterministic spawn liveness — replace log-growth heuristic with real activity signal"
+title: "Deterministic spawn liveness — heartbeat file replaces log-growth heuristic"
 date: 2026-03-19
-updated: 2026-03-25
+updated: 2026-03-30
 bead: pi-messenger-35k
+shaped: true
 ---
 
-<!-- issue:complete:v1 | harness: pi/claude-opus-4-6 | date: 2026-03-25T19:40:00Z -->
+<!-- issue:complete:v1 | harness: pi/claude-sonnet-4-6 | date: 2026-03-30T16:40:04Z -->
 
 # 009 — Deterministic Spawn Liveness
 
 ## Problem
 
-The CLI `spawn` command uses log-file-growth as its liveness signal: if the collaborator's log file hasn't grown in `stallThresholdMs` (default 120s), it declares the collaborator stalled and exits. This is a heuristic, not a deterministic signal. It produces false positives during normal operation.
+The spawn liveness detector uses log-file-growth as its signal: if the collaborator's log file hasn't grown in `stallThresholdMs` (default 120s), it declares "stalled." This is a heuristic that produces false positives during normal operation.
 
-### How it fails
+When an opus-class model processes a large context (50K+ tokens), the Anthropic API consumes all input, runs the thinking phase, and only then begins streaming output. During that gap — 3–5+ minutes — the Pi process is alive, the HTTP connection is active, the Node.js event loop is running, but **zero bytes are written to the log file**. The stall detector fires and kills the collaborator. The collaborator was working correctly.
 
-When an opus-class model processes a large context (50K+ tokens), the Anthropic API consumes all input, runs the thinking phase, and only then begins streaming output. During this processing gap — which can last 3-5+ minutes — the pi process is alive, the API connection is active, the model is working, but **zero bytes are written to the log file**. The stall detector sees static log size and fires.
+### Two affected code paths (independent implementations of the same broken logic)
 
-### Observed failure (2026-03-19)
+1. `crew/handlers/collab.ts:pollForCollaboratorMessage` — Pi-to-Pi extension path
+2. `cli/index.ts:runSpawn` poll loop — CLI-to-Pi path
 
-Codex agent "RedUnion" in MiroFish spawned challenger "YoungViper" via `pi-messenger-cli spawn`. YoungViper joined the mesh, called `pi_messenger({ action: "join" })`, read 4 spec files, entered a large thinking pass, then called `pi_messenger({ action: "send", to: "RedUnion" })` — **successfully**. But by then, the CLI spawn had already exited due to stall timeout. RedUnion was gone. YoungViper's second send failed: "RedUnion (not found)." Two subsequent attempts (LoudHawk, SwiftQuartz) hit the same pattern.
+### History
 
-Both YoungViper (PID 48921) and CalmMoon (PID 83110) were still running as orphaned pi processes, never cleaned up.
-
-### What the log proves
-
-```
-# YoungViper's log — 558 pi_messenger calls, actively working
-tool_execution_end: pi_messenger send → "Message sent to RedUnion" (SUCCESS)
-tool_execution_end: pi_messenger send → "Failed to send: RedUnion (not found)" (TOO LATE)
-```
-
-The collaborator did everything right. The spawn command gave up too early.
-
-### The pattern across specs
-
-This is the THIRD spec addressing poll/timeout behavior:
+This is the fourth spec addressing poll/timeout behavior:
 
 | Spec | Problem | Fix | What it got wrong |
 |------|---------|-----|-------------------|
-| 005 | Fixed 10-min timeout killed working challengers | Log-based stall detection (120s of no growth) | Assumed log growth = alive. Wrong during API processing gaps. |
-| 008 | Spec 006 D5 (300s absolute timeout) killed working spawns | Context-aware poll timeout (spawn=900s, send=300s) | Right direction, still a guess. Doesn't fix the log-growth heuristic. |
-| **009** | **Log-growth heuristic fires false positives during normal model processing** | **Deterministic liveness signal** | — |
+| 005 | 10-min timeout killed working challengers | Log-based stall detection (120s) | Assumed log growth = alive |
+| 006 | Idle collaborator drips bytes to fool log-growth | D5 absolute timeout (300s/900s) | D5 fires on working spawns too |
+| 008 | D5 killed working spawns | Context-aware timeout (spawn=900s) | Still a guess, doesn't fix log-growth |
+| **009** | **Log-growth fires during API processing gap** | **Deterministic heartbeat** | — |
 
-Any fixed threshold will be wrong for some workload. **This spec must break the pattern.**
+Any fixed threshold will be wrong for some workload. This spec breaks the pattern.
 
-## Root Cause
+### Key research findings (confirmed during shaping)
 
-The CLI spawn (`cli/index.ts runSpawn`, lines 963-1220) and the extension's `pollForCollaboratorMessage` (`crew/handlers/collab.ts`) both use log file size delta for stall detection. This conflates two very different states:
+- `statusHeartbeatTimer` in `index.ts:303`: fires every 15s but `updateStatus()` returns immediately at line 231 (`if (!ctx.hasUI || !state.registered) return`). Collaborators are headless. This timer is a **no-op**. A new `setInterval` is required.
+- `scheduleRegistryFlush` in `index.ts:626`: triggered only on `tool_call`/`tool_result` hooks. Does NOT fire during API processing gaps.
+- `PI_CREW_COLLABORATOR === "1"` is already set in the spawned Pi process's env.
+- Both poll-path stall handlers exit without killing the orphan process (confirmed: PIDs 48921 and 83110 were left running after stall).
+- D5 absolute timeout: 300s (send context), 900s (spawn context). Must be suppressed when heartbeat is active.
 
-1. **Model processing** — pi process alive, active HTTPS connection, event loop running, zero log output (API hasn't started streaming yet).
-2. **Process stuck** — pi process alive but genuinely hung (deadlock, infinite loop, network timeout).
+---
 
-These states look identical to a log-growth observer. No fixed threshold distinguishes them.
+## Shapes Considered and Eliminated
 
-### What signal IS deterministic?
+**Shape B (periodic registry flush):** `lastActivityAt` semantics corruption; heavyweight serialization every 10s; no file locking.
 
-The pi process runs Node.js. During an API call, the event loop is active (the HTTP request is async). A `setInterval` timer WILL fire even while waiting for the API response. This means the extension can emit a heartbeat that continues during API processing gaps — the one time log-growth fails.
+**Shape C (lsof process inspection):** TCP keep-alive connections are always visible; provider diversity; not available in sandboxed environments.
 
-**Current extension timers (neither writes to disk during API gaps):**
-- **Status heartbeat** (`setInterval`, 15s) — calls `updateStatus(ctx)`, but only updates UI (`ctx.ui.setStatus()`). No disk writes.
-- **Registry flush** (`setTimeout`, 10s, one-shot) — writes `registry/<name>.json`, but only triggers on `scheduleRegistryFlush()` which is called from `tool_call`/`tool_result` hooks. No tool calls during API processing = no flush.
+---
 
-Neither writes to disk during the exact gap where liveness detection fails.
+## Selected Shape: A — Extension heartbeat file + shared stall helper
 
-## Changes Since Original Spec
+### Parts
 
-### Spec 010 (CLI Messaging Round-Trip) — 2026-03-25
+| Part | Mechanism |
+|------|-----------|
+| A1 | **Extension heartbeat writer**: new `setInterval(heartbeatIntervalMs)` in `index.ts` when `PI_CREW_COLLABORATOR === "1"`; writes `Date.now().toString()` to `dirs.registry/<name>.heartbeat`; cleanup in `onDeactivate`. Convention-based path — no new CollabState field needed. |
+| A2 | **Shared `isStalled()` helper** (`crew/utils/stall.ts`): `isStalled(opts)` → `{ stalled, stalledMs, type }`. Within grace → not stalled. Heartbeat mtime within threshold → not stalled. Heartbeat missing after grace → log-only fallback. Stall = log also stale for ≥ stallThresholdMs. |
+| A3 | **CLI `runSpawn` update**: replace log-size check with `isStalled()`; suppress D5 when heartbeat fresh; hard ceiling 3600s; on stall/timeout: SIGTERM → 5s → SIGKILL → full cleanup; on crash: add heartbeat unlink. |
+| A4 | **Extension `pollForCollaboratorMessage` update**: add `heartbeatFile?` to PollOptions/CollaboratorEntry; replace log-size stall check with `isStalled()`; suppress D5 when heartbeat fresh; spawn ceiling 3600s; send ceiling `max(resolvedPollTimeoutMs * 3, 900s)`; stall path: RETURN error without kill (preserves defer-to-agent). |
+| A5 | **Extension cleanup**: `onDeactivate` unlinks heartbeat file. `gracefulDismiss` also unlinks. |
 
-Spec 010 significantly improved CLI infrastructure but did NOT touch the spawn liveness problem:
-
-- **Identity stability**: `findSessionByCwd()` + CWD fallback means the CLI session identity no longer rotates between commands. `spawn` → `dismiss` sequences now reliably target the same agent.
-- **`receive` command**: Non-pi agents can now read their inbox. If the spawner exits, the orphaned collaborator's messages ARE accessible via `pi-messenger-cli receive`.
-- **`send --wait`**: The spawner could theoretically use `send --wait` instead of the in-process poll loop, but this doesn't fix the core problem — the spawner still needs to know if the collaborator is alive.
-- **`NO_REGISTER_COMMANDS`**: Read-only commands no longer clobber spawn registrations. This eliminates a class of "not found" errors where `list` or `status` would overwrite the spawner's PID.
-
-**Net impact on 009**: The CLI plumbing is more reliable. Identity rotations and PID clobbering that caused secondary failures are fixed. The PRIMARY problem (log-growth heuristic false positives) is unchanged.
-
-### Extension `pollForCollaboratorMessage` — current state
-
-The extension's poll loop (`collab.ts:107-230`) has:
-- `stallThresholdMs` (default 120s) — log file unchanged = stalled
-- `pollTimeoutMs` (default 300s send / 900s spawn) — absolute wall-clock cutoff
-- Stall type distinguishes `"log"` vs `"timeout"` but both are heuristics
-
-The CLI's `runSpawn` poll loop (lines 1138-1200) has its own independent implementation:
-- `stallThreshold` (120s default from config)
-- `spawnTimeout` (900s absolute)
-- Same log-size-delta logic
-- **No orphan cleanup on stall** — just closes FIFO write end and exits
-
-## What Needs Shaping
-
-### Candidate A: Extension heartbeat file
-Have the extension write a heartbeat timestamp to a known path (e.g., `<collabStateDir>/<name>.heartbeat`) every N seconds via `setInterval`. The CLI poll checks this file's mtime instead of log size. Fires during API processing because the Node.js event loop runs timers during async HTTP.
-
-**Pros**: Simple, deterministic, uses existing timer infrastructure.
-**Cons**: New file to manage, new cleanup concern.
-
-### Candidate B: Registry mtime as heartbeat
-Modify the extension's registry flush to fire on a periodic `setInterval` (not just on tool calls). The CLI poll checks `registry/<name>.json` mtime. Piggybacks on existing infrastructure.
-
-**Pros**: No new files, uses existing registry mechanism.
-**Cons**: Registry writes are heavier (full JSON serialize), increases disk I/O, changes semantics of `lastActivityAt`.
-
-### Candidate C: OS-level process inspection
-Check the pi process for active network connections (`lsof -p PID -i TCP:443`). Active HTTPS = model processing.
-
-**Pros**: No extension changes needed.
-**Cons**: `lsof` is expensive per poll iteration, macOS-specific behavior, fragile.
-
-### Candidate D: Hybrid — heartbeat + log fallback
-Extension heartbeat (Candidate A) as primary signal. Log-growth as fallback if heartbeat file doesn't exist (legacy/non-extension contexts). Stall = heartbeat AND log both stale for N seconds.
-
-**Pros**: Best of both worlds, graceful degradation.
-**Cons**: Two signals to track, more complex logic.
-
-### Questions for shaping
-
-1. Should the CLI spawn share the extension's `pollForCollaboratorMessage` logic, or is the separate implementation acceptable? (DRY vs. independence)
-2. Must the solution work for non-pi runtimes (Claude Code workers) where the pi-messenger extension is NOT loaded? (Collaborators are always pi processes — Claude Code workers don't use FIFO spawn.)
-3. How should orphan cleanup work when stall fires? Currently `runSpawn` exits without killing the collaborator process.
+---
 
 ## Requirements
 
-| ID | Requirement |
-|----|-------------|
-| R0 | Collaborator is never killed while the pi process event loop is responsive (heartbeat active) |
-| R1 | Stall detection fires only when heartbeat AND log are both stale for the configured threshold |
-| R2 | Orphan pi processes are killed when stall is detected (not left running) |
-| R3 | Heartbeat mechanism works during API processing gaps (the exact failure case for log-growth) |
-| R4 | Extension heartbeat adds < 1 disk write per 15s per collaborator |
-| R5 | CLI `runSpawn` poll loop replaced or updated to check heartbeat signal |
-| R6 | Extension `pollForCollaboratorMessage` updated to check heartbeat signal |
-| R7 | Graceful degradation: if heartbeat file doesn't exist (non-extension context), fall back to existing log-growth stall detection |
-| R8 | Configurable stall threshold preserved (default 120s of no heartbeat + no log growth) |
+**Top-level (9):**
+
+| ID | Requirement | Status |
+|----|-------------|--------|
+| R0 | Collaborator never declared stalled while its heartbeat file has been updated within stallThresholdMs | Core goal |
+| R1 | Stall condition requires BOTH heartbeat AND log to be stale for ≥ stallThresholdMs; active heartbeat alone prevents stall regardless of log activity | Must-have |
+| R2 | On stall or crash, all collaborator state cleaned up — heartbeat file, collab state JSON, FIFO, registry entry | Must-have |
+| R3 | Heartbeat mechanism uses `setInterval` on Node.js event loop — fires during API processing gaps. Writes to `<messengerDir>/registry/<name>.heartbeat` | Must-have |
+| R4 | Heartbeat interval formula: `heartbeatIntervalMs = max(1000, min(10000, stallThresholdMs/8))`. Default stallThresholdMs=120s → 10s interval → 12 missed beats minimum | Must-have |
+| R5 | Both poll paths updated to use shared `isStalled()` helper; D5 absolute timeout suppressed when heartbeat is fresh | Must-have |
+| R6 | Grace period at spawn start = `heartbeatIntervalMs * 2`; missing heartbeat during grace → R7 fallback, not stall. No new config surface. | Must-have |
+| R7 | If heartbeat missing after grace period, fall back to log-only stall detection. Backward compatible with collaborators on older extension versions. | Must-have |
+| R8 | Shared `isStalled()` helper in `crew/utils/stall.ts` — used by both R5.1 and R5.2 to prevent independent drift. Stall threshold remains configurable via `crew.collaboration.stallThresholdMs` | Must-have |
+
+**Sub-requirements:**
+
+| ID | Requirement | Status |
+|----|-------------|--------|
+| R2a | CLI `runSpawn` stall path: SIGTERM PID (before FIFO close), 5s grace, SIGKILL; then deleteCollabState, unlink FIFO, unlink heartbeat file | Must-have |
+| R2b | CLI `runSpawn` absolute timeout path: same cleanup as R2a | Must-have |
+| R2c | CLI `runSpawn` crash path: add heartbeat file unlink (currently missing from `cli/index.ts:1173-1178`) | Must-have |
+| R2d | Extension `pollForCollaboratorMessage` stall path: returns `{ error: "stalled" }` WITHOUT killing process — preserves existing defer-to-agent behavior | Must-have |
+| R2e | Extension `executeSpawn` crash path (`collab.ts:530-535`): add heartbeat file unlink | Must-have |
+| R5.1 | CLI `runSpawn`: use isStalled(); suppress D5 when heartbeat fresh; spawn hard ceiling 3600s (configurable) | Must-have |
+| R5.2 | Extension `pollForCollaboratorMessage`: add `heartbeatFile?` to PollOptions/CollaboratorEntry; use isStalled(); suppress D5 when heartbeat fresh; spawn ceiling 3600s; send ceiling `max(resolvedPollTimeoutMs * 3, 900s)` | Must-have |
+
+---
 
 ## Acceptance Criteria
 
 ### AC1: Heartbeat mechanism
-- Extension writes a heartbeat file (or equivalent) at a regular interval (≤15s) that continues during API processing gaps
-- File path is discoverable by the CLI poll loop from the collab state
-- Heartbeat writes use `setInterval` on the Node.js event loop (proven to fire during async HTTP)
+- Extension writes `dirs.registry/<name>.heartbeat` at `heartbeatIntervalMs` intervals when `PI_CREW_COLLABORATOR === "1"`
+- Default: 10s interval (stallThresholdMs=120s → formula gives 10s)
+- Timer fires during API processing gaps (proven by Node.js async I/O model)
 
 ### AC2: Stall detection uses heartbeat
-- CLI `runSpawn` checks heartbeat freshness instead of (or in addition to) log size
-- Extension `pollForCollaboratorMessage` checks heartbeat freshness
-- Stall = heartbeat stale for ≥ `stallThresholdMs` AND log file stale for ≥ `stallThresholdMs`
-- Active heartbeat with stale log = model processing (NOT stalled)
+- `isStalled()` in `crew/utils/stall.ts` used by both `runSpawn` and `pollForCollaboratorMessage`
+- Active heartbeat → stall never fires regardless of log activity
+- `type: 'heartbeat+log'` when both signals stale; `type: 'log-only'` when in fallback mode
 
 ### AC3: Orphan cleanup
-- When CLI `runSpawn` detects stall, it kills the collaborator process before exiting
-- `SIGTERM` → grace period → `SIGKILL` if still alive
-- Collab state file cleaned up
-- Registry entry cleaned up
+- CLI stall path: SIGTERM → 5s → SIGKILL; deleteCollabState; unlink FIFO; unlink heartbeat (R2a)
+- CLI timeout path: same (R2b)
+- CLI crash path: unlink heartbeat (R2c) — currently missing
+- Extension crash path: unlink heartbeat (R2e) — currently missing
+- Extension stall path: defer-to-agent, no auto-kill (R2d) — preserved intentionally
 
-### AC4: Tests
-- Test: active heartbeat with static log → NOT stalled (the key false-positive case)
-- Test: stale heartbeat + stale log → stalled
-- Test: no heartbeat file → falls back to log-only stall detection
-- Test: orphan cleanup on stall (process killed, state cleaned)
+### AC4: D5 suppression
+- When heartbeat is fresh, D5 absolute timeout is suppressed
+- New ceilings: spawn=3600s, send=`max(pollTimeoutMs*3, 900s)`
+- Hard ceiling fires regardless of heartbeat (safety net for pathological cases)
 
-### AC5: Backward compatibility
-- Extension that doesn't write heartbeat (older version, non-collaborator) → existing behavior unchanged
-- Stall threshold still configurable via `crew.collaboration.stallThresholdMs`
+### AC5: Tests
+- Active heartbeat + static log → NOT stalled (the key false-positive case)
+- Stale heartbeat + stale log → stalled
+- No heartbeat file (within grace) → not stalled
+- No heartbeat file (after grace) → log-only fallback active
+- On stall: process killed + state cleaned (CLI paths)
+- On stall: error returned, process NOT killed (extension path)
+
+### AC6: Backward compatibility
+- Collaborator on old extension (no heartbeat) → R7 log-only fallback
+- Stall threshold configurable as before
+
+---
+
+## Fit Check
+
+| Req | Requirement | Status | A |
+|-----|-------------|--------|---|
+| R0 | Never stalled while heartbeat current | Core goal | ✅ |
+| R1 | Dual-signal stall condition | Must-have | ✅ |
+| R2 | All state cleaned on stall/crash | Must-have | ✅ |
+| R2a | runSpawn stall cleanup | Must-have | ✅ |
+| R2b | runSpawn timeout cleanup | Must-have | ✅ |
+| R2c | runSpawn crash adds heartbeat unlink | Must-have | ✅ |
+| R2d | Extension poll preserves defer-to-agent | Must-have | ✅ |
+| R2e | Extension spawn crash adds heartbeat unlink | Must-have | ✅ |
+| R3 | Heartbeat fires during API gaps | Must-have | ✅ |
+| R4 | Interval formula correct | Must-have | ✅ |
+| R5 | Both paths use isStalled() | Must-have | ✅ |
+| R5.1 | runSpawn: isStalled + ceiling | Must-have | ✅ |
+| R5.2 | pollForCollaboratorMessage: per-context ceilings | Must-have | ✅ |
+| R6 | Grace period | Must-have | ✅ |
+| R7 | Log-only fallback | Must-have | ✅ |
+| R8 | Shared isStalled() | Must-have | ✅ |
+
+---
 
 ## Scope
 
 **In scope:**
-- Extension heartbeat mechanism (`index.ts` — new `setInterval` for collaborators)
-- CLI spawn poll loop (`cli/index.ts` `runSpawn`)
-- Extension `pollForCollaboratorMessage` (`crew/handlers/collab.ts`)
-- Orphan process cleanup
-- Collab state management (`cli/index.ts` collab state helpers)
-- Tests for heartbeat-based stall detection
+- New `setInterval` heartbeat writer in `index.ts` (collaborator mode only)
+- New `crew/utils/stall.ts` shared helper
+- `cli/index.ts runSpawn` poll loop replacement
+- `crew/handlers/collab.ts pollForCollaboratorMessage` poll replacement
+- Orphan cleanup additions to all four paths (stall, timeout, crash × CLI/extension)
+- D5 suppression when heartbeat active; new hard ceilings
+- Tests: AC4/AC5 above
 
 **Out of scope:**
 - Crew worker spawn (different system, different lifecycle)
-- Non-pi runtime adapters (Claude Code workers don't use FIFO spawn)
-- The FIFO-based process lifecycle itself (load-bearing, not changing)
+- Non-pi runtime adapters
+- The FIFO-based process lifecycle itself
 - UI/overlay changes
 - `POLL_TIMEOUT_MS` (30s mesh-join timeout) — different concern
+- Shape A FIFO keepalive for CLI multi-turn (that's spec 055 Shape A, bead `.agent-config-23q`)
