@@ -25,6 +25,7 @@ import { discoverCrewAgents } from "../crew/utils/discover.js";
 import { loadCrewConfig } from "../crew/utils/config.js";
 import { resolveModel } from "../crew/utils/model.js";
 import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../crew/agents.js";
+import { isStalled } from "../crew/utils/stall.js";
 
 // =============================================================================
 // Bootstrap
@@ -1156,25 +1157,41 @@ async function runSpawn(
   const startTime = Date.now();
   const spawnTimeout = config.collaboration?.spawnPollTimeoutMs ?? 900_000;
   const stallThreshold = config.collaboration?.stallThresholdMs ?? 120_000;
-  let lastLogSize = 0;
-  let lastLogChangeTime = startTime;
 
-  try {
-    const stat = fs.statSync(logFile);
-    lastLogSize = stat.size;
-  } catch {}
+  // T5a: Setup for dual-signal stall detection (spec 009, R4/R5.1)
+  const heartbeatIntervalMs = Math.max(1000, Math.min(10000, stallThreshold / 8));
+  const gracePeriodMs = heartbeatIntervalMs * 2;
+  const hardCeilingMs = 3600_000; // R5.1: spawn hard ceiling
+  const heartbeatFile = path.join(dirs.registry, `${collabName}.heartbeat`);
+
+  // T5b: Cleanup helper — single path for stall, timeout, and crash (spec 009, R2a/R2b/R2c)
+  // Extracted as named function to enable unit testing of the cleanup sequence.
+  async function cleanupCollaborator(killFirst: boolean): Promise<void> {
+    if (killFirst) {
+      // SIGTERM → 5s grace → SIGKILL (R2a/R2b)
+      try { process.kill(proc.pid, "SIGTERM"); } catch {}
+      await sleep(5000);
+      try { process.kill(proc.pid, 0); process.kill(proc.pid, "SIGKILL"); } catch {}
+    }
+    // Full state cleanup (R2a/R2b/R2c expanded per Codex finding 1)
+    try { fs.unlinkSync(fifoPath); } catch {}        // FIFO
+    deleteCollabState(collabName);                    // collab state JSON
+    try { fs.unlinkSync(heartbeatFile); } catch {}    // heartbeat file (new)
+    const regPath = path.join(dirs.registry, `${collabName}.json`);
+    try { fs.unlinkSync(regPath); } catch {}           // registry entry
+    try { fs.closeSync(fifoWriteFd); } catch {}        // close FIFO write end
+  }
 
   while (true) {
-    // Check if process crashed
+    // T5d: Check if process crashed (R2c — full cleanup, expanded from original)
     try {
       process.kill(proc.pid, 0); // signal 0 = check alive
     } catch {
       process.stderr.write(`✗ Collaborator "${collabName}" crashed.\n`);
       const tail = readLogTailFromFile(logFile);
       if (tail) process.stderr.write(`Log tail:\n${tail}\n`);
-      deleteCollabState(collabName);
+      await cleanupCollaborator(false); // process already dead — no kill needed
       process.exitCode = 1;
-      fs.closeSync(fifoWriteFd);
       return;
     }
 
@@ -1199,28 +1216,35 @@ async function runSpawn(
       }
     } catch {}
 
-    // Check log-based stall
-    try {
-      const stat = fs.statSync(logFile);
-      if (stat.size > lastLogSize) {
-        lastLogSize = stat.size;
-        lastLogChangeTime = Date.now();
-      }
-    } catch {}
-
     const now = Date.now();
-    const stallDuration = now - lastLogChangeTime;
-    if (stallDuration >= stallThreshold) {
-      process.stderr.write(`✗ Collaborator "${collabName}" stalled (${Math.round(stallDuration / 1000)}s no log growth).\n`);
-      fs.closeSync(fifoWriteFd);
+
+    // T5c: Three-tier stall detection (spec 009, AD2/R5.1)
+    // Tier 1: liveness via isStalled() — replaces log-size heuristic
+    const stallResult = isStalled({
+      heartbeatFile,
+      logFile,
+      stallThresholdMs: stallThreshold,
+      gracePeriodMs,
+      spawnedAt: startTime,
+    });
+    if (stallResult.stalled) {
+      process.stderr.write(
+        `✗ Collaborator "${collabName}" stalled (${Math.round(stallResult.stalledMs / 1000)}s, ${stallResult.type}).\n`,
+      );
+      await cleanupCollaborator(true); // R2a: kill + full cleanup
       process.exitCode = 1;
       return;
     }
 
-    // Absolute timeout
-    if (now - startTime >= spawnTimeout) {
-      process.stderr.write(`✗ Collaborator "${collabName}" timed out (${Math.round((now - startTime) / 1000)}s).\n`);
-      fs.closeSync(fifoWriteFd);
+    // Tier 2/3: ceiling — heartbeat freshness selects which ceiling applies
+    // Active heartbeat → hard ceiling (D5 suppressed per R5.1)
+    // No heartbeat → spawnTimeout (old D5 behavior, backward compat)
+    const ceiling = stallResult.heartbeatActive ? hardCeilingMs : spawnTimeout;
+    if (now - startTime >= ceiling) {
+      process.stderr.write(
+        `✗ Collaborator "${collabName}" timed out (${Math.round((now - startTime) / 1000)}s, ceiling ${Math.round(ceiling / 1000)}s).\n`,
+      );
+      await cleanupCollaborator(true); // R2b: kill + full cleanup
       process.exitCode = 1;
       return;
     }
