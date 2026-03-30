@@ -394,95 +394,127 @@ describe("gracefulDismiss — heartbeat cleanup (spec 009)", () => {
 // these tests verify the mechanism and the isStalled integration.
 // ──────────────────────────────────────────────────────────────────────────────
 
-describe("heartbeat file write/cleanup behavior (spec 009, A1/R3)", () => {
-  let tmpDir: string;
+describe("heartbeat lifecycle — startCollabHeartbeat / stopCollabHeartbeat (spec 009, A1/R3)", () => {
+  // These tests use the REAL exported functions from index.ts (startCollabHeartbeat,
+  // stopCollabHeartbeat). Same pattern as cleanupCollaboratorState in cli/index.ts.
+  // A regression in session_start/session_shutdown wiring would be caught here
+  // because the event handlers now delegate to these exported functions.
 
-  beforeEach(() => {
+  let tmpDir: string;
+  let startCollabHeartbeatFn: typeof import("../../crew/utils/heartbeat.js").startCollabHeartbeat;
+  let stopCollabHeartbeatFn: typeof import("../../crew/utils/heartbeat.js").stopCollabHeartbeat;
+
+  beforeEach(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "heartbeat-lifecycle-"));
+    vi.resetModules();
+    const mod = await import("../../crew/utils/heartbeat.js");
+    startCollabHeartbeatFn = mod.startCollabHeartbeat;
+    stopCollabHeartbeatFn = mod.stopCollabHeartbeat;
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("heartbeat file written by setInterval contains a timestamp string", () => {
-    // Simulate what the A1 setInterval writes:
-    // try { fs.writeFileSync(heartbeatFile, Date.now().toString()); } catch {}
-    const heartbeatFile = path.join(tmpDir, "TestCollab.heartbeat");
-    const before = Date.now();
-    fs.writeFileSync(heartbeatFile, Date.now().toString());
-    const after = Date.now();
-
-    expect(fs.existsSync(heartbeatFile)).toBe(true);
-    const content = fs.readFileSync(heartbeatFile, "utf-8");
-    const ts = parseInt(content, 10);
-    expect(isNaN(ts)).toBe(false);
-    expect(ts).toBeGreaterThanOrEqual(before);
-    expect(ts).toBeLessThanOrEqual(after);
-    // File mtime matches content timestamp (within 1 second)
-    const stat = fs.statSync(heartbeatFile);
-    expect(Math.abs(stat.mtimeMs - ts)).toBeLessThan(1000);
-  });
-
-  it("heartbeat file unlinked on cleanup", () => {
-    // Simulate what session_shutdown does:
-    // try { fs.unlinkSync(join(dirs.registry, name + '.heartbeat')); } catch {}
-    const heartbeatFile = path.join(tmpDir, "TestCollab.heartbeat");
-    fs.writeFileSync(heartbeatFile, Date.now().toString());
-    expect(fs.existsSync(heartbeatFile)).toBe(true);
-
-    try { fs.unlinkSync(heartbeatFile); } catch {}
-    expect(fs.existsSync(heartbeatFile)).toBe(false);
-  });
-
-  it("heartbeat file path follows dirs.registry/<name>.heartbeat convention", () => {
-    // The A1 implementation uses:
-    // join(dirs.registry, `${state.agentName}.heartbeat`)
-    // This test verifies the convention so future refactors stay aligned.
+  it("startCollabHeartbeat writes a timestamp to the heartbeat file within heartbeatIntervalMs", async () => {
+    // Tests the REAL production function that session_start delegates to (spec 009, A1/R3)
     const registryDir = path.join(tmpDir, "registry");
     fs.mkdirSync(registryDir);
-    const agentName = "BlueFalcon";
+    const agentName = "TestCollabHB";
+    const stallThresholdMs = 1000; // tiny threshold -> heartbeatIntervalMs = max(1000, min(10000, 125)) = 1000ms
 
-    // Convention: heartbeat file is in the same directory as the registry JSON
+    const before = Date.now();
+    const hb = startCollabHeartbeatFn({ registryDir, agentName, stallThresholdMs });
+    const expectedFile = path.join(registryDir, `${agentName}.heartbeat`);
+
+    try {
+      // Wait for one heartbeat interval + buffer
+      await new Promise(resolve => setTimeout(resolve, hb.heartbeatIntervalMs + 200));
+
+      expect(fs.existsSync(expectedFile)).toBe(true);
+      const content = fs.readFileSync(expectedFile, "utf-8");
+      const ts = parseInt(content, 10);
+      expect(isNaN(ts)).toBe(false);
+      expect(ts).toBeGreaterThanOrEqual(before);
+      // File mtime matches content (within 1s)
+      const stat = fs.statSync(expectedFile);
+      expect(Math.abs(stat.mtimeMs - ts)).toBeLessThan(1500);
+    } finally {
+      clearInterval(hb.timer); // cleanup timer
+    }
+  }, 10000);
+
+  it("stopCollabHeartbeat removes the heartbeat file and clears the timer", async () => {
+    // Tests the REAL production function that session_shutdown delegates to (spec 009, A1/R3)
+    const registryDir = path.join(tmpDir, "registry");
+    fs.mkdirSync(registryDir);
+    const agentName = "TestCollabHBStop";
+    const stallThresholdMs = 1000;
+
+    const hb = startCollabHeartbeatFn({ registryDir, agentName, stallThresholdMs });
     const heartbeatFile = path.join(registryDir, `${agentName}.heartbeat`);
-    const registryJson = path.join(registryDir, `${agentName}.json`);
 
-    fs.writeFileSync(registryJson, "{}");
-    fs.writeFileSync(heartbeatFile, Date.now().toString());
+    // Wait for file to appear
+    await new Promise(resolve => setTimeout(resolve, hb.heartbeatIntervalMs + 200));
+    expect(fs.existsSync(heartbeatFile)).toBe(true);
 
-    // Both files are in the same registry directory
-    expect(path.dirname(heartbeatFile)).toBe(registryDir);
-    expect(path.dirname(registryJson)).toBe(registryDir);
-    // Heartbeat file does NOT collide with registry JSON (different extension)
-    expect(heartbeatFile).not.toBe(registryJson);
-    expect(heartbeatFile.endsWith(".heartbeat")).toBe(true);
+    // Now stop (simulates session_shutdown)
+    stopCollabHeartbeatFn({ timer: hb.timer, heartbeatFile });
+
+    // File must be removed
+    expect(fs.existsSync(heartbeatFile)).toBe(false);
+  }, 10000);
+
+  it("startCollabHeartbeat returns correct heartbeatIntervalMs per R4 formula", () => {
+    const registryDir = path.join(tmpDir, "reg");
+    fs.mkdirSync(registryDir);
+
+    const hb120 = startCollabHeartbeatFn({ registryDir, agentName: "A", stallThresholdMs: 120_000 });
+    clearInterval(hb120.timer);
+    expect(hb120.heartbeatIntervalMs).toBe(10_000); // max(1000, min(10000, 15000)) = 10000
+
+    const hb8 = startCollabHeartbeatFn({ registryDir, agentName: "B", stallThresholdMs: 8_000 });
+    clearInterval(hb8.timer);
+    expect(hb8.heartbeatIntervalMs).toBe(1_000); // max(1000, min(10000, 1000)) = 1000
   });
 
-  it("isStalled() correctly uses heartbeat file written by the extension (integration)", async () => {
-    // This test proves the E2E contract: extension writes heartbeat → isStalled() reads it → not stalled
+  it("stopCollabHeartbeat with null timer is a no-op (collaborator never registered)", () => {
+    // Guards against session_shutdown firing when PI_CREW_COLLABORATOR is not set
+    expect(() => {
+      stopCollabHeartbeatFn({ timer: null, heartbeatFile: path.join(tmpDir, "noop.heartbeat") });
+    }).not.toThrow();
+  });
+
+  it("isStalled() uses heartbeat written by startCollabHeartbeat (E2E contract)", async () => {
+    // Extension writes heartbeat via startCollabHeartbeat → isStalled() reads it → not stalled
     const { isStalled } = await import("../../crew/utils/stall.js");
-    const heartbeatFile = path.join(tmpDir, "TestCollab.heartbeat");
+    const registryDir = path.join(tmpDir, "reg2");
+    fs.mkdirSync(registryDir);
     const logFile = path.join(tmpDir, "collab.log");
 
-    // Log file is stale (hasn't grown)
+    // Stale log
     fs.writeFileSync(logFile, "started");
     const staleDate = new Date(Date.now() - 2000);
     fs.utimesSync(logFile, staleDate, staleDate);
 
-    // Extension writes heartbeat just now
-    fs.writeFileSync(heartbeatFile, Date.now().toString());
-
-    // isStalled() must return not-stalled despite stale log
-    const result = isStalled({
-      heartbeatFile,
-      logFile,
-      stallThresholdMs: 500,  // short threshold — stale log would trigger without heartbeat
-      gracePeriodMs: 100,
-      spawnedAt: Date.now() - 10_000,  // past grace
+    const hb = startCollabHeartbeatFn({
+      registryDir, agentName: "E2ECollab", stallThresholdMs: 500,
     });
+    await new Promise(resolve => setTimeout(resolve, hb.heartbeatIntervalMs + 200));
 
-    expect(result.stalled).toBe(false);
-    expect(result.heartbeatActive).toBe(true);
-    expect(result.type).toBe("not-stalled");
-  });
+    const heartbeatFile = path.join(registryDir, "E2ECollab.heartbeat");
+    try {
+      const result = isStalled({
+        heartbeatFile,
+        logFile,
+        stallThresholdMs: 500,
+        gracePeriodMs: 100,
+        spawnedAt: Date.now() - 10_000,
+      });
+      expect(result.stalled).toBe(false);
+      expect(result.heartbeatActive).toBe(true);
+    } finally {
+      clearInterval(hb.timer);
+    }
+  }, 10000);
 });

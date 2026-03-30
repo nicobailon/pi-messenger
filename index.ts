@@ -8,6 +8,9 @@
 import { homedir } from "node:os";
 import * as fs from "node:fs";
 import { join } from "node:path";
+
+// Heartbeat helpers are in crew/utils/heartbeat.ts (no Pi extension deps — directly testable)
+import { startCollabHeartbeat, stopCollabHeartbeat } from "./crew/utils/heartbeat.js";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { OverlayHandle, TUI } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
@@ -806,11 +809,13 @@ Usage (action-based API - preferred):
       // processing gaps when the model is silent but the process is alive.
       if (isCollaborator) {
         const stallThresholdMs = config.collaboration?.stallThresholdMs ?? 120_000;
-        const heartbeatIntervalMs = Math.max(1000, Math.min(10000, stallThresholdMs / 8));
-        const heartbeatFile = join(dirs.registry, `${state.agentName}.heartbeat`);
-        collabHeartbeatTimer = setInterval(() => {
-          try { fs.writeFileSync(heartbeatFile, Date.now().toString()); } catch {}
-        }, heartbeatIntervalMs);
+        const hb = startCollabHeartbeat({
+          registryDir: dirs.registry,
+          agentName: state.agentName,
+          stallThresholdMs,
+        });
+        collabHeartbeatTimer = hb.timer;
+        // store heartbeatFile for shutdown (via closure on dirs.registry + state.agentName)
       }
     }
 
@@ -1065,11 +1070,11 @@ Usage (action-based API - preferred):
     store.unregister(state, dirs);
 
     // A1: Stop collaborator heartbeat and remove the file (spec 009)
-    if (collabHeartbeatTimer) {
-      clearInterval(collabHeartbeatTimer);
-      collabHeartbeatTimer = null;
-      try { fs.unlinkSync(join(dirs.registry, `${state.agentName}.heartbeat`)); } catch {}
-    }
+    stopCollabHeartbeat({
+      timer: collabHeartbeatTimer,
+      heartbeatFile: join(dirs.registry, `${state.agentName}.heartbeat`),
+    });
+    collabHeartbeatTimer = null;
   });
 
   // ===========================================================================
