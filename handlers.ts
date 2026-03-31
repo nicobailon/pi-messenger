@@ -391,6 +391,17 @@ export async function executeSend(
         const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
         logFeedEvent(cwd, state.agentName, "message", recipient, preview);
 
+        // Deliver directly to collaborator's stdin using the RPC protocol.
+        // In --mode rpc, turns are driven by stdin JSON commands. The inbox→FSWatcher→
+        // pi.sendMessage(triggerTurn) path does NOT reliably trigger new turns after the
+        // first turn. Write the same way executeSpawn delivers the initial prompt.
+        // The inbox file (above) is kept for history/audit; stdin is the actual delivery.
+        const rpcTurnMsg = JSON.stringify({
+          type: "prompt",
+          message: `Reply to: ${state.agentName}\n\n${message}`,
+        });
+        try { collabEntry.proc.stdin?.write(rpcTurnMsg + "\n"); } catch { /* ignore — proc may be exiting */ }
+
         // Read stall threshold from config with validation
         const crewDir = crewStore.getCrewDir(cwd);
         const crewConfig = loadCrewConfig(crewDir);
