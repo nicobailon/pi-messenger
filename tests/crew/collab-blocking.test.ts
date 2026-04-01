@@ -5,7 +5,7 @@
  * recordMessageInHistory, and the watcher filter in deliverMessage.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentMailMessage, MessengerState } from "../../lib.js";
 import type { CollaboratorEntry } from "../../crew/registry.js";
 import type { PollOptions, PollResult } from "../../crew/handlers/collab.js";
+import { isFreshSpawnMessage } from "../../crew/handlers/collab.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -757,6 +758,190 @@ describe("pollForCollaboratorMessage", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spec 057: isFreshSpawnMessage pure helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("isFreshSpawnMessage", () => {
+  it("returns false for stale message (timestamp before spawnStartTime)", () => {
+    const spawnStartTime = Date.now();
+    const msg = makeMessage({ timestamp: new Date(spawnStartTime - 5000).toISOString() });
+    expect(isFreshSpawnMessage(msg, spawnStartTime)).toBe(false);
+  });
+
+  it("returns true for fresh message (timestamp after spawnStartTime)", () => {
+    const spawnStartTime = Date.now();
+    const msg = makeMessage({ timestamp: new Date(spawnStartTime + 100).toISOString() });
+    expect(isFreshSpawnMessage(msg, spawnStartTime)).toBe(true);
+  });
+
+  it("returns true for message with timestamp exactly equal to spawnStartTime", () => {
+    const spawnStartTime = Date.now();
+    const msg = makeMessage({ timestamp: new Date(spawnStartTime).toISOString() });
+    expect(isFreshSpawnMessage(msg, spawnStartTime)).toBe(true);
+  });
+
+  it("returns false for message with unparseable timestamp (NaN guard)", () => {
+    const msg = makeMessage({ timestamp: "not-a-date" });
+    expect(isFreshSpawnMessage(msg, Date.now())).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spec 057: executeSpawn wiring contract
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("executeSpawn wiring contract (spec 057)", () => {
+  let collabSource: string;
+  beforeAll(() => {
+    const collabPath = new URL("../../crew/handlers/collab.ts", import.meta.url).pathname;
+    collabSource = fs.readFileSync(collabPath, "utf-8");
+  });
+
+  it("executeSpawn passes sendTimestamp: spawnStartTime to pollForCollaboratorMessage (R2 wiring)", () => {
+    // Asserts the call-site wiring that prevents stale-message delivery.
+    // Automated proof that R2 contract is implemented. If removed accidentally, this test fails.
+    expect(collabSource).toMatch(/sendTimestamp:\s*spawnStartTime/);
+  });
+
+  it("spawnStartTime is captured before spawn() call in executeSpawn (spec 057)", () => {
+    const spawnStartIdx = collabSource.indexOf("const spawnStartTime = Date.now()");
+    const spawnCallIdx = collabSource.indexOf('spawn("pi", args,');
+    expect(spawnStartIdx).toBeGreaterThan(-1);
+    expect(spawnCallIdx).toBeGreaterThan(spawnStartIdx); // spawnStartTime before spawn()
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spec 057: Tier 4 stale-message guard in pollForCollaboratorMessage
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("pollForCollaboratorMessage — Tier 4 stale-message guard (spec 057)", () => {
+  let tmpDir: string;
+  let inboxDir: string;
+  let pollFn: typeof import("../../crew/handlers/collab.js").pollForCollaboratorMessage;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "collab-057-test-"));
+    inboxDir = path.join(tmpDir, "inbox", "TestSpawner");
+    fs.mkdirSync(inboxDir, { recursive: true });
+    const mod = await import("../../crew/handlers/collab.js");
+    pollFn = mod.pollForCollaboratorMessage;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // ── Tier 4: stale-message guard (spec 057) ──────────────────────────────────────────
+
+  it("rejects stale inbox message (timestamp before spawn) on Tier 4 (spec 057)", async () => {
+    const spawnedAt = Date.now();
+    const staleMsg = makeMessage({ timestamp: new Date(spawnedAt - 5000).toISOString() });
+    writeMessageFile(inboxDir, staleMsg);
+
+    const logFile = path.join(tmpDir, "t1-stale.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ startedAt: spawnedAt, logFile });
+
+    const result = await pollFn({
+      inboxDir,
+      collabName: "TestCollab",
+      sendTimestamp: spawnedAt,
+      entry,
+      stallThresholdMs: 200,
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe("stalled");
+  });
+
+  it("accepts fresh inbox message (timestamp >= spawn) on Tier 4 (spec 057)", async () => {
+    const spawnedAt = Date.now();
+    const freshMsg = makeMessage({ timestamp: new Date(spawnedAt).toISOString() });
+    const entry = makeCollabEntry({ startedAt: spawnedAt });
+
+    setTimeout(() => writeMessageFile(inboxDir, freshMsg), 50);
+
+    const result = await pollFn({
+      inboxDir,
+      collabName: "TestCollab",
+      sendTimestamp: spawnedAt,
+      entry,
+      stallThresholdMs: 2000,
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects message with unparseable timestamp on Tier 4 when sendTimestamp set (spec 057)", async () => {
+    const spawnedAt = Date.now();
+    const nanMsg = makeMessage({ timestamp: "not-a-date" });
+    writeMessageFile(inboxDir, nanMsg);
+
+    const logFile = path.join(tmpDir, "t3-nan.log");
+    fs.writeFileSync(logFile, "started");
+    const entry = makeCollabEntry({ startedAt: spawnedAt, logFile });
+
+    const result = await pollFn({
+      inboxDir,
+      collabName: "TestCollab",
+      sendTimestamp: spawnedAt,
+      entry,
+      stallThresholdMs: 200,
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe("stalled");
+  });
+
+  it("skips stale messages and delivers only fresh message on Tier 4 (spec 057)", async () => {
+    const spawnedAt = Date.now();
+    writeMessageFile(inboxDir, makeMessage({ timestamp: new Date(spawnedAt - 10000).toISOString() }));
+    writeMessageFile(inboxDir, makeMessage({ timestamp: new Date(spawnedAt - 1000).toISOString() }));
+
+    const freshMsg = makeMessage({ text: "fresh response", timestamp: new Date(spawnedAt + 100).toISOString() });
+    const entry = makeCollabEntry({ startedAt: spawnedAt });
+
+    setTimeout(() => writeMessageFile(inboxDir, freshMsg), 50);
+
+    const result = await pollFn({
+      inboxDir,
+      collabName: "TestCollab",
+      sendTimestamp: spawnedAt,
+      entry,
+      stallThresholdMs: 2000,
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.message.text).toBe("fresh response");
+  });
+
+  // R3 regression guard: Tier 4 without sendTimestamp must match on from only (no timestamp check)
+  it("accepts message with any timestamp on Tier 4 when no sendTimestamp (R3 backward compat, spec 057)", async () => {
+    const oldMsg = makeMessage({ timestamp: new Date(0).toISOString() }); // Unix epoch
+    const entry = makeCollabEntry();
+
+    setTimeout(() => writeMessageFile(inboxDir, oldMsg), 50);
+
+    const result = await pollFn({
+      inboxDir,
+      collabName: "TestCollab",
+      // sendTimestamp intentionally absent
+      entry,
+      stallThresholdMs: 2000,
+      state: makeMinimalState(),
+    });
+
+    expect(result.ok).toBe(true);
+  });
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Spec 009: heartbeat-aware stall detection in pollForCollaboratorMessage
