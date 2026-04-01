@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentMailMessage, MessengerState } from "../../lib.js";
 import type { CollaboratorEntry } from "../../crew/registry.js";
 import type { PollOptions, PollResult } from "../../crew/handlers/collab.js";
-import { isFreshSpawnMessage } from "../../crew/handlers/collab.js";
+import { isFreshSpawnMessage, sweepStaleSpawnMessages } from "../../crew/handlers/collab.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -785,6 +785,50 @@ describe("isFreshSpawnMessage", () => {
   it("returns false for message with unparseable timestamp (NaN guard)", () => {
     const msg = makeMessage({ timestamp: "not-a-date" });
     expect(isFreshSpawnMessage(msg, Date.now())).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spec 057: sweepStaleSpawnMessages behavioral tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("sweepStaleSpawnMessages", () => {
+  it("deletes stale inbox file (timestamp before spawnStartTime) for matching sender", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sweep-test-"));
+    const spawnStartTime = Date.now();
+    const staleMsg = makeMessage({ timestamp: new Date(spawnStartTime - 5000).toISOString() });
+    const filePath = writeMessageFile(tmpDir, staleMsg);
+
+    expect(fs.existsSync(filePath)).toBe(true);
+    sweepStaleSpawnMessages(tmpDir, "TestCollab", spawnStartTime);
+    expect(fs.existsSync(filePath)).toBe(false); // stale file deleted
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("preserves fresh inbox file (timestamp >= spawnStartTime) for matching sender", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sweep-test-"));
+    const spawnStartTime = Date.now();
+    const freshMsg = makeMessage({ timestamp: new Date(spawnStartTime + 100).toISOString() });
+    const filePath = writeMessageFile(tmpDir, freshMsg);
+
+    sweepStaleSpawnMessages(tmpDir, "TestCollab", spawnStartTime);
+    expect(fs.existsSync(filePath)).toBe(true); // fresh file preserved
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("preserves file for different sender even if stale", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sweep-test-"));
+    const spawnStartTime = Date.now();
+    // Stale message but from a DIFFERENT sender — must NOT be deleted
+    const otherMsg = makeMessage({ from: "OtherAgent", timestamp: new Date(spawnStartTime - 5000).toISOString() });
+    const filePath = writeMessageFile(tmpDir, otherMsg);
+
+    sweepStaleSpawnMessages(tmpDir, "TestCollab", spawnStartTime);
+    expect(fs.existsSync(filePath)).toBe(true); // different sender preserved
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });
 

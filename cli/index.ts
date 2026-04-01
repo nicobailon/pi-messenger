@@ -26,7 +26,7 @@ import { loadCrewConfig } from "../crew/utils/config.js";
 import { resolveModel } from "../crew/utils/model.js";
 import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../crew/agents.js";
 import { isStalled } from "../crew/utils/stall.js";
-import { isFreshSpawnMessage } from "../crew/handlers/collab.js";
+import { isFreshSpawnMessage, sweepStaleSpawnMessages } from "../crew/handlers/collab.js";
 
 // =============================================================================
 // Bootstrap
@@ -1211,19 +1211,8 @@ async function runSpawn(
     });
   }
 
-  // Sweep provably-stale inbox files for this collaborator name — spec 057 (timestamp-safe, same predicate as Tier 4)
-  if (fs.existsSync(inboxDir)) {
-    for (const f of fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"))) {
-      try {
-        const m: AgentMailMessage = JSON.parse(
-          fs.readFileSync(path.join(inboxDir, f), "utf-8")
-        );
-        if (m.from === collabName && !isFreshSpawnMessage(m, spawnStartTime)) {
-          fs.unlinkSync(path.join(inboxDir, f));
-        }
-      } catch {}
-    }
-  }
+  // Sweep provably-stale inbox files before poll (spec 057)
+  sweepStaleSpawnMessages(inboxDir, collabName, spawnStartTime);
 
   while (true) {
     // T5d: Check if process crashed (R2c — full cleanup, expanded from original)

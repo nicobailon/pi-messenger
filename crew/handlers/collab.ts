@@ -114,6 +114,30 @@ export function isFreshSpawnMessage(msg: AgentMailMessage, spawnStartTime: numbe
 }
 
 /**
+ * Sweep provably-stale inbox files for a collaborator name from a spawner's inbox.
+ * Only deletes files where isFreshSpawnMessage returns false (timestamp < spawnStartTime).
+ * Safe to call before poll — the new collaborator's reply cannot have timestamp < spawnStartTime.
+ * Exported for unit-testing (spec 057).
+ */
+export function sweepStaleSpawnMessages(
+  inboxDir: string,
+  collabName: string,
+  spawnStartTime: number,
+): void {
+  if (!fs.existsSync(inboxDir)) return;
+  for (const f of fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"))) {
+    try {
+      const m: AgentMailMessage = JSON.parse(
+        fs.readFileSync(path.join(inboxDir, f), "utf-8")
+      );
+      if (m.from === collabName && !isFreshSpawnMessage(m, spawnStartTime)) {
+        fs.unlinkSync(path.join(inboxDir, f));
+      }
+    } catch {}
+  }
+}
+
+/**
  * Poll the spawner's inbox for a message from a specific collaborator.
  * Used by both executeSpawn (first message) and executeSend (reply).
  *
@@ -506,22 +530,8 @@ export async function executeSpawn(
   // Add to blocking filter BEFORE mesh polling (closes race window)
   state.blockingCollaborators.add(collabName);
 
-  // Sweep provably-stale inbox files for this collaborator name (spec 057).
-  // Uses same predicate as Tier 4 — only deletes files with timestamp < spawnStartTime.
-  // Safe: the new collaborator's reply cannot have timestamp < spawnStartTime.
-  const spawnerInbox = path.join(dirs.inbox, state.agentName);
-  if (fs.existsSync(spawnerInbox)) {
-    for (const f of fs.readdirSync(spawnerInbox).filter(f => f.endsWith(".json"))) {
-      try {
-        const m: AgentMailMessage = JSON.parse(
-          fs.readFileSync(path.join(spawnerInbox, f), "utf-8")
-        );
-        if (m.from === collabName && !isFreshSpawnMessage(m, spawnStartTime)) {
-          fs.unlinkSync(path.join(spawnerInbox, f));
-        }
-      } catch {}
-    }
-  }
+  // Sweep provably-stale inbox files before poll (spec 057)
+  sweepStaleSpawnMessages(path.join(dirs.inbox, state.agentName), collabName, spawnStartTime);
 
   try {
     // Poll until collaborator appears in registry (mesh-ready)
