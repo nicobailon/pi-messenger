@@ -104,6 +104,16 @@ export type PollResult =
   | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number; stallType?: PollStallType };
 
 /**
+ * Returns true if a spawn-path message should be accepted as a valid first response.
+ * A message is fresh if its timestamp is >= spawnStartTime (cannot be from a prior session).
+ * Exported for unit-testing and shared use by cli/index.ts (spec 057).
+ */
+export function isFreshSpawnMessage(msg: AgentMailMessage, spawnStartTime: number): boolean {
+  const msgTime = Date.parse(msg.timestamp);
+  return !isNaN(msgTime) && msgTime >= spawnStartTime;
+}
+
+/**
  * Poll the spawner's inbox for a message from a specific collaborator.
  * Used by both executeSpawn (first message) and executeSend (reply).
  *
@@ -111,7 +121,7 @@ export type PollResult =
  * 1. msg.replyTo === correlationId → match (strongest)
  * 2. msg.replyTo is null AND from matches AND timestamp >= sendTimestamp → match (fallback)
  * 3. msg.replyTo is non-null AND !== correlationId → reject (different thread)
- * 4. spawn path (no correlationId) → from matches → match (first message)
+ * 4. spawn path (no correlationId) → from matches + timestamp guard (spec 057)
  */
 export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResult> {
   const {
@@ -163,7 +173,10 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
           return null;
         }
 
-        // Tier 4: spawn path — no correlationId, just match on from
+        // Tier 4: spawn path — no correlationId, match on from + timestamp guard (spec 057)
+        if (sendTimestamp !== undefined && !isFreshSpawnMessage(msg, sendTimestamp)) {
+          return null;
+        }
         return msg;
       } catch {
         return null;
@@ -451,6 +464,8 @@ export async function executeSpawn(
     // Fall back to /dev/null if log file creation fails
   }
 
+  const spawnStartTime = Date.now();  // capture BEFORE spawn — correct lower bound (spec 057)
+
   // Spawn: stdin is PIPE (keeps process alive), stdout/stderr to log
   const proc = spawn("pi", args, {
     cwd,
@@ -478,7 +493,7 @@ export async function executeSpawn(
     proc,
     taskId,
     spawnedBy: process.pid,
-    startedAt: Date.now(),
+    startedAt: spawnStartTime,
     promptTmpDir,
     logFile,
     // A4c: heartbeat file path — convention-based, same dir as registry JSON (spec 009)
@@ -490,6 +505,23 @@ export async function executeSpawn(
 
   // Add to blocking filter BEFORE mesh polling (closes race window)
   state.blockingCollaborators.add(collabName);
+
+  // Sweep provably-stale inbox files for this collaborator name (spec 057).
+  // Uses same predicate as Tier 4 — only deletes files with timestamp < spawnStartTime.
+  // Safe: the new collaborator's reply cannot have timestamp < spawnStartTime.
+  const spawnerInbox = path.join(dirs.inbox, state.agentName);
+  if (fs.existsSync(spawnerInbox)) {
+    for (const f of fs.readdirSync(spawnerInbox).filter(f => f.endsWith(".json"))) {
+      try {
+        const m: AgentMailMessage = JSON.parse(
+          fs.readFileSync(path.join(spawnerInbox, f), "utf-8")
+        );
+        if (m.from === collabName && !isFreshSpawnMessage(m, spawnStartTime)) {
+          fs.unlinkSync(path.join(spawnerInbox, f));
+        }
+      } catch {}
+    }
+  }
 
   try {
     // Poll until collaborator appears in registry (mesh-ready)
@@ -524,6 +556,7 @@ export async function executeSpawn(
     const pollResult = await pollForCollaboratorMessage({
       inboxDir: path.join(dirs.inbox, state.agentName),
       collabName,
+      sendTimestamp: spawnStartTime,   // rejects stale messages from prior sessions (spec 057)
       // No correlationId — first message has no prior ID to correlate with
       entry,
       signal,
