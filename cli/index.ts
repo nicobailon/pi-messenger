@@ -26,6 +26,7 @@ import { loadCrewConfig } from "../crew/utils/config.js";
 import { resolveModel } from "../crew/utils/model.js";
 import { pushModelArgs, resolveThinking, modelHasThinkingSuffix } from "../crew/agents.js";
 import { isStalled } from "../crew/utils/stall.js";
+import { isFreshSpawnMessage } from "../crew/handlers/collab.js";
 
 // =============================================================================
 // Bootstrap
@@ -1129,6 +1130,8 @@ async function runSpawn(
     PI_CREW_COLLABORATOR: "1",
   };
 
+  const spawnStartTime = Date.now(); // spec 057: stale-message guard — capture BEFORE spawn
+
   // Open FIFO for reading in the child (non-blocking open for spawn)
   const fifoReadFd = fs.openSync(fifoPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
 
@@ -1208,6 +1211,20 @@ async function runSpawn(
     });
   }
 
+  // Sweep provably-stale inbox files for this collaborator name — spec 057 (timestamp-safe, same predicate as Tier 4)
+  if (fs.existsSync(inboxDir)) {
+    for (const f of fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"))) {
+      try {
+        const m: AgentMailMessage = JSON.parse(
+          fs.readFileSync(path.join(inboxDir, f), "utf-8")
+        );
+        if (m.from === collabName && !isFreshSpawnMessage(m, spawnStartTime)) {
+          fs.unlinkSync(path.join(inboxDir, f));
+        }
+      } catch {}
+    }
+  }
+
   while (true) {
     // T5d: Check if process crashed (R2c — full cleanup, expanded from original)
     try {
@@ -1229,7 +1246,8 @@ async function runSpawn(
           const filePath = path.join(inboxDir, file);
           try {
             const msg: AgentMailMessage = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-            if (msg.from === collabName) {
+            // spec 057: reject stale messages — delegates to shared predicate (tested in collab-blocking.test.ts)
+            if (msg.from === collabName && isFreshSpawnMessage(msg, spawnStartTime)) {
               fs.unlinkSync(filePath);
               // Close FIFO write end — but NOT yet. The collaborator needs to stay alive
               // for subsequent send/dismiss. We close it in dismiss.
