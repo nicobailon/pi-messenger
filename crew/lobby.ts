@@ -96,18 +96,23 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   args.push("--extension", EXTENSION_DIR);
 
-  let promptTmpDir: string | null = null;
-  if (workerConfig.systemPrompt) {
-    promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-lobby-"));
-    const promptPath = path.join(promptTmpDir, "crew-worker.md");
-    fs.writeFileSync(promptPath, workerConfig.systemPrompt, { mode: 0o600 });
-    args.push("--append-system-prompt", promptPath);
-  }
-
-  args.push(prompt);
-
   const envOverrides = config.work.env ?? {};
   const env = { ...process.env, ...envOverrides, PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id };
+
+  let promptTmpDir: string | null = null;
+  try {
+    promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-lobby-"));
+    if (workerConfig.systemPrompt) {
+      const systemPromptPath = path.join(promptTmpDir, "crew-worker.system.md");
+      fs.writeFileSync(systemPromptPath, workerConfig.systemPrompt, { mode: 0o600 });
+      args.push("--append-system-prompt", systemPromptPath);
+    }
+    const promptPath = path.join(promptTmpDir, "crew-worker.prompt.md");
+    fs.writeFileSync(promptPath, prompt, { mode: 0o600 });
+    args.push(`@${promptPath}`);
+  } catch {
+    args.push(prompt);
+  }
 
   const proc = spawnPi(args, {
     cwd,

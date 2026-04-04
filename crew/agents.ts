@@ -236,16 +236,6 @@ async function runAgent(
     // Pass extension so workers can use pi_messenger
     args.push("--extension", EXTENSION_DIR);
 
-    let promptTmpDir: string | null = null;
-    if (agentConfig?.systemPrompt) {
-      promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-agent-"));
-      const promptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.md`);
-      fs.writeFileSync(promptPath, agentConfig.systemPrompt, { mode: 0o600 });
-      args.push("--append-system-prompt", promptPath);
-    }
-
-    args.push(task.task);
-
     const envOverrides = config.work.env ?? {};
     const workerFlag = role === "worker"
       ? { PI_CREW_WORKER: "1", PI_AGENT_NAME: workerName }
@@ -253,6 +243,27 @@ async function runAgent(
     const env = Object.keys(envOverrides).length > 0 || role === "worker"
       ? { ...process.env, ...envOverrides, ...workerFlag }
       : undefined;
+
+    let promptTmpDir: string | null = null;
+    let promptPath: string | null = null;
+    try {
+      promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-agent-"));
+      if (agentConfig?.systemPrompt) {
+        const systemPromptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.system.md`);
+        fs.writeFileSync(systemPromptPath, agentConfig.systemPrompt, { mode: 0o600 });
+        args.push("--append-system-prompt", systemPromptPath);
+      }
+      promptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.prompt.md`);
+      fs.writeFileSync(promptPath, task.task, { mode: 0o600 });
+      args.push(`@${promptPath}`);
+    } catch {
+      if (promptTmpDir) {
+        try { fs.rmSync(promptTmpDir, { recursive: true, force: true }); } catch {}
+      }
+      promptTmpDir = null;
+      promptPath = null;
+      args.push(task.task);
+    }
 
     const proc = spawnPi(args, {
       cwd,
