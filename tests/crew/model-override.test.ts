@@ -132,6 +132,22 @@ describe("crew/model override", () => {
     expect(args[modelIdx + 1]).toBe("glm-5");
   });
 
+  it("spawnAgents passes the task prompt through an @file reference", async () => {
+    writeWorkerAgent(dirs.cwd, "agent-default-model");
+
+    await spawnAgents([{
+      agent: "crew-worker",
+      task: "Implement task\nwith multiple lines\nand a longer body",
+      taskId: "task-1",
+    }], dirs.cwd);
+
+    const args = spawnMock.mock.calls[0][1] as string[];
+    const promptArg = args[args.length - 1];
+
+    expect(promptArg.startsWith("@")).toBe(true);
+    expect(args.join(" ")).not.toContain("Implement task");
+  });
+
   describe("pushModelArgs", () => {
     it("splits provider/model into separate flags", () => {
       const args: string[] = [];

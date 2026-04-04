@@ -244,12 +244,24 @@ describe("lobby workers", () => {
     const calls = vi.mocked(spawn).mock.calls;
     expect(calls.length).toBe(1);
     const promptArg = calls[0][1]![calls[0][1]!.length - 1] as string;
-    expect(promptArg).toContain("Crew Lobby");
-    expect(promptArg).toContain("docs/PRD.md");
-    expect(promptArg).toContain("Share Your Findings");
-    expect(promptArg).toContain("Introduce yourself");
-    expect(promptArg).toContain("at most 5 messages");
-    expect(promptArg).toContain("TASK ASSIGNMENT");
+    expect(promptArg.startsWith("@")).toBe(true);
+    const promptText = fs.readFileSync(promptArg.slice(1), "utf-8");
+    expect(promptText).toContain("Crew Lobby");
+    expect(promptText).toContain("docs/PRD.md");
+    expect(promptText).toContain("Share Your Findings");
+    expect(promptText).toContain("Introduce yourself");
+    expect(promptText).toContain("at most 5 messages");
+    expect(promptText).toContain("TASK ASSIGNMENT");
+  });
+
+  it("passes the lobby prompt through an @file reference", async () => {
+    const { spawn } = await import("node:child_process");
+    lobby.spawnLobbyWorker("/test/cwd");
+
+    const calls = vi.mocked(spawn).mock.calls;
+    const promptArg = calls[0][1]![calls[0][1]!.length - 1] as string;
+    expect(promptArg.startsWith("@")).toBe(true);
+    expect(calls[0][1]!.join(" ")).not.toContain("Crew Lobby");
   });
 
   it("close handler resets orphaned in_progress task to todo", async () => {
@@ -416,7 +428,9 @@ describe("lobby workers", () => {
 
     const calls = vi.mocked(spawn).mock.calls;
     const promptArg = calls[0][1]![calls[0][1]!.length - 1] as string;
-    expect(promptArg).toContain("Standing by for task assignment");
-    expect(promptArg).not.toContain("Chat With Your Team");
+    expect(promptArg.startsWith("@")).toBe(true);
+    const promptText = fs.readFileSync(promptArg.slice(1), "utf-8");
+    expect(promptText).toContain("Standing by for task assignment");
+    expect(promptText).not.toContain("Chat With Your Team");
   });
 });
