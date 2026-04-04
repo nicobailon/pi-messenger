@@ -4,7 +4,6 @@
  * Spawns pi processes with progress tracking, truncation, and artifacts.
  */
 
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -31,6 +30,7 @@ import { removeLiveWorker, updateLiveWorker } from "./live-progress.js";
 import { autonomousState, waitForConcurrencyChange } from "./state.js";
 import { registerWorker, unregisterWorker, killAll } from "./registry.js";
 import type { AgentTask, AgentResult } from "./types.js";
+import { spawnPi } from "./utils/spawn-pi.js";
 import { generateMemorableName } from "../lib.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -254,7 +254,7 @@ async function runAgent(
       ? { ...process.env, ...envOverrides, ...workerFlag }
       : undefined;
 
-    const proc = spawn("pi", args, {
+    const proc = spawnPi(args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       ...(env ? { env } : {}),

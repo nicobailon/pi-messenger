@@ -6,7 +6,6 @@
  * receive assignments via steer message and transition to work mode.
  */
 
-import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { generateMemorableName } from "../lib.js";
 import { resolveThinking, modelHasThinkingSuffix, pushModelArgs } from "./agents.js";
+import { spawnPi } from "./utils/spawn-pi.js";
 import { discoverCrewAgents } from "./utils/discover.js";
 import { loadCrewConfig, type CrewConfig } from "./utils/config.js";
 import {
@@ -109,7 +109,7 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   const envOverrides = config.work.env ?? {};
   const env = { ...process.env, ...envOverrides, PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id };
 
-  const proc = spawn("pi", args, {
+  const proc = spawnPi(args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     env,
