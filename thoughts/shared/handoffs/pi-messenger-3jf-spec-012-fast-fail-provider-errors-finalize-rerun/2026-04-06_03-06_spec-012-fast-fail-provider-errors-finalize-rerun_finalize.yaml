@@ -1,0 +1,40 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-04-06T03:06:39.783Z
+session: "pi-messenger-3jf-spec-012-fast-fail-provider-errors-finalize-rerun"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-3jf"
+---
+
+goal: "Finalize spec 012 closure with a complete handoff artifact that captures verified implementation, Codex approval, and closure decisions."
+now: "Spec 012 remains implemented and code-verified (Codex APPROVED); bead pi-messenger-3jf is closed and branch state is synchronized."
+
+final_solutions:
+  - "Implemented fail-fast terminal provider handling in collaborator spawn/send flows so observable terminal provider errors short-circuit blocking waits."
+  - "Hardened classification with exact matching and type/code precedence via crew/utils/provider-classification.ts plus explicit policy table and negative transient exclusions."
+  - "Added send replay guard (sendBaselineOffset -> minLogOffset) to prevent stale historical log lines from being misclassified as current provider_error events."
+  - "Added sanitization for optional debug payloads (raw/logTail) and expanded behavior-driven tests through Codex revise->approve loop."
+
+final_decisions:
+  - "Kept solution in-repo (Shape A) rather than introducing Pi-core dependency contracts for terminal error signaling."
+  - "Accepted runtime helper export finalizeSpawnProviderError as a focused test seam to validate spawn cleanup/output behavior under ESM mocking limits."
+  - "Used baseline_sha..HEAD as source of truth during code-verify rerounds while preserving implement-receipt immutability."
+  - "Closed bead after Codex code verification approval and persisted both code-verify.md and transcript artifacts."
+
+artifacts_produced:
+  - "specs/012-fast-fail-provider-errors/spec.md"
+  - "specs/012-fast-fail-provider-errors/plan.md"
+  - "specs/012-fast-fail-provider-errors/tasks.md"
+  - "specs/012-fast-fail-provider-errors/shaping-transcript.md"
+  - "specs/012-fast-fail-provider-errors/planning-transcript.md"
+  - "specs/012-fast-fail-provider-errors/codex-review.md"
+  - "specs/012-fast-fail-provider-errors/implement-receipt.md"
+  - "specs/012-fast-fail-provider-errors/code-verify.md"
+  - "specs/012-fast-fail-provider-errors/code-verify-transcript.md"
+  - "thoughts/shared/handoffs/pi-messenger-3jf-spec-012-fast-fail-provider-errors-finalize/2026-04-06_01-35_spec-012-fast-fail-provider-errors-finalize_finalize.yaml"
+
+git:
+  branch: "feat/002-multi-runtime-support"
+  commit: "141f54ff2d04cfdac3fac9cee8acf750f6ec030a"
+  remote: "git@github.com:carmandale/pi-messenger.git"
