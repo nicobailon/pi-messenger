@@ -197,6 +197,100 @@ describe("pollForCollaboratorMessage", () => {
     }
   });
 
+  it("detects terminal provider 429 from log and fails immediately", async () => {
+    const state = makeMinimalState();
+    const logFile = path.join(tmpDir, "provider-error.log");
+    fs.writeFileSync(logFile, "booting\n");
+    const entry = makeCollabEntry({ logFile });
+
+    setTimeout(() => {
+      const line = JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+          errorMessage:
+            "429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"},\"request_id\":\"req_test_429\"}",
+        },
+      });
+      fs.appendFileSync(logFile, line + "\n");
+    }, 30);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      stallThresholdMs: 5_000,
+      state,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("provider_error");
+      expect((result as any).providerError.statusCode).toBe(429);
+      expect((result as any).providerError.errorType).toBe("rate_limit_error");
+      expect((result as any).providerError.requestId).toBe("req_test_429");
+      expect((result as any).providerError.provider).toBe("anthropic");
+      expect((result as any).providerError.model).toBe("claude-opus-4-6");
+    }
+  });
+
+  it("ignores stale pre-baseline terminal lines and fails on post-baseline terminal line within bounded latency", async () => {
+    const state = makeMinimalState();
+    const logFile = path.join(tmpDir, "provider-error-replay.log");
+    const staleLine = JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        errorMessage:
+          "429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"stale\"},\"request_id\":\"req_stale\"}",
+      },
+    });
+    fs.writeFileSync(logFile, `booting\n${staleLine}\n`);
+    const sendBaselineOffset = fs.statSync(logFile).size;
+    const entry = makeCollabEntry({ logFile });
+
+    let appendAt = 0;
+    setTimeout(() => {
+      appendAt = Date.now();
+      const freshLine = JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+          errorMessage:
+            "429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"fresh\"},\"request_id\":\"req_fresh\"}",
+        },
+      });
+      fs.appendFileSync(logFile, freshLine + "\n");
+    }, 50);
+
+    const result = await pollForCollaboratorMessage({
+      inboxDir,
+      collabName: "TestCollab",
+      entry,
+      minLogOffset: sendBaselineOffset,
+      stallThresholdMs: 5_000,
+      state,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("provider_error");
+      expect((result as any).providerError.requestId).toBe("req_fresh");
+      expect((result as any).providerError.requestId).not.toBe("req_stale");
+      expect((result as any).providerError.provider).toBe("anthropic");
+      expect((result as any).providerError.model).toBe("claude-opus-4-6");
+
+      const latencyMs = Date.now() - appendAt;
+      expect(latencyMs).toBeLessThanOrEqual(Math.max(1000, 6 * 100));
+    }
+  });
+
   // ── Flow 4: Crash ─────────────────────────────────────────────────────
 
   it("detects collaborator crash with log tail", async () => {
@@ -1525,6 +1619,55 @@ describe("executeSend handler-level behavior", () => {
     const text = result.content[0].text;
     expect(text).toContain("cancelled");
     expect(result.details.error).toBe("cancelled");
+  });
+
+  it("executeSend provider_error stops collaborator immediately and surfaces request_id", async () => {
+    vi.resetModules();
+    const mockDismiss = vi.fn().mockResolvedValue(undefined);
+    const mockUnregister = vi.fn();
+    const mockPollProvider = vi.fn().mockResolvedValue({
+      ok: false,
+      error: "provider_error",
+      providerError: {
+        statusCode: 429,
+        errorType: "rate_limit_error",
+        errorMessage: "This request would exceed your account's rate limit.",
+        requestId: "req_provider_429",
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        raw: "Authorization: Bearer sk-ant-oat01-example-secret",
+      },
+    });
+    const mockFindCollabProvider = vi.fn().mockReturnValue(makeCollabEntry({ name: "NavAgent" }));
+
+    vi.doMock("../../crew/handlers/collab.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/handlers/collab.js")>();
+      return { ...original, pollForCollaboratorMessage: mockPollProvider, gracefulDismiss: mockDismiss };
+    });
+    vi.doMock("../../crew/registry.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/registry.js")>();
+      return { ...original, findCollaboratorByName: mockFindCollabProvider, unregisterWorker: mockUnregister };
+    });
+
+    const { executeSend: execSendProvider } = await import("../../handlers.js");
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    const result = await execSendProvider(
+      state, dirs, tmpDir, "NavAgent", undefined, "Review this code", undefined,
+    );
+
+    const text = result.content[0].text;
+    expect(text).toContain("terminal provider error 429 rate_limit_error");
+    expect(text).toContain("request_id=req_provider_429");
+    expect(result.details.error).toBe("provider_error");
+    expect((result.details as any).providerError.provider).toBe("anthropic");
+    expect((result.details as any).providerError.model).toBe("claude-opus-4-6");
+    expect((result.details as any).providerError.raw).not.toContain("sk-ant-oat01");
+    expect((result.details as any).dismissed).toBe("NavAgent");
+    expect((result.details as any).conversationComplete).toBe(true);
+    expect(mockDismiss).toHaveBeenCalled();
+    expect(state.completedCollaborators.has("NavAgent")).toBe(true);
   });
 
   // ── Spec 008: executeSend uses correct pollTimeoutMs (not spawnPollTimeoutMs) ──

@@ -2,7 +2,7 @@
  * Pi Messenger - Tool and Command Handlers
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { HandlerContext } from "./lib.js";
 import {
@@ -30,6 +30,7 @@ import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, t
 import { loadCrewConfig } from "./crew/utils/config.js";
 import { findCollaboratorByName, unregisterWorker } from "./crew/registry.js";
 import { pollForCollaboratorMessage, gracefulDismiss, DEFAULT_STALL_THRESHOLD_MS, MIN_STALL_THRESHOLD_MS, DEFAULT_POLL_TIMEOUT_MS } from "./crew/handlers/collab.js";
+import { redactSensitiveText } from "./crew/utils/redaction.js";
 import * as path from "node:path";
 
 let messagesSentThisSession = 0;
@@ -386,6 +387,14 @@ export async function executeSend(
         }
 
         const sendTimestamp = Date.now();
+        const sendBaselineOffset = (() => {
+          if (!collabEntry.logFile) return 0;
+          try {
+            return statSync(collabEntry.logFile).size;
+          } catch {
+            return 0;
+          }
+        })();
         const outbound = store.sendMessageToAgent(state, dirs, recipient, message, replyTo, phase);
         messagesSentThisSession++;
         const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
@@ -432,6 +441,7 @@ export async function executeSend(
           heartbeatFile: collabEntry.heartbeatFile
             ?? path.join(dirs.registry, `${recipient}.heartbeat`), // spec 009 convention
           hardCeilingMs: sendHardCeiling,           // R5.2: send hard ceiling
+          minLogOffset: sendBaselineOffset,
           state,
         });
 
@@ -439,8 +449,58 @@ export async function executeSend(
 
         if (!pollResult.ok) {
           // Extract error details — TypeScript may lose narrowing after await
-          const errResult = pollResult as { ok: false; error: string; exitCode?: number; logTail?: string; stallDurationMs?: number };
-          const { error: pollError, exitCode, logTail, stallDurationMs } = errResult;
+          const errResult = pollResult as {
+            ok: false;
+            error: string;
+            exitCode?: number;
+            logTail?: string;
+            stallDurationMs?: number;
+            providerError?: {
+              statusCode?: number;
+              errorType?: string;
+              errorMessage: string;
+              requestId?: string;
+              provider?: string;
+              model?: string;
+              raw: string;
+            };
+          };
+          const { error: pollError, exitCode, logTail, stallDurationMs, providerError } = errResult;
+
+          if (pollError === "provider_error" && providerError) {
+            // Terminal usage/rate/auth failures should stop immediately.
+            await gracefulDismiss(collabEntry);
+            state.completedCollaborators.add(recipient);
+
+            const sanitizedProviderError = {
+              ...providerError,
+              errorMessage: redactSensitiveText(providerError.errorMessage) ?? providerError.errorMessage,
+              raw: redactSensitiveText(providerError.raw) ?? providerError.raw,
+            };
+            const sanitizedLogTail = redactSensitiveText(logTail) || undefined;
+
+            const status = sanitizedProviderError.statusCode ? ` ${sanitizedProviderError.statusCode}` : "";
+            const type = sanitizedProviderError.errorType ? ` ${sanitizedProviderError.errorType}` : "";
+            const req = sanitizedProviderError.requestId ? ` request_id=${sanitizedProviderError.requestId}` : "";
+            return result(
+              `Message sent to ${recipient}, but terminal provider error${status}${type}.${req}\n` +
+              `${sanitizedProviderError.errorMessage}\n\n` +
+              `Collaborator was stopped immediately so you can switch/reload credentials and retry.` +
+              `\n\n(${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+              {
+                mode: "send",
+                sent: [recipient],
+                failed: [],
+                error: "provider_error",
+                name: recipient,
+                providerError: sanitizedProviderError,
+                dismissed: recipient,
+                conversationComplete: true,
+                ...(sanitizedLogTail ? { logTail: sanitizedLogTail } : {}),
+              },
+            );
+          }
+
           // Send-path cancel/stall/crash: do NOT dismiss collaborator
           if (pollError === "crashed") {
             return result(

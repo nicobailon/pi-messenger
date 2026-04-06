@@ -1,0 +1,181 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { MessengerState } from "../../lib.js";
+import type { CollaboratorEntry } from "../../crew/registry.js";
+
+function makeMinimalState(overrides: Partial<MessengerState> = {}): MessengerState {
+  return {
+    agentName: "TestSpawner",
+    registered: true,
+    watcher: null,
+    watcherRetries: 0,
+    watcherRetryTimer: null,
+    watcherDebounceTimer: null,
+    reservations: [],
+    chatHistory: new Map(),
+    unreadCounts: new Map(),
+    broadcastHistory: [],
+    seenSenders: new Map(),
+    model: "test",
+    scopeToFolder: false,
+    isHuman: false,
+    session: { toolCalls: 0, tokens: 0, filesModified: [] },
+    activity: { lastActivityAt: new Date().toISOString() },
+    customStatus: false,
+    registryFlushTimer: null,
+    sessionStartedAt: new Date().toISOString(),
+    registrationContextSent: false,
+    blockingCollaborators: new Set(),
+    completedCollaborators: new Set(),
+    ...overrides,
+  };
+}
+
+function makeProc() {
+  const proc = {
+    exitCode: null as number | null,
+    killed: false,
+    pid: Math.floor(Math.random() * 100000),
+    kill: vi.fn().mockImplementation(() => {
+      proc.killed = true;
+      proc.exitCode = proc.exitCode ?? 0;
+      return true;
+    }),
+    once: vi.fn(),
+    on: vi.fn(),
+    stdin: {
+      write: vi.fn(),
+      end: vi.fn().mockImplementation(() => {
+        proc.exitCode = 0;
+      }),
+    },
+    stdout: null,
+    stderr: null,
+  };
+  return proc as unknown as import("node:child_process").ChildProcess;
+}
+
+describe("provider_error cleanup invariants", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    vi.resetModules();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "provider-cleanup-"));
+  });
+
+  afterEach(async () => {
+    const registry = await import("../../crew/registry.js");
+    registry.killAll();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("send path: provider_error completes exchange cleanup invariants", async () => {
+    const registry = await import("../../crew/registry.js");
+
+    const pollMock = vi.fn().mockResolvedValue({
+      ok: false,
+      error: "provider_error",
+      providerError: {
+        statusCode: 429,
+        errorType: "rate_limit_error",
+        errorMessage: "429 too many",
+        requestId: "req_cleanup_send",
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        raw: "Bearer sk-ant-oat01-secret",
+      },
+      logTail: "Authorization: Bearer sk-ant-oat01-secret",
+    });
+
+    vi.doMock("../../crew/handlers/collab.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/handlers/collab.js")>();
+      return {
+        ...original,
+        pollForCollaboratorMessage: pollMock,
+      };
+    });
+
+    const handlers = await import("../../handlers.js");
+
+    const collabEntry: CollaboratorEntry = {
+      type: "collaborator",
+      name: "NavAgent",
+      cwd: tmpDir,
+      proc: makeProc(),
+      taskId: "task-cleanup-send",
+      spawnedBy: process.pid,
+      startedAt: Date.now(),
+      promptTmpDir: null,
+      logFile: path.join(tmpDir, "collab.log"),
+    };
+    fs.writeFileSync(collabEntry.logFile!, "boot\n");
+    registry.registerWorker(collabEntry);
+
+    const state = makeMinimalState();
+    const dirs = {
+      base: tmpDir,
+      registry: path.join(tmpDir, "registry"),
+      inbox: path.join(tmpDir, "inbox"),
+    } as any;
+    fs.mkdirSync(dirs.registry, { recursive: true });
+    fs.mkdirSync(path.join(dirs.inbox, state.agentName), { recursive: true });
+    fs.writeFileSync(
+      path.join(dirs.registry, "NavAgent.json"),
+      JSON.stringify({
+        name: "NavAgent",
+        pid: process.pid,
+        sessionId: "sess-cleanup",
+        cwd: tmpDir,
+        model: "anthropic/claude-opus-4-6",
+        startedAt: new Date().toISOString(),
+        isHuman: false,
+        session: { toolCalls: 0, tokens: 0, filesModified: [] },
+        activity: { lastActivityAt: new Date().toISOString() },
+      }),
+    );
+
+    const result = await handlers.executeSend(
+      state,
+      dirs,
+      tmpDir,
+      "NavAgent",
+      undefined,
+      "Please review",
+      undefined,
+      "review",
+    );
+
+    expect(result.details.error).toBe("provider_error");
+    expect((result.details as any).conversationComplete).toBe(true);
+    expect(state.completedCollaborators.has("NavAgent")).toBe(true);
+    expect(state.blockingCollaborators.has("NavAgent")).toBe(false);
+
+    // Registry/worker visibility invariant: collaborator is no longer active.
+    expect(registry.hasActiveWorker(collabEntry.cwd, collabEntry.taskId)).toBe(false);
+    expect(registry.findCollaboratorByName("NavAgent")).toBeNull();
+
+    // Optional debug payloads are sanitized.
+    expect((result.details as any).providerError.raw).not.toContain("sk-ant-oat01");
+    expect((result.details as any).logTail).not.toContain("sk-ant-oat01");
+  });
+
+  it("spawn path: provider_error branch is wired to gracefulDismiss cleanup", () => {
+    const source = fs.readFileSync(
+      new URL("../../crew/handlers/collab.ts", import.meta.url).pathname,
+      "utf-8",
+    );
+
+    const providerIdx = source.indexOf('if (error === "provider_error" && providerError)');
+    expect(providerIdx).toBeGreaterThan(-1);
+
+    const providerReturnIdx = source.indexOf("return result(", providerIdx);
+    const providerBranch = source.slice(providerIdx, providerReturnIdx);
+    expect(providerBranch).toContain("await gracefulDismiss(entry)");
+
+    const dismissImplIdx = source.indexOf("export async function gracefulDismiss(");
+    const dismissBody = source.slice(dismissImplIdx);
+    expect(dismissBody).toContain("unregisterWorker(entry.cwd, entry.taskId)");
+  });
+});

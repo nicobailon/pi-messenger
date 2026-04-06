@@ -18,6 +18,11 @@ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { MessengerState, Dirs, AgentMailMessage } from "../../lib.js";
 import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
+import {
+  extractProviderTerminalErrorFromLogLine,
+  type ProviderTerminalError,
+} from "../utils/provider-classification.js";
+import { redactSensitiveText } from "../utils/redaction.js";
 import { generateMemorableName } from "../../lib.js";
 import { recordMessageInHistory, validateTargetAgent } from "../../store.js";
 import { discoverCrewAgents } from "../utils/discover.js";
@@ -96,12 +101,23 @@ export interface PollOptions {
   heartbeatFile?: string;
   /** Hard ceiling — fires regardless of heartbeat freshness. spawn=3600s, send=max(D5×3,900s). */
   hardCeilingMs?: number;
+  /** Start log scanning at/after this byte offset (send path replay guard). */
+  minLogOffset?: number;
   state: MessengerState;
 }
 
 export type PollResult =
   | { ok: true; message: AgentMailMessage; peerComplete?: boolean }
-  | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number; stallType?: PollStallType };
+  | { ok: false; error: "crashed" | "cancelled" | "stalled"; exitCode?: number; logTail?: string; stallDurationMs?: number; stallType?: PollStallType }
+  | { ok: false; error: "provider_error"; providerError: ProviderTerminalError; logTail?: string };
+
+function sanitizeProviderTerminalError(providerError: ProviderTerminalError): ProviderTerminalError {
+  return {
+    ...providerError,
+    errorMessage: redactSensitiveText(providerError.errorMessage) ?? providerError.errorMessage,
+    raw: redactSensitiveText(providerError.raw) ?? providerError.raw,
+  };
+}
 
 /**
  * Returns true if a spawn-path message should be accepted as a valid first response.
@@ -154,6 +170,7 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
   } = opts;
   const resolvedStallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
   const resolvedPollTimeoutMs = opts.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
+  const resolvedMinLogOffset = Math.max(0, Math.floor(opts.minLogOffset ?? 0));
 
   // A4: Setup for dual-signal stall detection (spec 009)
   const heartbeatFile = opts.heartbeatFile ?? entry.heartbeatFile;
@@ -176,6 +193,59 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
       } catch {
         // Log file may not exist yet
       }
+    }
+
+    // Incremental log scanner for immediate terminal provider errors
+    let providerScanOffset = 0;
+    let providerScanRemainder = "";
+    let providerScanInitialized = false;
+
+    function readProviderTerminalError(): ProviderTerminalError | null {
+      if (!entry.logFile) return null;
+      try {
+        const stat = fs.statSync(entry.logFile);
+        if (!providerScanInitialized) {
+          providerScanOffset = Math.max(providerScanOffset, resolvedMinLogOffset);
+          providerScanInitialized = true;
+        }
+        if (stat.size < providerScanOffset) {
+          providerScanOffset = 0;
+          providerScanRemainder = "";
+        }
+        if (stat.size === providerScanOffset) {
+          return null;
+        }
+
+        const chunkSize = stat.size - providerScanOffset;
+        if (chunkSize <= 0) return null;
+
+        const buf = Buffer.alloc(chunkSize);
+        const fd = fs.openSync(entry.logFile, "r");
+        fs.readSync(fd, buf, 0, chunkSize, providerScanOffset);
+        fs.closeSync(fd);
+        providerScanOffset = stat.size;
+
+        const chunk = providerScanRemainder + buf.toString("utf-8");
+        const lines = chunk.split(/\r?\n/);
+        providerScanRemainder = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const providerError = extractProviderTerminalErrorFromLogLine(line);
+          if (providerError) return sanitizeProviderTerminalError(providerError);
+        }
+
+        // If the last chunk had no trailing newline but is parseable, catch it now.
+        if (providerScanRemainder.trim()) {
+          const providerError = extractProviderTerminalErrorFromLogLine(providerScanRemainder);
+          if (providerError) {
+            providerScanRemainder = "";
+            return sanitizeProviderTerminalError(providerError);
+          }
+        }
+      } catch {
+        // Ignore scanner errors and continue polling.
+      }
+      return null;
     }
 
     function checkMessage(filePath: string): AgentMailMessage | null {
@@ -289,6 +359,20 @@ export function pollForCollaboratorMessage(opts: PollOptions): Promise<PollResul
         }
       } catch {
         // Inbox read error — try again next tick
+      }
+
+      // Immediate terminal provider error detection (usage/rate/auth/quota)
+      const providerError = readProviderTerminalError();
+      if (providerError) {
+        clearInterval(timer);
+        const logTail = readLogTail();
+        resolve({
+          ok: false,
+          error: "provider_error",
+          providerError,
+          logTail: redactSensitiveText(logTail) || undefined,
+        });
+        return;
       }
 
       const now = Date.now();
@@ -580,8 +664,31 @@ export async function executeSpawn(
 
     if (!pollResult.ok) {
       // Extract error details — TypeScript may lose narrowing after await
-      const errResult = pollResult as { ok: false; error: string; exitCode?: number; logTail?: string; stallDurationMs?: number };
-      const { error, exitCode, logTail, stallDurationMs } = errResult;
+      const errResult = pollResult as {
+        ok: false;
+        error: string;
+        exitCode?: number;
+        logTail?: string;
+        stallDurationMs?: number;
+        providerError?: ProviderTerminalError;
+      };
+      const { error, exitCode, logTail, stallDurationMs, providerError } = errResult;
+
+      if (error === "provider_error" && providerError) {
+        await gracefulDismiss(entry);
+        const sanitizedProviderError = sanitizeProviderTerminalError(providerError);
+        const sanitizedLogTail = redactSensitiveText(logTail) || undefined;
+        const status = sanitizedProviderError.statusCode ? ` ${sanitizedProviderError.statusCode}` : "";
+        const type = sanitizedProviderError.errorType ? ` ${sanitizedProviderError.errorType}` : "";
+        const req = sanitizedProviderError.requestId ? ` request_id=${sanitizedProviderError.requestId}` : "";
+        return result(
+          `Error: Collaborator "${collabName}" hit terminal provider error${status}${type}.${req}\n` +
+          `${sanitizedProviderError.errorMessage}\n\n` +
+          `Stopped immediately so you can switch/reload credentials and retry.` +
+          (sanitizedLogTail ? `\n\nLog tail:\n${sanitizedLogTail}` : ""),
+          { mode: "spawn", error: "provider_error", name: collabName, providerError: sanitizedProviderError, logTail: sanitizedLogTail },
+        );
+      }
 
       if (error === "crashed") {
         await gracefulDismiss(entry);
