@@ -1,9 +1,15 @@
 ---
 name: pi-messenger-crew
-description: Use pi-messenger for multi-agent coordination and Crew task orchestration. Covers joining the mesh, planning from PRDs, working on tasks, file reservations, and agent messaging. Load this skill when using pi_messenger or building with Crew.
+description: Orchestrator reference for pi-messenger Crew — planning, task management, config, and agent coordination. Workers already have everything they need in crew-worker.md and should NOT load this skill.
 ---
 
 # Pi-Messenger Crew Skill
+
+> **Workers:** You do not need this skill. Your `crew-worker.md` prompt already contains every `pi_messenger` action you need (`join`, `task.start/done/progress/block`, `reserve`, `release`, `send`). Loading this adds ~2,000 tokens of orchestrator docs that are irrelevant to your task.
+>
+> **Orchestrators / humans:** This is your full reference for planning, task management, configuration, and understanding crew internals.
+
+---
 
 Use pi-messenger for multi-agent coordination and Crew task orchestration.
 
