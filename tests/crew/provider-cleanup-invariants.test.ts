@@ -161,21 +161,48 @@ describe("provider_error cleanup invariants", () => {
     expect((result.details as any).logTail).not.toContain("sk-ant-oat01");
   });
 
-  it("spawn path: provider_error branch is wired to gracefulDismiss cleanup", () => {
-    const source = fs.readFileSync(
-      new URL("../../crew/handlers/collab.ts", import.meta.url).pathname,
-      "utf-8",
+  it("spawn path: provider_error helper enforces cleanup invariants and output contract", async () => {
+    const registry = await import("../../crew/registry.js");
+    const collab = await import("../../crew/handlers/collab.js");
+
+    const collabEntry: CollaboratorEntry = {
+      type: "collaborator",
+      name: "SpawnAgent",
+      cwd: tmpDir,
+      proc: makeProc(),
+      taskId: "task-cleanup-spawn",
+      spawnedBy: process.pid,
+      startedAt: Date.now(),
+      promptTmpDir: null,
+      logFile: path.join(tmpDir, "spawn.log"),
+    };
+    fs.writeFileSync(collabEntry.logFile!, "boot\n");
+    registry.registerWorker(collabEntry);
+
+    const result = await collab.finalizeSpawnProviderError(
+      collabEntry,
+      "SpawnAgent",
+      {
+        statusCode: 429,
+        errorType: "rate_limit_error",
+        errorMessage: "Provider 429",
+        requestId: "req_cleanup_spawn",
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        raw: "Authorization: Bearer sk-ant-oat01-secret",
+      },
+      "Authorization: Bearer sk-ant-oat01-secret",
     );
 
-    const providerIdx = source.indexOf('if (error === "provider_error" && providerError)');
-    expect(providerIdx).toBeGreaterThan(-1);
+    expect(result.details.error).toBe("provider_error");
+    expect((result.details as any).providerError.provider).toBe("anthropic");
+    expect((result.details as any).providerError.model).toBe("claude-opus-4-6");
+    expect((result.details as any).providerError.requestId).toBe("req_cleanup_spawn");
+    expect((result.details as any).providerError.raw).not.toContain("sk-ant-oat01");
+    expect((result.details as any).logTail).not.toContain("sk-ant-oat01");
 
-    const providerReturnIdx = source.indexOf("return result(", providerIdx);
-    const providerBranch = source.slice(providerIdx, providerReturnIdx);
-    expect(providerBranch).toContain("await gracefulDismiss(entry)");
-
-    const dismissImplIdx = source.indexOf("export async function gracefulDismiss(");
-    const dismissBody = source.slice(dismissImplIdx);
-    expect(dismissBody).toContain("unregisterWorker(entry.cwd, entry.taskId)");
+    // Registry/worker visibility invariant: collaborator is no longer active.
+    expect(registry.hasActiveWorker(collabEntry.cwd, collabEntry.taskId)).toBe(false);
+    expect(registry.findCollaboratorByName("SpawnAgent")).toBeNull();
   });
 });

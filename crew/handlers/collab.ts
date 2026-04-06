@@ -119,6 +119,27 @@ function sanitizeProviderTerminalError(providerError: ProviderTerminalError): Pr
   };
 }
 
+export async function finalizeSpawnProviderError(
+  entry: CollaboratorEntry,
+  collabName: string,
+  providerError: ProviderTerminalError,
+  logTail?: string,
+) {
+  await gracefulDismiss(entry);
+  const sanitizedProviderError = sanitizeProviderTerminalError(providerError);
+  const sanitizedLogTail = redactSensitiveText(logTail) || undefined;
+  const status = sanitizedProviderError.statusCode ? ` ${sanitizedProviderError.statusCode}` : "";
+  const type = sanitizedProviderError.errorType ? ` ${sanitizedProviderError.errorType}` : "";
+  const req = sanitizedProviderError.requestId ? ` request_id=${sanitizedProviderError.requestId}` : "";
+  return result(
+    `Error: Collaborator "${collabName}" hit terminal provider error${status}${type}.${req}\n` +
+    `${sanitizedProviderError.errorMessage}\n\n` +
+    `Stopped immediately so you can switch/reload credentials and retry.` +
+    (sanitizedLogTail ? `\n\nLog tail:\n${sanitizedLogTail}` : ""),
+    { mode: "spawn", error: "provider_error", name: collabName, providerError: sanitizedProviderError, logTail: sanitizedLogTail },
+  );
+}
+
 /**
  * Returns true if a spawn-path message should be accepted as a valid first response.
  * A message is fresh if its timestamp is >= spawnStartTime (cannot be from a prior session).
@@ -675,19 +696,7 @@ export async function executeSpawn(
       const { error, exitCode, logTail, stallDurationMs, providerError } = errResult;
 
       if (error === "provider_error" && providerError) {
-        await gracefulDismiss(entry);
-        const sanitizedProviderError = sanitizeProviderTerminalError(providerError);
-        const sanitizedLogTail = redactSensitiveText(logTail) || undefined;
-        const status = sanitizedProviderError.statusCode ? ` ${sanitizedProviderError.statusCode}` : "";
-        const type = sanitizedProviderError.errorType ? ` ${sanitizedProviderError.errorType}` : "";
-        const req = sanitizedProviderError.requestId ? ` request_id=${sanitizedProviderError.requestId}` : "";
-        return result(
-          `Error: Collaborator "${collabName}" hit terminal provider error${status}${type}.${req}\n` +
-          `${sanitizedProviderError.errorMessage}\n\n` +
-          `Stopped immediately so you can switch/reload credentials and retry.` +
-          (sanitizedLogTail ? `\n\nLog tail:\n${sanitizedLogTail}` : ""),
-          { mode: "spawn", error: "provider_error", name: collabName, providerError: sanitizedProviderError, logTail: sanitizedLogTail },
-        );
+        return finalizeSpawnProviderError(entry, collabName, providerError, logTail);
       }
 
       if (error === "crashed") {

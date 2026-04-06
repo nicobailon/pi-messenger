@@ -1670,6 +1670,54 @@ describe("executeSend handler-level behavior", () => {
     expect(state.completedCollaborators.has("NavAgent")).toBe(true);
   });
 
+  it("executeSend passes minLogOffset baseline captured before send write", async () => {
+    vi.resetModules();
+    const logFile = path.join(tmpDir, "send-baseline.log");
+    fs.writeFileSync(logFile, "stale-line\n");
+    const expectedBaseline = fs.statSync(logFile).size;
+    let observedLogSizeAtPoll = 0;
+
+    const mockPollBaseline = vi.fn().mockImplementation(async () => {
+      observedLogSizeAtPoll = fs.statSync(logFile).size;
+      return { ok: false, error: "cancelled" };
+    });
+
+    const mockFindCollabBaseline = vi
+      .fn()
+      .mockReturnValue(makeCollabEntry({ name: "NavAgent", logFile }));
+
+    vi.doMock("../../crew/handlers/collab.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/handlers/collab.js")>();
+      return { ...original, pollForCollaboratorMessage: mockPollBaseline };
+    });
+    vi.doMock("../../crew/registry.js", async (importOriginal) => {
+      const original = await importOriginal<typeof import("../../crew/registry.js")>();
+      return { ...original, findCollaboratorByName: mockFindCollabBaseline };
+    });
+
+    const store = await import("../../store.js");
+    const sendMessageSpy = vi.spyOn(store, "sendMessageToAgent").mockImplementation(() => {
+      fs.appendFileSync(logFile, "{\"type\":\"message_end\",\"message\":{\"errorMessage\":\"stale\"}}\n");
+      return { id: "outbound-1" } as any;
+    });
+
+    const { executeSend: execSendBaseline } = await import("../../handlers.js");
+
+    const state = makeMinimalState();
+    const dirs = { base: tmpDir, registry: path.join(tmpDir, "registry"), inbox: path.join(tmpDir, "inbox") };
+
+    const result = await execSendBaseline(
+      state, dirs, tmpDir, "NavAgent", undefined, "Review this code", undefined,
+    );
+
+    expect(result.details.error).toBe("cancelled");
+    expect(sendMessageSpy).toHaveBeenCalled();
+    expect(mockPollBaseline).toHaveBeenCalledTimes(1);
+    const pollOpts = mockPollBaseline.mock.calls[0][0];
+    expect(pollOpts.minLogOffset).toBe(expectedBaseline);
+    expect(observedLogSizeAtPoll).toBeGreaterThan(expectedBaseline);
+  });
+
   // ── Spec 008: executeSend uses correct pollTimeoutMs (not spawnPollTimeoutMs) ──
 
   it("executeSend passes DEFAULT_POLL_TIMEOUT_MS to poll, not spawn timeout (spec 008)", async () => {
