@@ -1,0 +1,41 @@
+---
+schema_version: "1.0.0"
+mode: finalize
+date: 2026-04-06T01:35:47.610Z
+session: "pi-messenger-3jf-spec-012-fast-fail-provider-errors-finalize"
+outcome: "SUCCEEDED"
+primary_bead: "pi-messenger-3jf"
+---
+
+goal: "Implement and verify spec 012 so collaborator spawn/send fail fast on terminal provider errors with replay guard, cleanup invariants, and regression coverage."
+now: "Spec 012 is implemented and Codex code verification is approved after 2 rounds; tests pass and verification artifacts are recorded."
+
+final_solutions:
+  - "Extracted terminal provider classification into crew/utils/provider-classification.ts with exact matching, error.type precedence, error.code fallback, and normative policy table linked to tests."
+  - "Added replay guard for send flows via sendBaselineOffset -> minLogOffset wiring so stale pre-send log lines do not trigger provider_error replay."
+  - "Added redaction contract (crew/utils/redaction.ts) and sanitized optional debug fields (raw/logTail) before surfacing provider_error details."
+  - "Closed Codex verification gaps by adding runtime spawn cleanup seam (finalizeSpawnProviderError) and handler-level tests proving send baseline wiring and cleanup invariants."
+
+final_decisions:
+  - "Selected Shape A (inline poll log scanning + explicit terminal policy) to stay in-repo and avoid Pi-core dependency changes."
+  - "Treat terminal provider failures as provider_error with immediate short-circuit + deterministic collaborator cleanup for spawn/send."
+  - "Keep implement-receipt immutable during /code-verify and re-review using baseline_sha..HEAD diff."
+  - "Accept exported finalizeSpawnProviderError as a deliberate testability seam to behavior-test spawn cleanup invariants under ESM mocking constraints."
+
+artifacts_produced:
+  - "specs/012-fast-fail-provider-errors/spec.md"
+  - "specs/012-fast-fail-provider-errors/plan.md"
+  - "specs/012-fast-fail-provider-errors/tasks.md"
+  - "specs/012-fast-fail-provider-errors/shaping-transcript.md"
+  - "specs/012-fast-fail-provider-errors/planning-transcript.md"
+  - "specs/012-fast-fail-provider-errors/codex-review.md"
+  - "specs/012-fast-fail-provider-errors/implement-receipt.md"
+  - "specs/012-fast-fail-provider-errors/code-verify.md"
+  - "specs/012-fast-fail-provider-errors/code-verify-transcript.md"
+  - "tests/crew/provider-classification.test.ts"
+  - "tests/crew/provider-cleanup-invariants.test.ts"
+
+git:
+  branch: "feat/002-multi-runtime-support"
+  commit: "490e00fe833a8ecfd3e80d5b32ab138166f7d487"
+  remote: "git@github.com:carmandale/pi-messenger.git"
