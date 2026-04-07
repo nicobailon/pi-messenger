@@ -718,16 +718,21 @@ describe("registerSpawnedWorker", () => {
     expect(reg.activity.lastActivityAt).toBeDefined();
   });
 
-  it("uses atomic write (no partial reads)", () => {
+  it("uses atomic write with unique tmp names (no partial reads)", () => {
     registerSpawnedWorker(tmpDir, "/project", "AtomicBot", 99, "model", "sess");
 
-    // .tmp file should not exist after completion
-    const tmpFile = path.join(tmpDir, ".AtomicBot.tmp");
-    expect(fs.existsSync(tmpFile)).toBe(false);
+    // No .tmp-* files should remain after completion
+    const remainingTmps = fs.readdirSync(tmpDir).filter(f => f.includes(".tmp-"));
+    expect(remainingTmps).toEqual([]);
 
-    // Final file should exist
+    // Old-style shared .tmp file should also not exist
+    expect(fs.existsSync(path.join(tmpDir, ".AtomicBot.tmp"))).toBe(false);
+
+    // Final file should exist with valid JSON
     const finalFile = path.join(tmpDir, "AtomicBot.json");
     expect(fs.existsSync(finalFile)).toBe(true);
+    const reg = JSON.parse(fs.readFileSync(finalFile, "utf-8"));
+    expect(reg.pid).toBe(99);
   });
 });
 
