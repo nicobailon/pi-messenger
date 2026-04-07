@@ -963,22 +963,28 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
       let orphanedTmps = 0;
       let activeRegs = 0;
 
+      // Pass 1: Remove dead-PID .json registrations first
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        const filePath = path.join(regDir, file);
+        try {
+          const reg = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+          if (reg.pid && !isProcessAlive(reg.pid)) {
+            fs.unlinkSync(filePath);
+            deadRegs++;
+          } else {
+            activeRegs++;
+          }
+        } catch {
+          process.stderr.write(`⚠ Skipping unparseable file: ${file}\n`);
+        }
+      }
+
+      // Pass 2: Clean orphaned heartbeats and tmp files (after dead .json removed)
       for (const file of files) {
         const filePath = path.join(regDir, file);
 
-        if (file.endsWith(".json")) {
-          try {
-            const reg = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-            if (reg.pid && !isProcessAlive(reg.pid)) {
-              fs.unlinkSync(filePath);
-              deadRegs++;
-            } else {
-              activeRegs++;
-            }
-          } catch {
-            process.stderr.write(`⚠ Skipping unparseable file: ${file}\n`);
-          }
-        } else if (file.endsWith(".heartbeat")) {
+        if (file.endsWith(".heartbeat")) {
           const baseName = file.replace(".heartbeat", "");
           if (!fs.existsSync(path.join(regDir, `${baseName}.json`))) {
             try { fs.unlinkSync(filePath); orphanedHeartbeats++; } catch {}

@@ -231,6 +231,21 @@ describe("registry.gc CLI command", () => {
     expect(fs.existsSync(path.join(registryDir, "LiveBot.json"))).toBe(true);
   });
 
+  it("removes dead .json AND its sibling .heartbeat in one pass", () => {
+    // Regression: single-pass ordering meant heartbeat visited before dead .json
+    // saw .json still existed and survived. Two-pass fixes this.
+    const deadReg = { name: "OrderBot", pid: 99999, model: "test", startedAt: new Date().toISOString() };
+    fs.writeFileSync(path.join(registryDir, "OrderBot.json"), JSON.stringify(deadReg));
+    fs.writeFileSync(path.join(registryDir, "OrderBot.heartbeat"), Date.now().toString());
+
+    const result = runCli(["registry.gc"], { PI_MESSENGER_DIR: messengerDir }, testDir);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("1 dead registrations");
+    expect(result.stdout).toContain("1 orphaned heartbeats");
+    expect(fs.existsSync(path.join(registryDir, "OrderBot.json"))).toBe(false);
+    expect(fs.existsSync(path.join(registryDir, "OrderBot.heartbeat"))).toBe(false);
+  });
+
   it("does NOT remove unrecognized files (deletion guard)", () => {
     fs.writeFileSync(path.join(registryDir, "README.txt"), "do not delete");
 
