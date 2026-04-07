@@ -5,12 +5,12 @@
  * ENOENT regression property test, error messages.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { safeWriteJsonSync, registerSpawnedWorker } from "../../store.js";
-import { spawnSync } from "node:child_process";
+import { spawnSync, fork } from "node:child_process";
 
 const CLI_PATH = path.resolve(import.meta.dirname, "../../cli/index.ts");
 
@@ -132,15 +132,37 @@ describe("registerSpawnedWorker concurrent", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("two rapid calls with same name both succeed (no ENOENT)", () => {
-    // Call registerSpawnedWorker twice with the same name in rapid succession
-    // With unique tmp names, both should succeed without ENOENT
+  it("two rapid same-process calls with same name both succeed (no ENOENT)", () => {
     registerSpawnedWorker(tmpDir, "/project", "SameName", process.pid, "model", "sess-1");
     registerSpawnedWorker(tmpDir, "/project", "SameName", process.pid, "model", "sess-2");
 
     const reg = JSON.parse(fs.readFileSync(path.join(tmpDir, "SameName.json"), "utf-8"));
-    expect(reg.sessionId).toBe("sess-2"); // Last writer wins
+    expect(reg.sessionId).toBe("sess-2");
     expect(reg.pid).toBe(process.pid);
+  });
+
+  it("two forked processes with same name both succeed (multi-process smoke)", () => {
+    const workerScript = path.resolve(import.meta.dirname, "registry-worker.ts");
+    const registryDir = path.join(tmpDir, "registry");
+    fs.mkdirSync(registryDir, { recursive: true });
+
+    // Fork two workers that both write "RaceBot" to the same registry dir
+    const results = [1, 2].map(() => {
+      return spawnSync("npx", ["tsx", workerScript, registryDir, "RaceBot"], {
+        encoding: "utf-8",
+        timeout: 10_000,
+      });
+    });
+
+    // Both must succeed without ENOENT
+    for (const [i, r] of results.entries()) {
+      expect(r.status, `Worker ${i + 1} failed: ${r.stderr}`).toBe(0);
+      expect(r.stdout.trim()).toBe("OK");
+    }
+
+    // Final file should exist and be valid JSON
+    const reg = JSON.parse(fs.readFileSync(path.join(registryDir, "RaceBot.json"), "utf-8"));
+    expect(reg.name).toBe("RaceBot");
   });
 });
 
@@ -256,9 +278,10 @@ describe("bootstrapExternal error handling", () => {
       // Restore permissions for cleanup
       fs.chmodSync(registryDir, 0o755);
 
-      // Should fail — the registry write should produce an error
+      // Should fail — the registry write should produce structured error
       expect(result.exitCode).not.toBe(0);
       expect(result.stderr).toContain("Failed to write registry entry");
+      expect(result.stderr).toContain("registry.gc");
     } finally {
       // Ensure cleanup
       try { fs.chmodSync(path.join(testDir, "messenger", "registry"), 0o755); } catch {}
