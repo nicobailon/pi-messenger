@@ -1064,7 +1064,10 @@ async function runSpawn(
   }
 
   // 4. Build pi args
-  const args = ["--mode", "rpc", "--no-session"];
+  // --no-skills: collaborators get their instructions via --append-system-prompt;
+  // skills discovery loads ~145KB of cross-project descriptions that drown out the
+  // task prompt and cause intermittent context contamination (spec 062).
+  const args = ["--mode", "rpc", "--no-session", "--no-skills"];
 
   if (resolved.model) {
     pushModelArgs(args, resolved.model);

@@ -522,7 +522,10 @@ export async function executeSpawn(
   const collabId = randomUUID().slice(0, 8);
 
   // Build args — RPC mode, no -p flag (prompt goes via stdin)
-  const args = ["--mode", "rpc", "--no-session"];
+  // --no-skills: collaborators get their instructions via --append-system-prompt;
+  // skills discovery loads ~145KB of cross-project descriptions that drown out the
+  // task prompt and cause intermittent context contamination (spec 062).
+  const args = ["--mode", "rpc", "--no-session", "--no-skills"];
 
   const resolved = resolveModel(
     undefined,
