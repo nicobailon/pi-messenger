@@ -174,6 +174,17 @@ describe("registerSpawnedWorker concurrent", () => {
 });
 
 // =============================================================================
+// T9 Level 3: Conditional spawn smoke (requires live Pi process)
+// =============================================================================
+
+// Spawn requires a live Pi process — skip in unit tests.
+// See cli.test.ts:1166-1168: "spawn intentionally out of unit coverage"
+it.skip("spawn smoke: single spawn completes without ENOENT (requires live Pi)", () => {
+  // Would run: pi-messenger-cli spawn --agent crew-challenger --prompt "test"
+  // Verify exit code 0 and no ENOENT in stderr
+});
+
+// =============================================================================
 // T11: registry.gc tests
 // =============================================================================
 
