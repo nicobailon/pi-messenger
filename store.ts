@@ -5,7 +5,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import { execSync } from "node:child_process";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { HandlerContext } from "./lib.js";
@@ -66,6 +66,13 @@ function ensureDirSync(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+}
+
+export function safeWriteJsonSync(filePath: string, data: unknown): void {
+  ensureDirSync(dirname(filePath));
+  const temp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(temp, JSON.stringify(data, null, 2));
+  fs.renameSync(temp, filePath);
 }
 
 function normalizeCwd(cwd: string): string {
@@ -331,13 +338,6 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
     }
 
     const regPath = getRegistrationPath(state, dirs);
-    if (fs.existsSync(regPath)) {
-      try {
-        fs.unlinkSync(regPath);
-      } catch {
-        // Ignore
-      }
-    }
 
     ensureDirSync(getMyInbox(state, dirs));
 
@@ -359,11 +359,11 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
     };
 
     try {
-      fs.writeFileSync(regPath, JSON.stringify(registration, null, 2));
+      safeWriteJsonSync(regPath, registration);
     } catch (err) {
       if (ctx.hasUI) {
         const msg = err instanceof Error ? err.message : "unknown error";
-        ctx.ui.notify(`Failed to register: ${msg}`, "error");
+        ctx.ui.notify(`Failed to register ${state.agentName} in ${dirs.registry}: ${msg}`, "error");
       }
       return false;
     }
@@ -437,9 +437,10 @@ export function updateRegistration(state: MessengerState, dirs: Dirs, ctx: Handl
     reg.session = { ...state.session };
     reg.activity = { ...state.activity };
     reg.statusMessage = state.statusMessage;
-    fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
-  } catch {
-    // Ignore errors
+    safeWriteJsonSync(regPath, reg);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    process.stderr.write(`⚠ Registry update failed for ${state.agentName}: ${msg}\n`);
   }
 }
 
@@ -457,9 +458,10 @@ export function flushActivityToRegistry(state: MessengerState, dirs: Dirs, ctx: 
     reg.session = { ...state.session };
     reg.activity = { ...state.activity };
     reg.statusMessage = state.statusMessage;
-    fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
-  } catch {
-    // Ignore errors
+    safeWriteJsonSync(regPath, reg);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    process.stderr.write(`⚠ Activity flush failed for ${state.agentName}: ${msg}\n`);
   }
 }
 
@@ -536,11 +538,11 @@ export function renameAgent(
     statusMessage: state.statusMessage,
   };
 
-  ensureDirSync(dirs.registry);
-  
   try {
-    fs.writeFileSync(join(dirs.registry, `${newName}.json`), JSON.stringify(registration, null, 2));
+    safeWriteJsonSync(join(dirs.registry, `${newName}.json`), registration);
   } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    process.stderr.write(`⚠ Registry write failed during rename to ${newName}: ${msg}\n`);
     return { success: false, error: "invalid_name" as const };
   }
 
@@ -1198,8 +1200,6 @@ export function registerSpawnedWorker(
   sessionId: string,
   nonceHash?: string,
 ): void {
-  ensureDirSync(registryDir);
-
   const now = new Date().toISOString();
   const registration: import("./lib.js").AgentRegistration = {
     name,
@@ -1214,8 +1214,27 @@ export function registerSpawnedWorker(
     ...(nonceHash ? { nonceHash } : {}),
   };
 
-  const tmpPath = join(registryDir, `.${name}.tmp`);
   const finalPath = join(registryDir, `${name}.json`);
-  fs.writeFileSync(tmpPath, JSON.stringify(registration, null, 2));
-  fs.renameSync(tmpPath, finalPath);
+  try {
+    safeWriteJsonSync(finalPath, registration);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Failed to write registry entry for ${name}: ${msg}\n` +
+      `  Registry path: ${registryDir}\n` +
+      `  Try: pi-messenger-cli registry.gc`
+    );
+  }
+
+  // Verify-and-warn: detect collision with concurrent writer
+  try {
+    const written = JSON.parse(fs.readFileSync(finalPath, "utf-8"));
+    if (written.pid !== pid) {
+      process.stderr.write(
+        `⚠ Registry collision: ${name} written with PID ${pid} but file contains PID ${written.pid}\n`
+      );
+    }
+  } catch {
+    // Read-back failed — non-fatal
+  }
 }

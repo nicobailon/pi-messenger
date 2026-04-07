@@ -374,12 +374,8 @@ function bootstrapExternal(dirs: Dirs, cwd: string, modelFlag?: string, action?:
     process.exit(1);
   }
 
-  // Write/update registration
+  // Write/update registration (atomic write via safeWriteJsonSync)
   const regDir = dirs.registry;
-  try {
-    fs.mkdirSync(regDir, { recursive: true });
-  } catch {}
-
   const registration = {
     name,
     pid: process.pid,
@@ -392,10 +388,17 @@ function bootstrapExternal(dirs: Dirs, cwd: string, modelFlag?: string, action?:
     activity: { lastActivityAt: new Date().toISOString() },
   };
 
-  const tmpPath = path.join(regDir, `.${name}.tmp`);
   const finalPath = path.join(regDir, `${name}.json`);
-  fs.writeFileSync(tmpPath, JSON.stringify(registration, null, 2));
-  fs.renameSync(tmpPath, finalPath);
+  try {
+    store.safeWriteJsonSync(finalPath, registration);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Failed to write registry entry for ${name}: ${msg}\n` +
+      `  Registry path: ${regDir}\n` +
+      `  Try: pi-messenger-cli registry.gc`
+    );
+  }
 
   return { name, model: resolvedModel! };
 }
