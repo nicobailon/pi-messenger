@@ -19,7 +19,7 @@ import * as store from "../store.js";
 import * as crewStore from "../crew/store.js";
 import * as handlers from "../handlers.js";
 import { logFeedEvent } from "../feed.js";
-import { generateMemorableName, isValidAgentName, isProcessAlive } from "../lib.js";
+import { generateMemorableName, isValidAgentName } from "../lib.js";
 import type { MessengerState, Dirs, AgentMailMessage } from "../lib.js";
 import { discoverCrewAgents } from "../crew/utils/discover.js";
 import { loadCrewConfig } from "../crew/utils/config.js";
