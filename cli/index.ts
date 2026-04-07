@@ -19,7 +19,7 @@ import * as store from "../store.js";
 import * as crewStore from "../crew/store.js";
 import * as handlers from "../handlers.js";
 import { logFeedEvent } from "../feed.js";
-import { generateMemorableName, isValidAgentName } from "../lib.js";
+import { generateMemorableName, isValidAgentName, isProcessAlive } from "../lib.js";
 import type { MessengerState, Dirs, AgentMailMessage } from "../lib.js";
 import { discoverCrewAgents } from "../crew/utils/discover.js";
 import { loadCrewConfig } from "../crew/utils/config.js";
@@ -538,6 +538,7 @@ const NO_REGISTER_COMMANDS = new Set([
   "list", "status", "feed", "task.list", "task.show", "help", "version",
   "leave",
   "receive",
+  "registry.gc",
 ]);
 
 function bootstrap(cwd: string, options?: { register?: boolean; selfModel?: string; action?: string }): { state: MessengerState; dirs: Dirs } {
@@ -938,6 +939,70 @@ async function runCommand(cmd: ParsedCommand, cwd: string): Promise<void> {
         process.stderr.write("✗ Failed to leave mesh cleanly. Session file may still exist.\n");
         process.exitCode = 1;
       }
+      break;
+    }
+
+    case "registry.gc": {
+      const regDir = dirs.registry;
+      if (!fs.existsSync(regDir)) {
+        process.stdout.write("✓ Registry GC complete\n  Registry directory does not exist — nothing to clean.\n");
+        break;
+      }
+
+      let files: string[];
+      try {
+        files = fs.readdirSync(regDir);
+      } catch {
+        process.stderr.write(`✗ Cannot read registry directory: ${regDir}\n`);
+        process.exitCode = 1;
+        break;
+      }
+
+      let deadRegs = 0;
+      let orphanedHeartbeats = 0;
+      let orphanedTmps = 0;
+      let activeRegs = 0;
+
+      for (const file of files) {
+        const filePath = path.join(regDir, file);
+
+        if (file.endsWith(".json")) {
+          try {
+            const reg = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+            if (reg.pid && !isProcessAlive(reg.pid)) {
+              fs.unlinkSync(filePath);
+              deadRegs++;
+            } else {
+              activeRegs++;
+            }
+          } catch {
+            process.stderr.write(`⚠ Skipping unparseable file: ${file}\n`);
+          }
+        } else if (file.endsWith(".heartbeat")) {
+          const baseName = file.replace(".heartbeat", "");
+          if (!fs.existsSync(path.join(regDir, `${baseName}.json`))) {
+            try { fs.unlinkSync(filePath); orphanedHeartbeats++; } catch {}
+          }
+        } else if (file.includes(".tmp-")) {
+          // Extract PID from pattern: *.tmp-{pid}-{timestamp}
+          const match = file.match(/\.tmp-(\d+)-\d+$/);
+          if (match) {
+            const tmpPid = parseInt(match[1], 10);
+            if (!isProcessAlive(tmpPid)) {
+              try { fs.unlinkSync(filePath); orphanedTmps++; } catch {}
+            }
+          } else {
+            process.stderr.write(`⚠ Skipping unrecognized tmp file: ${file}\n`);
+          }
+        }
+        // Deletion guard: any other file pattern is left untouched
+      }
+
+      process.stdout.write(
+        `✓ Registry GC complete\n` +
+        `  Removed: ${deadRegs} dead registrations, ${orphanedHeartbeats} orphaned heartbeats, ${orphanedTmps} orphaned tmp files\n` +
+        `  Remaining: ${activeRegs} active registrations\n`
+      );
       break;
     }
 
@@ -1371,6 +1436,7 @@ Commands:
   task.done <id> --summary <text>    Complete a task
   spawn --agent <name> --prompt <text>   Spawn a collaborator (blocks for first message)
   dismiss --name <name>              Dismiss a collaborator
+  registry.gc                        Clean up dead registrations and orphaned files
 
 Flags:
   --self-model <model>  Set your model identity (e.g., 'gpt-5.3-codex').
