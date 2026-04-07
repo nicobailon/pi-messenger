@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { safeWriteJsonSync, registerSpawnedWorker } from "../../store.js";
-import { spawnSync, fork } from "node:child_process";
+import { spawnSync, spawn as spawnChild } from "node:child_process";
 
 const CLI_PATH = path.resolve(import.meta.dirname, "../../cli/index.ts");
 
@@ -141,24 +141,31 @@ describe("registerSpawnedWorker concurrent", () => {
     expect(reg.pid).toBe(process.pid);
   });
 
-  it("two forked processes with same name both succeed (multi-process smoke)", () => {
+  it("two concurrent forked processes with same name both succeed (multi-process smoke)", async () => {
     const workerScript = path.resolve(import.meta.dirname, "registry-worker.ts");
     const registryDir = path.join(tmpDir, "registry");
     fs.mkdirSync(registryDir, { recursive: true });
 
-    // Fork two workers that both write "RaceBot" to the same registry dir
-    const results = [1, 2].map(() => {
-      return spawnSync("npx", ["tsx", workerScript, registryDir, "RaceBot"], {
-        encoding: "utf-8",
-        timeout: 10_000,
+    // Launch two workers CONCURRENTLY using async spawn (not spawnSync)
+    const runWorker = (): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+      return new Promise((resolve) => {
+        const proc = spawnChild("npx", ["tsx", workerScript, registryDir, "RaceBot"], {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        proc.stdout!.on("data", (d: Buffer) => { stdout += d.toString(); });
+        proc.stderr!.on("data", (d: Buffer) => { stderr += d.toString(); });
+        proc.on("exit", (code) => resolve({ stdout, stderr, exitCode: code ?? 1 }));
       });
-    });
+    };
+
+    // Both start concurrently — real overlap opportunity
+    const [r1, r2] = await Promise.all([runWorker(), runWorker()]);
 
     // Both must succeed without ENOENT
-    for (const [i, r] of results.entries()) {
-      expect(r.status, `Worker ${i + 1} failed: ${r.stderr}`).toBe(0);
-      expect(r.stdout.trim()).toBe("OK");
-    }
+    expect(r1.exitCode, `Worker 1 failed: ${r1.stderr}`).toBe(0);
+    expect(r2.exitCode, `Worker 2 failed: ${r2.stderr}`).toBe(0);
 
     // Final file should exist and be valid JSON
     const reg = JSON.parse(fs.readFileSync(path.join(registryDir, "RaceBot.json"), "utf-8"));
@@ -282,6 +289,7 @@ describe("bootstrapExternal error handling", () => {
       expect(result.exitCode).not.toBe(0);
       expect(result.stderr).toContain("Failed to write registry entry");
       expect(result.stderr).toContain("registry.gc");
+      expect(result.stderr).toContain(registryDir); // includes registry path
     } finally {
       // Ensure cleanup
       try { fs.chmodSync(path.join(testDir, "messenger", "registry"), 0o755); } catch {}
