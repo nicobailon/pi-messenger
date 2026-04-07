@@ -231,3 +231,71 @@ describe("registerSpawnedWorker error messages", () => {
     }
   });
 });
+
+// =============================================================================
+// T13 continued: bootstrapExternal error (via CLI)
+// =============================================================================
+
+describe("bootstrapExternal error handling", () => {
+  it("CLI join with unwritable registry dir fails with error", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "bootstrap-err-"));
+    try {
+      // Create a valid messenger dir but make registry dir unwritable
+      const messengerDir = path.join(testDir, "messenger");
+      const sessionsDir = path.join(messengerDir, "cli-sessions");
+      const registryDir = path.join(messengerDir, "registry");
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      fs.mkdirSync(registryDir, { recursive: true });
+      // Make registry dir read-only to trigger write failure
+      fs.chmodSync(registryDir, 0o444);
+
+      const result = runCli(["join", "--self-model", "test-model"], {
+        PI_MESSENGER_DIR: messengerDir,
+      }, testDir);
+
+      // Restore permissions for cleanup
+      fs.chmodSync(registryDir, 0o755);
+
+      // Should fail — the registry write should produce an error
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("Failed to write registry entry");
+    } finally {
+      // Ensure cleanup
+      try { fs.chmodSync(path.join(testDir, "messenger", "registry"), 0o755); } catch {}
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// T9 Level 1 (strengthened): Source code property assertion
+// =============================================================================
+
+describe("safeWriteJsonSync source code property", () => {
+  it("source uses unique tmp pattern with PID and timestamp, not shared .{name}.tmp", () => {
+    // Read the actual source to verify the tmp naming pattern
+    // This is a static analysis test — the definitive proof that the fix is in place
+    const storeSrc = fs.readFileSync(
+      path.resolve(import.meta.dirname, "../../store.ts"),
+      "utf-8"
+    );
+
+    // Find the safeWriteJsonSync function body
+    const fnMatch = storeSrc.match(
+      /export function safeWriteJsonSync[\s\S]*?^}/m
+    );
+    expect(fnMatch).not.toBeNull();
+    const fnBody = fnMatch![0];
+
+    // Verify it uses the unique pattern: ${filePath}.tmp-${process.pid}-${Date.now()}
+    expect(fnBody).toContain("process.pid");
+    expect(fnBody).toContain("Date.now()");
+    expect(fnBody).toContain(".tmp-");
+
+    // Verify it does NOT use the old vulnerable pattern: .${name}.tmp
+    expect(fnBody).not.toMatch(/`\.\$\{name\}\.tmp`/);
+
+    // Also verify registerSpawnedWorker no longer has the old pattern
+    expect(storeSrc).not.toMatch(/join\(registryDir,\s*`\.\$\{name\}\.tmp`\)/);
+  });
+});
