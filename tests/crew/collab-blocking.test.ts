@@ -952,25 +952,9 @@ describe("executeSpawn wiring contract (spec 057)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Spec 062: --no-skills wiring in collaborator spawn args
+// Spec 062/067: context isolation flags — see context-isolation.test.ts
+// (moved to dedicated test file with Level 1 source assertions + Level 2 live tests)
 // ─────────────────────────────────────────────────────────────────────────────
-
-describe("collaborator spawn args include --no-skills (spec 062)", () => {
-  it("extension executeSpawn args include --no-skills", () => {
-    const collabPath = new URL("../../crew/handlers/collab.ts", import.meta.url).pathname;
-    const source = fs.readFileSync(collabPath, "utf-8");
-    // The args array for collaborator spawn must include --no-skills to prevent
-    // skills discovery from loading ~145KB of cross-project context.
-    expect(source).toMatch(/"--no-skills"/);
-  });
-
-  it("CLI runSpawn args include --no-skills", () => {
-    const cliPath = new URL("../../cli/index.ts", import.meta.url).pathname;
-    const source = fs.readFileSync(cliPath, "utf-8");
-    // Both spawn paths must have the flag — CLI path is separate from extension path.
-    expect(source).toMatch(/"--no-skills"/);
-  });
-});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Spec 057: Tier 4 stale-message guard in pollForCollaboratorMessage

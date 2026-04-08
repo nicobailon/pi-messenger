@@ -1138,10 +1138,13 @@ async function runSpawn(
   }
 
   // 4. Build pi args
-  // --no-skills: collaborators get their instructions via --append-system-prompt;
-  // skills discovery loads ~145KB of cross-project descriptions that drown out the
-  // task prompt and cause intermittent context contamination (spec 062).
-  const args = ["--mode", "rpc", "--no-session", "--no-skills"];
+  // Collaborators get their instructions via --append-system-prompt.
+  // Suppress all discovery paths to prevent context contamination:
+  // --no-skills: skills discovery loads ~145KB of cross-project descriptions (spec 062)
+  // --no-extensions: packages from settings.json inject irrelevant extension context (spec 067)
+  // --no-prompt-templates/--no-themes: additional discovery noise (spec 067)
+  // Note: explicit --extension flags (for pi-messenger) still work with --no-extensions.
+  const args = ["--mode", "rpc", "--no-session", "--no-skills", "--no-extensions", "--no-prompt-templates", "--no-themes"];
 
   if (resolved.model) {
     pushModelArgs(args, resolved.model);
