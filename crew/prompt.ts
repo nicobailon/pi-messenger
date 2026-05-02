@@ -118,15 +118,20 @@ ${truncatedSpec}
   return prompt;
 }
 
+const WORKER_HIDDEN_SKILLS = new Set(["pi-messenger-crew"]);
+
 function buildSkillsSection(
   skills: CrewSkillInfo[] | undefined,
   taskSkills: string[] | undefined,
 ): string | null {
   if (!skills || skills.length === 0) return null;
 
+  const visibleSkills = skills.filter(skill => !WORKER_HIDDEN_SKILLS.has(skill.name));
+  if (visibleSkills.length === 0) return null;
+
   const recommended = new Set(taskSkills ?? []);
-  const recSkills = skills.filter(s => recommended.has(s.name));
-  const otherSkills = skills.filter(s => !recommended.has(s.name));
+  const recSkills = visibleSkills.filter(s => recommended.has(s.name));
+  const otherSkills = visibleSkills.filter(s => !recommended.has(s.name));
 
   let section = `## Available Skills
 

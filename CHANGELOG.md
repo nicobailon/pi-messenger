@@ -5,6 +5,7 @@
 ### Fixed
 - Migrated extension tool schemas from `@sinclair/typebox` to `typebox` 1.x and updated the local test/tsconfig references to the new package entry.
 - Guarded status heartbeat updates against stale pi session contexts after reloads or session replacement while preserving non-stale errors.
+- Excluded the orchestrator-only `pi-messenger-crew` skill from worker prompts to avoid irrelevant skill loading during Crew task execution.
 
 ### Changed
 - Added `typebox` as a runtime dependency for packaged installs.
