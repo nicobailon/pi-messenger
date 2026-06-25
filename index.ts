@@ -11,18 +11,31 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { OverlayHandle, TUI } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
-import { Type, type TUnsafe } from "typebox";
+import { Type, type TSchema } from "typebox";
 
 function StringEnum<T extends readonly string[]>(
   values: T,
   options?: { description?: string; default?: T[number] },
-): TUnsafe<T[number]> {
-  return Type.Unsafe<T[number]>({
-    type: "string",
-    enum: [...values],
-    ...(options?.description && { description: options.description }),
-    ...(options?.default && { default: options.default }),
-  });
+): TSchema {
+  // omp bundles an ArkType-backed typebox shim that has no Type.Unsafe. When the real
+  // typebox is present (pi), use Type.Unsafe to emit an exact { type: "string", enum: [...] }
+  // schema; otherwise fall back to an equivalent union of literals, which both runtimes
+  // support, so the extension loads under omp's compat layer too.
+  const unsafe = (Type as unknown as {
+    Unsafe?: (schema: Record<string, unknown>) => TSchema;
+  }).Unsafe;
+  if (typeof unsafe === "function") {
+    return unsafe({
+      type: "string",
+      enum: [...values],
+      ...(options?.description && { description: options.description }),
+      ...(options?.default && { default: options.default }),
+    });
+  }
+  return Type.Union(
+    values.map((value) => Type.Literal(value)),
+    options,
+  );
 }
 import {
   type MessengerState,
