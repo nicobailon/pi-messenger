@@ -33,6 +33,28 @@ describe("feed", () => {
     expect(limited.map(e => e.type)).toEqual(["edit", "commit"]);
   });
 
+  it("reads a bounded tail across chunks and skips malformed records", () => {
+    const feedFile = path.join(cwd, ".pi", "messenger", "feed.jsonl");
+    fs.mkdirSync(path.dirname(feedFile), { recursive: true });
+    const events = Array.from({ length: 600 }, (_, i) => JSON.stringify({
+      ts: new Date(1_700_000_000_000 + i).toISOString(),
+      agent: "AgentOne",
+      type: "message",
+      preview: `${i}:${"x".repeat(128)}`,
+    }));
+    events.splice(599, 0, "{malformed");
+    fs.writeFileSync(feedFile, `${events.join("\n")}\n`);
+
+    expect(readFeedEvents(cwd, 2).map(event => event.preview?.split(":")[0])).toEqual(["598", "599"]);
+  });
+
+  it("returns no events for non-positive limits", () => {
+    logFeedEvent(cwd, "AgentOne", "join");
+
+    expect(readFeedEvents(cwd, 0)).toEqual([]);
+    expect(readFeedEvents(cwd, -5)).toEqual([]);
+  });
+
   it("isolates feeds between project directories", () => {
     const otherCwd = createTempCrewDirs().cwd;
 

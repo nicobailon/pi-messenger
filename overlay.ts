@@ -146,14 +146,14 @@ export class MessengerOverlay implements Component, Focusable {
     return isPlanningForCwd(this.cwd);
   }
 
-  private checkAutoSpawnOnPlanComplete(planning: boolean): void {
+  private checkAutoSpawnOnPlanComplete(planning: boolean, tasks: Task[]): void {
     const wasPlanningBefore = this.wasPlanning;
     this.wasPlanning = planning;
 
     if (!wasPlanningBefore || planning) return;
 
     const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
-    const readyTasks = crewStore.getReadyTasks(this.cwd, { advisory: config.dependencies === "advisory" });
+    const readyTasks = crewStore.getReadyTasksFrom(tasks, { advisory: config.dependencies === "advisory" });
     const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(t));
     if (startableTasks.length > 0) {
       const target = Math.min(startableTasks.length, autonomousState.concurrency);
@@ -175,16 +175,15 @@ export class MessengerOverlay implements Component, Focusable {
     cleanupUnassignedAliveFiles(this.cwd);
   }
 
-  private checkAutoRefillWorkers(): void {
-    const inProgressCount = crewStore.getTasks(this.cwd).filter(t => t.status === "in_progress").length;
+  private checkAutoRefillWorkers(tasks: Task[], hasPlan: boolean): void {
+    const inProgressCount = tasks.filter(t => t.status === "in_progress").length;
     const prev = this.prevInProgressCount;
     this.prevInProgressCount = inProgressCount;
 
-    if (inProgressCount >= prev || inProgressCount >= autonomousState.concurrency) return;
-    if (!crewStore.hasPlan(this.cwd)) return;
+    if (inProgressCount >= prev || inProgressCount >= autonomousState.concurrency || !hasPlan) return;
 
     const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
-    const readyTasks = crewStore.getReadyTasks(this.cwd, { advisory: config.dependencies === "advisory" });
+    const readyTasks = crewStore.getReadyTasksFrom(tasks, { advisory: config.dependencies === "advisory" });
     const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(t));
     if (startableTasks.length === 0) return;
 
@@ -602,8 +601,8 @@ export class MessengerOverlay implements Component, Focusable {
     const selectedTask = tasks[this.crewViewState.selectedTaskIndex] ?? null;
     const hasPlan = this.hasPlan();
     const planning = this.isPlanningActiveForCurrentProject();
-    this.checkAutoSpawnOnPlanComplete(planning);
-    this.checkAutoRefillWorkers();
+    this.checkAutoSpawnOnPlanComplete(planning, tasks);
+    this.checkAutoRefillWorkers(tasks, hasPlan);
 
     const lines: string[] = [];
     const titleContent = this.renderTitleContent();
@@ -614,7 +613,7 @@ export class MessengerOverlay implements Component, Focusable {
     const rightBorder = borderLen - leftBorder;
 
     lines.push(border("╭" + "─".repeat(leftBorder)) + titleText + border("─".repeat(rightBorder) + "╮"));
-    lines.push(row(renderStatusBar(this.theme, this.cwd, sectionW)));
+    lines.push(row(renderStatusBar(this.theme, this.cwd, sectionW, tasks)));
     lines.push(emptyRow());
 
     const chromeLines = 6;
@@ -634,7 +633,14 @@ export class MessengerOverlay implements Component, Focusable {
       const hasWorkers = hasLiveWorkers(this.cwd);
 
       let workerLines = renderWorkersSection(this.theme, this.cwd, sectionW, workersLimit);
-      const agentsLine = renderAgentsRow(this.cwd, sectionW, this.state, this.dirs, this.stuckThresholdMs);
+      const agentsLine = renderAgentsRow(
+        this.cwd,
+        sectionW,
+        this.state,
+        this.dirs,
+        this.stuckThresholdMs,
+        new Map([[this.cwd, tasks]]),
+      );
       const agentsHeight = 2;
       const workersHeight = () => workerLines.length > 0 ? workerLines.length + 1 : 0;
       const available = contentHeight - workersHeight() - agentsHeight;
@@ -686,9 +692,9 @@ export class MessengerOverlay implements Component, Focusable {
       } else if (planning && tasks.length === 0) {
         mainLines = renderPlanningState(this.theme, this.cwd, sectionW, mainHeight);
       } else if (isFeedFocus && tasks.length > 0) {
-        mainLines = renderTaskSummary(this.theme, this.cwd, sectionW, mainHeight);
+        mainLines = renderTaskSummary(this.theme, this.cwd, sectionW, mainHeight, tasks);
       } else {
-        mainLines = renderTaskList(this.theme, this.cwd, sectionW, mainHeight, this.crewViewState);
+        mainLines = renderTaskList(this.theme, this.cwd, sectionW, mainHeight, this.crewViewState, tasks);
       }
 
       contentLines = [];

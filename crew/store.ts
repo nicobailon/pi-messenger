@@ -476,21 +476,20 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
 // Ready Tasks (Dependency Resolution)
 // =============================================================================
 
-export function getReadyTasks(cwd: string, options?: { advisory?: boolean }): Task[] {
-  const tasks = getTasks(cwd);
+export function getReadyTasksFrom(tasks: Task[], options?: { advisory?: boolean }): Task[] {
   if (options?.advisory) {
     return tasks.filter(t => t.status === "todo" && !t.milestone);
   }
   const doneIds = new Set(tasks.filter(t => t.status === "done").map(t => t.id));
 
   return tasks.filter(task => {
-    // Must be in "todo" status
-    if (task.status !== "todo") return false;
-    if (task.milestone) return false;
-
-    // All dependencies must be done
+    if (task.status !== "todo" || task.milestone) return false;
     return task.depends_on.every(depId => doneIds.has(depId));
   });
+}
+
+export function getReadyTasks(cwd: string, options?: { advisory?: boolean }): Task[] {
+  return getReadyTasksFrom(getTasks(cwd), options);
 }
 
 export function autoCompleteMilestones(cwd: string): void {

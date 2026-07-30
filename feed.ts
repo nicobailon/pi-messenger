@@ -91,22 +91,57 @@ export function appendFeedEvent(cwd: string, event: FeedEvent): void {
 
 export function readFeedEvents(cwd: string, limit: number = 20): FeedEvent[] {
   const p = feedPath(cwd);
+  const maxEvents = Math.trunc(limit);
+  if (!Number.isFinite(maxEvents) || maxEvents <= 0) return [];
   if (!fs.existsSync(p)) return [];
 
   try {
-    const content = fs.readFileSync(p, "utf-8").trim();
-    if (!content) return [];
-    const lines = content.split("\n");
-    const events: FeedEvent[] = [];
-    for (const line of lines) {
-      try {
-        const parsed = JSON.parse(line) as FeedEvent;
-        events.push(sanitizeFeedEvent(parsed));
-      } catch {
-        // Skip malformed lines
+    const fd = fs.openSync(p, "r");
+    try {
+      // Read backward in chunks, carrying the partial first line of each chunk
+      // as raw bytes so lines (and multibyte sequences) are only decoded once complete.
+      const events: FeedEvent[] = [];
+      let position = fs.fstatSync(fd).size;
+      let carry = Buffer.alloc(0);
+      const chunkSize = 64 * 1024;
+
+      while (position > 0 && events.length < maxEvents) {
+        const start = Math.max(0, position - chunkSize);
+        const chunk = Buffer.allocUnsafe(position - start);
+        const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, start);
+        const current = bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead);
+        const combined = carry.length > 0 ? Buffer.concat([current, carry]) : current;
+        const firstNewline = combined.indexOf(0x0a);
+        let complete: Buffer;
+
+        if (start === 0) {
+          complete = combined;
+          carry = Buffer.alloc(0);
+        } else if (firstNewline === -1) {
+          carry = combined;
+          position = start;
+          continue;
+        } else {
+          carry = combined.subarray(0, firstNewline);
+          complete = combined.subarray(firstNewline + 1);
+        }
+
+        const lines = complete.toString("utf-8").split("\n");
+        for (let i = lines.length - 1; i >= 0 && events.length < maxEvents; i--) {
+          if (!lines[i]) continue;
+          try {
+            events.push(sanitizeFeedEvent(JSON.parse(lines[i]) as FeedEvent));
+          } catch {
+            // Skip malformed lines and continue scanning backward.
+          }
+        }
+        position = start;
       }
+
+      return events.reverse();
+    } finally {
+      fs.closeSync(fd);
     }
-    return events.slice(-limit);
   } catch {
     return [];
   }

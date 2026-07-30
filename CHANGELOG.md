@@ -22,6 +22,8 @@
 - Crew subprocesses now fail fast on terminal provider usage/quota/auth 4xx JSON events instead of waiting through retry loops, fixing #21. Thanks to Velinus (`velinussage`) for the report.
 
 ### Changed
+- `readFeedEvents` now reads only a bounded tail of `feed.jsonl` in backward 64KB chunks instead of parsing the whole file, making overlay feed reads on large histories dramatically faster (~1,800x on a 100k-event feed). Non-positive limits now return no events.
+- Overlay rendering, auto-spawn/refill checks, and stuck-agent heartbeats now reuse a single Crew task snapshot per frame instead of rescanning the task directory per section, roughly quadrupling render-helper throughput on large task lists.
 - Aligned Team built-in roles and sample profiles with the packaged `pi-subagents` role vocabulary while keeping Crew as the execution engine.
 - Moved pi core packages and `typebox` to peer dependencies for packaged installs.
 

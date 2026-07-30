@@ -196,17 +196,21 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
   const notifiedStuck = new Set<string>();
 
-  function checkStuckAgents(ctx: ExtensionContext): void {
+  function checkStuckAgents(ctx: ExtensionContext, peers: ReturnType<typeof store.getActiveAgents>): void {
     if (!config.stuckNotify || !ctx.hasUI || !state.registered) return;
 
     const thresholdMs = config.stuckThreshold * 1000;
-    const peers = store.getActiveAgents(state, dirs);
     const allClaims = store.getClaims(dirs);
-
+    const tasksByCwd = new Map<string, ReturnType<typeof crewStore.getTasks>>();
     const currentlyStuck = new Set<string>();
 
     for (const agent of peers) {
-      const hasTask = agentHasTask(agent.name, allClaims, crewStore.getTasks(agent.cwd));
+      let tasks = tasksByCwd.get(agent.cwd);
+      if (!tasks) {
+        tasks = crewStore.getTasks(agent.cwd);
+        tasksByCwd.set(agent.cwd, tasks);
+      }
+      const hasTask = agentHasTask(agent.name, allClaims, tasks);
       const computed = computeStatus(
         agent.activity?.lastActivityAt ?? agent.startedAt,
         hasTask,
@@ -243,9 +247,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     try {
       if (!ctx.hasUI || !state.registered) return;
 
-      checkStuckAgents(ctx);
-
       const agents = store.getActiveAgents(state, dirs);
+      checkStuckAgents(ctx, agents);
       const activeNames = new Set(agents.map(a => a.name));
       const count = agents.length;
       const theme = ctx.ui.theme;
