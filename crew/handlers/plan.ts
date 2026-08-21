@@ -20,6 +20,7 @@ import {
   isPlanningCancelled,
   isPlanningForCwd,
   resetPlanningCancellation,
+  restorePlanningState,
   setPendingAutoWork,
   setPlanningPhase,
   startPlanningRun,
@@ -211,6 +212,10 @@ export async function execute(
   const { prd, prompt } = params;
   const reportProgress = () => onProgress?.();
   resetPlanningCancellation();
+
+  // Sync with persisted planning state so a concurrent/cross-process plan run
+  // (live pid) is rejected below instead of duplicating the task set.
+  restorePlanningState(cwd);
 
   const existingPlan = store.getPlan(cwd);
   if (existingPlan) {
@@ -447,21 +452,34 @@ export async function execute(
   const createdTasks: { id: string; title: string; dependsOn: string[] }[] = [];
   const titleToId = new Map<string, string>();
 
+  // Reconcile against tasks already on the board so a duplicated plan run
+  // reuses them by title instead of appending a second copy.
+  const existingByTitle = new Map(
+    store.getTasks(cwd).map(t => [t.title.toLowerCase(), t.id] as const),
+  );
+
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i];
-    const role = teamStore.canonicalRoleForTask(cwd, task.role);
-    const riskLabels = teamStore.normalizeRiskLabels(task.riskLabels);
-    const approval = teamStore.approvalForTask(cwd, role, riskLabels);
-    const created = store.createTask(cwd, task.title, task.description, undefined, {
-      ...(role ? { role } : {}),
-      ...(riskLabels && riskLabels.length > 0 ? { risk_labels: riskLabels } : {}),
-      ...(approval ? { approval } : {}),
-      ...(task.skills && task.skills.length > 0 ? { skills: task.skills } : {}),
-    });
-    createdTasks.push({ id: created.id, title: task.title, dependsOn: task.dependsOn });
-    titleToId.set(task.title.toLowerCase(), created.id);
-    titleToId.set(`task ${i + 1}`, created.id);
-    titleToId.set(`task-${i + 1}`, created.id);
+    const titleKey = task.title.toLowerCase();
+    let taskId = titleToId.get(titleKey) ?? existingByTitle.get(titleKey);
+    if (!taskId) {
+      const role = teamStore.canonicalRoleForTask(cwd, task.role);
+      const riskLabels = teamStore.normalizeRiskLabels(task.riskLabels);
+      const approval = teamStore.approvalForTask(cwd, role, riskLabels);
+      const created = store.createTask(cwd, task.title, task.description, undefined, {
+        ...(role ? { role } : {}),
+        ...(riskLabels && riskLabels.length > 0 ? { risk_labels: riskLabels } : {}),
+        ...(approval ? { approval } : {}),
+        ...(task.skills && task.skills.length > 0 ? { skills: task.skills } : {}),
+      });
+      taskId = created.id;
+    }
+    titleToId.set(titleKey, taskId);
+    titleToId.set(`task ${i + 1}`, taskId);
+    titleToId.set(`task-${i + 1}`, taskId);
+    if (!createdTasks.some(t => t.id === taskId)) {
+      createdTasks.push({ id: taskId, title: task.title, dependsOn: task.dependsOn });
+    }
   }
 
   for (const task of createdTasks) {
