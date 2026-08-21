@@ -266,6 +266,15 @@ export async function execute(
         if (!task || !task.base_commit) continue;
         if ((task.review_count ?? 0) >= config.review.maxIterations) continue;
 
+        // Skip tasks blocked after their worker exited 0 (e.g. duplicates)
+        if (task.status === "blocked" || /duplicate/i.test(task.blocked_reason ?? "")) {
+          succeeded.splice(succeeded.indexOf(taskId), 1);
+          blocked.push(taskId);
+          logFeedEvent(cwd, "crew", "task.review", taskId,
+            `skipped — blocked: ${task.blocked_reason ?? task.status}`);
+          continue;
+        }
+
         const rr = await reviewImplementation(cwd, taskId, config.models?.reviewer ?? sessionModel);
         const verdict = rr.details?.verdict as string | undefined;
         if (!verdict) {
