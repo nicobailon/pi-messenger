@@ -91,8 +91,14 @@ export async function reviewImplementation(cwd: string, taskId: string, modelOve
     });
   }
 
-  const diff = getGitDiff(baseCommit, cwd);
-  const commitLog = getCommitLog(baseCommit, cwd);
+  // Prefer the task's own branch (works across linked worktrees since
+  // branches are repo-wide refs); fall back to the main checkout HEAD.
+  const taskBranch = getTaskBranch(taskId, cwd);
+  const diff = getGitDiff(baseCommit, cwd, taskBranch ?? undefined);
+  const commitLog = getCommitLog(baseCommit, cwd, taskBranch ?? undefined);
+  const diffError = taskBranch && !hasDiffContent(diff)
+    ? `**ERROR:** Task branch \`${taskBranch}\` exists but has no changes relative to base ${baseCommit.slice(0, 12)}. The implementation appears to be missing from the branch.`
+    : null;
 
   // Get task spec for context
   const taskSpec = store.getTaskSpec(cwd, taskId) ?? "";
@@ -112,14 +118,13 @@ export async function reviewImplementation(cwd: string, taskId: string, modelOve
 ${taskSpec || "*No spec available*"}
 
 ## Changes
-
 ### Commits
 ${commitLog || "*No commits*"}
 
 ### Diff
-\`\`\`diff
+${diffError ?? `\`\`\`diff
 ${diff}
-\`\`\`
+\`\`\``}
 
 ## Your Review
 
@@ -278,10 +283,28 @@ ${verdict.verdict === "SHIP" ? "✅ Plan is ready for execution!" : verdict.verd
 // Helpers
 // =============================================================================
 
-function getGitDiff(baseCommit: string, cwd: string): string {
+// Resolve the task's branch (task/<id>), if it exists. Branches are shared
+// refs, so this covers branches checked out in linked worktrees as well.
+export function getTaskBranch(taskId: string, cwd: string): string | null {
+  try {
+    execSync(`git rev-parse --verify refs/heads/task/${taskId}`, {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 2000,
+    });
+    return `task/${taskId}`;
+  } catch {
+    return null;
+  }
+}
+
+function getGitDiff(baseCommit: string, cwd: string, ref?: string): string {
+  // Three-dot merge-base diff against the task branch; two-dot vs HEAD fallback.
+  const range = ref ? `${baseCommit}...${ref}` : `${baseCommit}..HEAD`;
   try {
     const diff = execSync(
-      `git diff ${baseCommit}..HEAD`,
+      `git diff ${range}`,
       { cwd, encoding: "utf-8", maxBuffer: 5 * 1024 * 1024 }
     );
     // Truncate very long diffs
@@ -295,13 +318,19 @@ function getGitDiff(baseCommit: string, cwd: string): string {
   }
 }
 
-function getCommitLog(baseCommit: string, cwd: string): string {
+function getCommitLog(baseCommit: string, cwd: string, ref?: string): string {
+  // Same base resolution as the diff so commits match the diffed range.
+  const range = ref ? `${baseCommit}..${ref}` : `${baseCommit}..HEAD`;
   try {
     return execSync(
-      `git log ${baseCommit}..HEAD --oneline --no-decorate`,
+      `git log ${range} --oneline --no-decorate`,
       { cwd, encoding: "utf-8" }
     ).trim() || "*No commits*";
   } catch {
     return "*No commits*";
   }
+}
+
+function hasDiffContent(diff: string): boolean {
+  return diff !== "*No changes*" && !diff.startsWith("*");
 }
