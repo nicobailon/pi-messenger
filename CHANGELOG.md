@@ -4,6 +4,7 @@
 
 ### Fixed
 - Render malformed persisted agent messages that use legacy `message`/`ts` fields and normalize inbound mail using those fields, fixing #29. Thanks to [@rioxiaoliliang](https://github.com/rioxiaoliliang).
+- Prevent duplicate Crew task sets during planning, review task branches instead of the main checkout, and skip auto-review for blocked or duplicate tasks. Thanks to [@selimdizer](https://github.com/selimdizer) for #30.
 
 ## [0.15.0] - 2026-07-30
 
