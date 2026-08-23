@@ -449,7 +449,8 @@ export async function execute(
     });
   }
 
-  const createdTasks: { id: string; title: string; dependsOn: string[] }[] = [];
+  const plannedTasks: { id: string; title: string; dependsOn: string[] }[] = [];
+  let newTaskCount = 0;
   const titleToId = new Map<string, string>();
 
   // Reconcile against tasks already on the board so a duplicated plan run
@@ -473,16 +474,17 @@ export async function execute(
         ...(task.skills && task.skills.length > 0 ? { skills: task.skills } : {}),
       });
       taskId = created.id;
+      newTaskCount++;
     }
     titleToId.set(titleKey, taskId);
     titleToId.set(`task ${i + 1}`, taskId);
     titleToId.set(`task-${i + 1}`, taskId);
-    if (!createdTasks.some(t => t.id === taskId)) {
-      createdTasks.push({ id: taskId, title: task.title, dependsOn: task.dependsOn });
+    if (!plannedTasks.some(t => t.id === taskId)) {
+      plannedTasks.push({ id: taskId, title: task.title, dependsOn: task.dependsOn });
     }
   }
 
-  for (const task of createdTasks) {
+  for (const task of plannedTasks) {
     if (task.dependsOn.length > 0) {
       const resolvedDeps: string[] = [];
       for (const dep of task.dependsOn) {
@@ -498,11 +500,11 @@ export async function execute(
 
   }
 
-  pruneTransitiveDeps(cwd, createdTasks.map(t => t.id));
+  pruneTransitiveDeps(cwd, plannedTasks.map(t => t.id));
 
   store.setPlanSpec(cwd, lastPlannerOutput);
 
-  const taskList = createdTasks.map(t => {
+  const taskList = plannedTasks.map(t => {
     const task = store.getTask(cwd, t.id);
     const deps = task?.depends_on.length ? ` → deps: ${task.depends_on.join(", ")}` : "";
     const markers = task ? taskMetadataMarkers(task) : "";
@@ -552,7 +554,7 @@ export async function execute(
 
   const text = `✅ Plan created from ${successLabel}
 
-${planningBlock}**Tasks created:** ${createdTasks.length}
+${planningBlock}**Tasks ready:** ${plannedTasks.length}
 ${warningBlock}
 
 ${taskList}
@@ -561,11 +563,11 @@ ${nextSteps}`;
 
   finishPlanningRun(cwd, "completed", passesCompleted);
   reportProgress();
-  logFeedEvent(cwd, agentName, "plan.done", prdPath, `${createdTasks.length} tasks created`);
+  logFeedEvent(cwd, agentName, "plan.done", prdPath, `${plannedTasks.length} tasks ready`);
   if (warningLine) {
-    notify(ctx, `Plan created with ${createdTasks.length} tasks (${warningLine})`, "warning");
+    notify(ctx, `Plan ready with ${plannedTasks.length} tasks (${warningLine})`, "warning");
   } else {
-    notify(ctx, `Plan created with ${createdTasks.length} tasks.`, "info");
+    notify(ctx, `Plan ready with ${plannedTasks.length} tasks.`, "info");
   }
 
   if (shouldAutoWork) {
@@ -576,7 +578,8 @@ ${nextSteps}`;
     mode: "plan",
     prd: prdPath,
     plannerAgent: PLANNER_AGENT,
-    tasksCreated: createdTasks.map(t => ({ id: t.id, title: t.title }))
+    tasksCreated: plannedTasks.map(t => ({ id: t.id, title: t.title })),
+    newTaskCount,
   });
 }
 

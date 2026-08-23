@@ -46,7 +46,7 @@ describe("auto-review skips blocked/duplicate tasks", () => {
     vi.mocked(reviewHandler.reviewImplementation).mockResolvedValue({
       content: [{ type: "text", text: "Review" }],
       details: { verdict: "SHIP" },
-    } as never);
+    } as Awaited<ReturnType<typeof reviewHandler.reviewImplementation>>);
   });
 
   afterEach(() => {
@@ -120,6 +120,7 @@ describe("auto-review skips blocked/duplicate tasks", () => {
 
     expect(reviewHandler.reviewImplementation).not.toHaveBeenCalled();
     const updated = store.getTask(cwd, task.id)!;
+    expect(updated.status).toBe("blocked");
     expect(updated.review_count ?? 0).toBe(0);
   });
 

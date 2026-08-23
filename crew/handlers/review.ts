@@ -91,12 +91,11 @@ export async function reviewImplementation(cwd: string, taskId: string, modelOve
     });
   }
 
-  // Prefer the task's own branch (works across linked worktrees since
-  // branches are repo-wide refs); fall back to the main checkout HEAD.
   const taskBranch = getTaskBranch(taskId, cwd);
-  const diff = getGitDiff(baseCommit, cwd, taskBranch ?? undefined);
+  const diffResult = getGitDiff(baseCommit, cwd, taskBranch ?? undefined);
+  const diff = diffResult.text;
   const commitLog = getCommitLog(baseCommit, cwd, taskBranch ?? undefined);
-  const diffError = taskBranch && !hasDiffContent(diff)
+  const diffError = taskBranch && diffResult.status === "empty"
     ? `**ERROR:** Task branch \`${taskBranch}\` exists but has no changes relative to base ${baseCommit.slice(0, 12)}. The implementation appears to be missing from the branch.`
     : null;
 
@@ -299,38 +298,36 @@ function getTaskBranch(taskId: string, cwd: string): string | null {
   }
 }
 
-function getGitDiff(baseCommit: string, cwd: string, ref?: string): string {
-  // Three-dot merge-base diff against the task branch; two-dot vs HEAD fallback.
+type GitDiffResult =
+  | { status: "content"; text: string }
+  | { status: "empty"; text: "*No changes*" }
+  | { status: "error"; text: string };
+
+function getGitDiff(baseCommit: string, cwd: string, ref?: string): GitDiffResult {
   const range = ref ? `${baseCommit}...${ref}` : `${baseCommit}..HEAD`;
   try {
     const diff = execSync(
       `git diff ${range}`,
-      { cwd, encoding: "utf-8", maxBuffer: 5 * 1024 * 1024 }
+      { cwd, encoding: "utf-8", maxBuffer: 5 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }
     );
-    // Truncate very long diffs
     if (diff.length > 50000) {
-      return diff.slice(0, 50000) + "\n\n[Diff truncated - too large]";
+      return { status: "content", text: diff.slice(0, 50000) + "\n\n[Diff truncated - too large]" };
     }
-    return diff || "*No changes*";
+    return diff ? { status: "content", text: diff } : { status: "empty", text: "*No changes*" };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    return `*Failed to get diff: ${message}*`;
+    return { status: "error", text: `*Failed to get diff: ${message}*` };
   }
 }
 
 function getCommitLog(baseCommit: string, cwd: string, ref?: string): string {
-  // Same base resolution as the diff so commits match the diffed range.
   const range = ref ? `${baseCommit}..${ref}` : `${baseCommit}..HEAD`;
   try {
     return execSync(
       `git log ${range} --oneline --no-decorate`,
-      { cwd, encoding: "utf-8" }
+      { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
     ).trim() || "*No commits*";
   } catch {
     return "*No commits*";
   }
-}
-
-function hasDiffContent(diff: string): boolean {
-  return diff !== "*No changes*" && !diff.startsWith("*");
 }

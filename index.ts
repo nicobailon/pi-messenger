@@ -41,6 +41,7 @@ import {
   type AgentMailMessage,
   MAX_CHAT_HISTORY,
   formatRelativeTime,
+  normalizeAgentMailMessage,
   stripAnsiCodes,
   extractFolder,
   generateAutoStatus,
@@ -608,26 +609,21 @@ Usage (action-based API - preferred):
   // ===========================================================================
 
   pi.registerMessageRenderer<AgentMailMessage>("agent_message", (message, _options, theme) => {
-    const details = message.details as AgentMailMessage & { message?: unknown; ts?: unknown };
-    if (!details) return undefined;
+    if (!message.details) return undefined;
+    const details = normalizeAgentMailMessage(message.details, {
+      id: "",
+      from: "",
+      to: "",
+      timestamp: "",
+    });
 
     return {
       render(width: number): string[] {
-        const text = typeof details.text === "string"
-          ? details.text
-          : typeof details.message === "string"
-            ? details.message
-            : "";
-        const timestamp = typeof details.timestamp === "string"
-          ? details.timestamp
-          : typeof details.ts === "string"
-            ? details.ts
-            : "";
-        const safeFrom = stripAnsiCodes(typeof details.from === "string" ? details.from : "");
-        const safeText = stripAnsiCodes(text);
-        
+        const safeFrom = stripAnsiCodes(details.from);
+        const safeText = stripAnsiCodes(details.text);
+
         const header = theme.fg("accent", `From ${safeFrom}`);
-        const time = theme.fg("dim", ` (${formatRelativeTime(timestamp)})`);
+        const time = details.timestamp ? theme.fg("dim", ` (${formatRelativeTime(details.timestamp)})`) : "";
 
         const result: string[] = [];
         result.push(truncateToWidth(header + time, width));

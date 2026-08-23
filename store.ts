@@ -22,6 +22,7 @@ import {
   type NameThemeConfig,
   MAX_WATCHER_RETRIES,
   isProcessAlive,
+  normalizeAgentMailMessage,
   generateMemorableName,
   isValidAgentName,
   pathMatchesReservation,
@@ -947,22 +948,6 @@ export function getMyInbox(state: MessengerState, dirs: Dirs): string {
   return join(dirs.inbox, state.agentName);
 }
 
-type PendingMailJson = Partial<AgentMailMessage> & {
-  message?: unknown;
-  ts?: unknown;
-};
-
-function normalizePendingMailMessage(parsed: unknown): AgentMailMessage {
-  const msg = parsed as PendingMailJson;
-  if (typeof msg.text !== "string" && typeof msg.message === "string") {
-    msg.text = msg.message;
-  }
-  if (typeof msg.timestamp !== "string" && typeof msg.ts === "string") {
-    msg.timestamp = msg.ts;
-  }
-  return msg as AgentMailMessage;
-}
-
 export function processAllPendingMessages(
   state: MessengerState,
   dirs: Dirs,
@@ -993,7 +978,12 @@ export function processAllPendingMessages(
       const msgPath = join(inbox, file);
       try {
         const content = fs.readFileSync(msgPath, "utf-8");
-        const msg = normalizePendingMailMessage(JSON.parse(content));
+        const msg = normalizeAgentMailMessage(JSON.parse(content), {
+          id: file.endsWith(".json") ? file.slice(0, -5) : file,
+          from: "unknown",
+          to: state.agentName,
+          timestamp: new Date().toISOString(),
+        });
         deliverFn(msg);
         fs.unlinkSync(msgPath);
       } catch {

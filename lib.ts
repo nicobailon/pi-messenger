@@ -52,6 +52,39 @@ export interface AgentMailMessage {
   replyTo: string | null;
 }
 
+interface AgentMailMessageInput {
+  id?: unknown;
+  from?: unknown;
+  to?: unknown;
+  text?: unknown;
+  message?: unknown;
+  timestamp?: unknown;
+  ts?: unknown;
+  replyTo?: unknown;
+}
+
+function stringField(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+export function normalizeAgentMailMessage(
+  input: unknown,
+  defaults: { id: string; from: string; to: string; timestamp: string },
+): AgentMailMessage {
+  const raw = input && typeof input === "object" && !Array.isArray(input)
+    ? input as AgentMailMessageInput
+    : {};
+
+  return {
+    id: stringField(raw.id, defaults.id),
+    from: stringField(raw.from, defaults.from),
+    to: stringField(raw.to, defaults.to),
+    text: stringField(raw.text, stringField(raw.message, "")),
+    timestamp: stringField(raw.timestamp, stringField(raw.ts, defaults.timestamp)),
+    replyTo: typeof raw.replyTo === "string" ? raw.replyTo : null,
+  };
+}
+
 export interface ReservationConflict {
   path: string;
   agent: string;

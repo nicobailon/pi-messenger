@@ -149,7 +149,7 @@ describe("store.getActiveAgents cwd scoping", () => {
 });
 
 describe("store.processAllPendingMessages", () => {
-  it("normalizes legacy message and ts fields before delivery", () => {
+  it("normalizes message and ts fields before delivery", () => {
     const root = createTempRoot();
     const dirs = createDirs(root);
     const inbox = path.join(dirs.inbox, "Self");
@@ -160,7 +160,7 @@ describe("store.processAllPendingMessages", () => {
       to: "Self",
       message: "Historical body",
       ts: timestamp,
-      replyTo: null,
+      replyTo: 123,
     }));
 
     const delivered: Array<{ text: string; timestamp: string }> = [];
@@ -172,7 +172,14 @@ describe("store.processAllPendingMessages", () => {
     );
 
     expect(delivered).toEqual([
-      expect.objectContaining({ text: "Historical body", timestamp }),
+      {
+        id: "1",
+        from: "Peer",
+        to: "Self",
+        text: "Historical body",
+        timestamp,
+        replyTo: null,
+      },
     ]);
     expect(fs.readdirSync(inbox)).toEqual([]);
   });

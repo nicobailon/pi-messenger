@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
 import { createTempCrewDirs } from "../helpers/temp-dirs.ts";
+import { createMockContext } from "../helpers/mock-context.ts";
 
 vi.mock("../../crew/agents.ts", () => ({
   spawnAgents: vi.fn(),
@@ -14,7 +14,7 @@ describe("plan duplicate-run guard", () => {
   let store: typeof import("../../crew/store.ts");
   let state: typeof import("../../crew/state.ts");
   let tmpDir: string;
-  let mockCtx: any;
+  let mockCtx: ReturnType<typeof createMockContext>;
 
   const plannerOutput = `## 1. PRD Understanding Summary\nSummary\n## 2. Relevant Code/Docs/Resources Reviewed\nResources\n## 3. Sequential Implementation Steps\nSteps\n## 4. Parallelized Task Graph\nGraph\n\`\`\`tasks-json\n[{"title":"Task A","description":"Do A","dependsOn":[]}]\n\`\`\``;
 
@@ -49,7 +49,7 @@ describe("plan duplicate-run guard", () => {
     fs.mkdirSync(path.join(tmpDir, "docs"), { recursive: true });
     fs.writeFileSync(path.join(tmpDir, "docs", "PRD.md"), "# PRD\nBuild something");
 
-    mockCtx = { cwd: tmpDir, hasUI: false, ui: {} };
+    mockCtx = createMockContext(tmpDir);
 
     spawnAgents.mockResolvedValue([{
       exitCode: 0,
@@ -77,10 +77,7 @@ describe("plan duplicate-run guard", () => {
   });
 
   it("clears a stale persisted run (dead pid) and plans normally", async () => {
-    const dead = spawn("true");
-    await new Promise<void>(resolve => dead.on("exit", () => resolve()));
-    expect(dead.pid).toBeGreaterThan(0);
-    writePersistedPlanningState(dead.pid!);
+    writePersistedPlanningState(2147483647);
 
     const r = await planHandler.execute({ action: "plan" }, mockCtx, "agent");
 
@@ -96,7 +93,7 @@ describe("plan idempotent task creation", () => {
   let store: typeof import("../../crew/store.ts");
   let state: typeof import("../../crew/state.ts");
   let tmpDir: string;
-  let mockCtx: any;
+  let mockCtx: ReturnType<typeof createMockContext>;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -111,7 +108,7 @@ describe("plan idempotent task creation", () => {
     fs.mkdirSync(path.join(tmpDir, "docs"), { recursive: true });
     fs.writeFileSync(path.join(tmpDir, "docs", "PRD.md"), "# PRD\nBuild something");
 
-    mockCtx = { cwd: tmpDir, hasUI: false, ui: {} };
+    mockCtx = createMockContext(tmpDir);
   });
 
   afterEach(() => {

@@ -92,10 +92,8 @@ describe("reviewImplementation diff source", () => {
   it("diffs the task branch (three-dot), not main checkout HEAD", async () => {
     const { cwd, taskId } = await createReviewedTask();
 
-    // Work on the task branch only
     git(`checkout -qb task/${taskId}`, cwd);
     commitFile(cwd, "src/feature.ts", "export const marker = 'task-work';\n", "feat: task work");
-    // Main checkout HEAD moves past base with unrelated post-merge drift
     git("checkout -q main", cwd);
     commitFile(cwd, "src/unrelated.ts", "export const unrelated = true;\n", "chore: other work");
 
@@ -103,7 +101,6 @@ describe("reviewImplementation diff source", () => {
 
     expect(prompt).toContain("task-work");
     expect(prompt).toContain("feat: task work");
-    // Must not leak unrelated commits made on the main checkout
     expect(prompt).not.toContain("unrelated = true");
     expect(prompt).not.toContain("chore: other work");
   });
@@ -111,7 +108,6 @@ describe("reviewImplementation diff source", () => {
   it("diffs a task branch that lives in a linked worktree", async () => {
     const { cwd, taskId } = await createReviewedTask();
 
-    // Branch checked out in a linked worktree; main checkout stays on main
     const wtPath = cwd + "-wt";
     git(`worktree add -q -b task/${taskId} ${wtPath}`, cwd);
     commitFile(wtPath, "src/wt-feature.ts", "export const wtMarker = 'worktree-work';\n", "feat: worktree work");
@@ -122,14 +118,13 @@ describe("reviewImplementation diff source", () => {
       expect(prompt).toContain("worktree-work");
       expect(prompt).toContain("feat: worktree work");
     } finally {
-      try { fs.rmSync(wtPath, { recursive: true, force: true }); } catch {}
+      fs.rmSync(wtPath, { recursive: true, force: true });
     }
   });
 
   it("surfaces an error in the prompt when the task branch has an empty diff", async () => {
     const { cwd, taskId } = await createReviewedTask();
 
-    // Branch exists but has no commits beyond base
     git(`branch task/${taskId}`, cwd);
 
     const prompt = await runReview(cwd, taskId);
@@ -139,10 +134,21 @@ describe("reviewImplementation diff source", () => {
     expect(prompt).not.toContain("*No changes*");
   });
 
+  it("keeps git diff failures distinct from empty task branches", async () => {
+    const { cwd, taskId } = await createReviewedTask();
+    const store = await import("../../crew/store.ts");
+    git(`branch task/${taskId}`, cwd);
+    store.updateTask(cwd, taskId, { base_commit: "missing-base" });
+
+    const prompt = await runReview(cwd, taskId);
+
+    expect(prompt).toContain("*Failed to get diff:");
+    expect(prompt).not.toContain("exists but has no changes");
+  });
+
   it("falls back to base..HEAD when no task branch exists", async () => {
     const { cwd, taskId } = await createReviewedTask();
 
-    // Work committed directly on HEAD, no task branch created
     commitFile(cwd, "src/head-only.ts", "export const headOnly = true;\n", "feat: head work");
 
     const prompt = await runReview(cwd, taskId);

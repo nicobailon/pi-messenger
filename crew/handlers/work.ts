@@ -266,8 +266,10 @@ export async function execute(
         if (!task || !task.base_commit) continue;
         if ((task.review_count ?? 0) >= config.review.maxIterations) continue;
 
-        // Skip tasks blocked after their worker exited 0 (e.g. duplicates)
         if (task.status === "blocked" || /duplicate/i.test(task.blocked_reason ?? "")) {
+          if (task.status !== "blocked") {
+            store.blockTask(cwd, taskId, task.blocked_reason ?? "Duplicate task");
+          }
           succeeded.splice(succeeded.indexOf(taskId), 1);
           blocked.push(taskId);
           logFeedEvent(cwd, "crew", "task.review", taskId,

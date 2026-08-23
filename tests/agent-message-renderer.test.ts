@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 vi.mock("@earendil-works/pi-tui", () => ({
   matchesKey: () => false,
@@ -18,13 +19,13 @@ function createMockPi() {
 }
 
 describe("agent message renderer", () => {
-  it("renders persisted legacy message and ts details without crashing", async () => {
+  it("renders persisted message and ts details without crashing", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-23T12:01:00.000Z"));
     try {
       const pi = createMockPi();
       const { default: piMessengerExtension } = await import("../index.ts");
-      piMessengerExtension(pi as any);
+      piMessengerExtension(pi as unknown as ExtensionAPI);
 
       const rendererFactory = pi.registerMessageRenderer.mock.calls.find(
         ([customType]) => customType === "agent_message",
