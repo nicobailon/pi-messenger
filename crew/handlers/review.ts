@@ -285,7 +285,7 @@ ${verdict.verdict === "SHIP" ? "✅ Plan is ready for execution!" : verdict.verd
 
 // Resolve the task's branch (task/<id>), if it exists. Branches are shared
 // refs, so this covers branches checked out in linked worktrees as well.
-export function getTaskBranch(taskId: string, cwd: string): string | null {
+function getTaskBranch(taskId: string, cwd: string): string | null {
   try {
     execSync(`git rev-parse --verify refs/heads/task/${taskId}`, {
       cwd,
