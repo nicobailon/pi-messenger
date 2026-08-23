@@ -608,16 +608,26 @@ Usage (action-based API - preferred):
   // ===========================================================================
 
   pi.registerMessageRenderer<AgentMailMessage>("agent_message", (message, _options, theme) => {
-    const details = message.details;
+    const details = message.details as AgentMailMessage & { message?: unknown; ts?: unknown };
     if (!details) return undefined;
 
     return {
       render(width: number): string[] {
-        const safeFrom = stripAnsiCodes(details.from);
-        const safeText = stripAnsiCodes(details.text);
+        const text = typeof details.text === "string"
+          ? details.text
+          : typeof details.message === "string"
+            ? details.message
+            : "";
+        const timestamp = typeof details.timestamp === "string"
+          ? details.timestamp
+          : typeof details.ts === "string"
+            ? details.ts
+            : "";
+        const safeFrom = stripAnsiCodes(typeof details.from === "string" ? details.from : "");
+        const safeText = stripAnsiCodes(text);
         
         const header = theme.fg("accent", `From ${safeFrom}`);
-        const time = theme.fg("dim", ` (${formatRelativeTime(details.timestamp)})`);
+        const time = theme.fg("dim", ` (${formatRelativeTime(timestamp)})`);
 
         const result: string[] = [];
         result.push(truncateToWidth(header + time, width));

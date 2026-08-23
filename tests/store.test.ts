@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentRegistration, Dirs, MessengerState } from "../lib.ts";
-import { getActiveAgents, invalidateAgentsCache, register } from "../store.ts";
+import { getActiveAgents, invalidateAgentsCache, processAllPendingMessages, register } from "../store.ts";
 
 const roots = new Set<string>();
 const initialCwd = process.cwd();
@@ -145,5 +145,35 @@ describe("store.getActiveAgents cwd scoping", () => {
     const registration = JSON.parse(fs.readFileSync(path.join(dirs.registry, "Self.json"), "utf-8")) as AgentRegistration;
     expect(registration.cwd).toBe(expectedCwd);
     expect(state.cwd).toBe(expectedCwd);
+  });
+});
+
+describe("store.processAllPendingMessages", () => {
+  it("normalizes legacy message and ts fields before delivery", () => {
+    const root = createTempRoot();
+    const dirs = createDirs(root);
+    const inbox = path.join(dirs.inbox, "Self");
+    fs.mkdirSync(inbox, { recursive: true });
+    const timestamp = "2026-08-23T12:00:00.000Z";
+    fs.writeFileSync(path.join(inbox, "1.json"), JSON.stringify({
+      from: "Peer",
+      to: "Self",
+      message: "Historical body",
+      ts: timestamp,
+      replyTo: null,
+    }));
+
+    const delivered: Array<{ text: string; timestamp: string }> = [];
+
+    processAllPendingMessages(
+      { agentName: "Self", registered: true } as MessengerState,
+      dirs,
+      msg => delivered.push(msg),
+    );
+
+    expect(delivered).toEqual([
+      expect.objectContaining({ text: "Historical body", timestamp }),
+    ]);
+    expect(fs.readdirSync(inbox)).toEqual([]);
   });
 });

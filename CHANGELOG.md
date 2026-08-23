@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Render malformed persisted agent messages that use legacy `message`/`ts` fields and normalize inbound mail using those fields, fixing #29. Thanks to [@rioxiaoliliang](https://github.com/rioxiaoliliang).
+
 ## [0.15.0] - 2026-07-30
 
 ### Added
