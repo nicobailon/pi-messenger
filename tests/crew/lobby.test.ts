@@ -110,7 +110,7 @@ describe("lobby workers", () => {
       name: "crew-worker",
       description: "worker",
       systemPrompt: "# Crew Worker\nYou implement tasks.",
-      tools: ["read", "custom-tool.js"],
+      tools: ["read", "pi_messenger", "custom-tool.js"],
       source: "extension",
       filePath: "/ext/crew-worker.md",
       crewRole: "worker",
@@ -120,8 +120,11 @@ describe("lobby workers", () => {
 
     const { spawn } = await import("node:child_process");
     const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    const toolsIdx = args.indexOf("--tools");
     const extensionIdx = args.indexOf("--extension");
 
+    expect(toolsIdx).toBeGreaterThan(-1);
+    expect(args[toolsIdx + 1]).toBe("read,pi_messenger");
     expect(extensionIdx).toBeGreaterThan(-1);
     expect(args[extensionIdx + 1]).toBe("custom-tool.js");
   });

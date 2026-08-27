@@ -136,7 +136,7 @@ describe("crew/model override", () => {
   });
 
   it("spawnAgents treats bare .js tool entries as extension paths", async () => {
-    writeWorkerAgent(dirs.cwd, undefined, ["read", "custom-tool.js"]);
+    writeWorkerAgent(dirs.cwd, undefined, ["read", "pi_messenger", "custom-tool.js"]);
 
     await spawnAgents([{
       agent: "crew-worker",
@@ -145,8 +145,11 @@ describe("crew/model override", () => {
     }], dirs.cwd);
 
     const args = spawnMock.mock.calls[0][1] as string[];
+    const toolsIdx = args.indexOf("--tools");
     const extensionIdx = args.indexOf("--extension");
 
+    expect(toolsIdx).toBeGreaterThan(-1);
+    expect(args[toolsIdx + 1]).toBe("read,pi_messenger");
     expect(extensionIdx).toBeGreaterThan(-1);
     expect(args[extensionIdx + 1]).toBe("custom-tool.js");
   });

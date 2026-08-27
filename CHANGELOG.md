@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Preserve extension-provided Crew worker tools such as `pi_messenger` in subprocess allow-lists, fixing #34. Thanks to [@limars874](https://github.com/limars874) for #34.
+
 ## [0.15.1] - 2026-08-23
 
 ### Highlights
