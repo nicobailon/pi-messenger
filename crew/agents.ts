@@ -262,6 +262,8 @@ async function runAgent(
       : undefined;
 
     const proc = spawn(getPiCommand(), args, {
+      // Windows: spawning .cmd without shell throws EINVAL (Node post-CVE-2024-27980)
+      ...(process.platform === "win32" ? { shell: true } : {}),
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       ...(env ? { env } : {}),

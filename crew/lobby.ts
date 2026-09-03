@@ -110,6 +110,8 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string, sessionMo
   const env = { ...process.env, ...envOverrides, PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id };
 
   const proc = spawn(getPiCommand(), args, {
+    // Windows: spawning .cmd without shell throws EINVAL (Node post-CVE-2024-27980)
+    ...(process.platform === "win32" ? { shell: true } : {}),
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     env,
