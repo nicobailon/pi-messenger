@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Finish session shutdown cleanup when the host hands over an already-stale context, so lobby workers, the status heartbeat, and the agent registration no longer leak into the next session, fixing #39. Thanks to [@wu546526](https://github.com/wu546526) for #39.
+
 ## [0.15.2] - 2026-08-27
 
 ### Highlights

@@ -156,4 +156,25 @@ describe("status heartbeat", () => {
 
     await expect(sessionStart?.({}, ctx)).rejects.toThrow("status render failed");
   });
+
+  it("unregisters on session_shutdown even when the shutdown context is stale", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cwd-"));
+    tempCwds.push(cwd);
+    fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".pi", "pi-messenger.json"), JSON.stringify({ autoRegister: true }));
+
+    const pi = await loadExtension();
+    await pi.handlers.get("session_start")?.[0]?.({}, createEventContext(cwd, () => false));
+
+    const registryDir = path.join(process.env.PI_MESSENGER_DIR!, "registry");
+    expect(fs.readdirSync(registryDir)).toHaveLength(1);
+
+    const staleError = () => {
+      throw new Error("This extension ctx is stale after session replacement or reload.");
+    };
+    const staleCtx = { get cwd() { return staleError(); }, get hasUI() { return staleError(); }, get ui() { return staleError(); } };
+
+    await expect(pi.handlers.get("session_shutdown")?.[0]?.({}, staleCtx)).resolves.toBeUndefined();
+    expect(fs.readdirSync(registryDir)).toHaveLength(0);
+  });
 });
