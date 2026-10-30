@@ -129,16 +129,22 @@ describe("lobby workers", () => {
     expect(args[extensionIdx + 1]).toBe("custom-tool.js");
   });
 
-  it("uses pi.cmd for lobby subprocesses on Windows", async () => {
+  it("relaunches the host Pi script without a shell for lobby subprocesses on Windows", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    const originalArgv1 = process.argv[1];
     Object.defineProperty(process, "platform", { value: "win32" });
+    process.argv[1] = "C:\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js";
     try {
       lobby.spawnLobbyWorker("/test/cwd");
 
       const { spawn } = await import("node:child_process");
-      expect(vi.mocked(spawn).mock.calls[0][0]).toBe("pi.cmd");
+      const [command, args, options] = vi.mocked(spawn).mock.calls[0] as [string, string[], { shell?: unknown }];
+      expect(command).toBe(process.execPath);
+      expect(args[0]).toBe("C:\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js");
+      expect(options.shell).toBeUndefined();
     } finally {
       if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+      process.argv[1] = originalArgv1;
     }
   });
 
