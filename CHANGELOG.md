@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Render the status line without colors when the host UI has no theme, so headless and web-panel sessions no longer crash on every turn, fixing #38. Thanks to [@wu546526](https://github.com/wu546526) for #38.
 - Start Crew planners, workers, and lobby workers on Windows by relaunching the running Pi directly instead of `pi.cmd`, which Node refuses to spawn without a shell (`spawn EINVAL`), fixing #37. Thanks to [@Cinnamobot](https://github.com/Cinnamobot) for #37.
 
 ## [0.15.2] - 2026-08-27
