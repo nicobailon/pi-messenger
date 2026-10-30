@@ -156,4 +156,20 @@ describe("status heartbeat", () => {
 
     await expect(sessionStart?.({}, ctx)).rejects.toThrow("status render failed");
   });
+
+  it("renders a plain status line when the host UI has no theme", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cwd-"));
+    tempCwds.push(cwd);
+    fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".pi", "pi-messenger.json"), JSON.stringify({ autoRegister: true }));
+
+    const pi = await loadExtension();
+    const ctx = createEventContext(cwd, () => true);
+    ctx.ui.theme = undefined;
+
+    await pi.handlers.get("session_start")?.[0]({}, ctx);
+    await pi.handlers.get("turn_end")?.[0]({ message: { role: "user" } }, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith("messenger", expect.stringMatching(/^msg: \S+ \(0 peers\)/));
+  });
 });

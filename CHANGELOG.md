@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Render the status line without colors when the host UI has no theme, so headless and web-panel sessions no longer crash on every turn, fixing #38. Thanks to [@wu546526](https://github.com/wu546526) for #38.
+
 ## [0.15.2] - 2026-08-27
 
 ### Highlights
