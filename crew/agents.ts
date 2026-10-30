@@ -61,8 +61,27 @@ export function resolveModel(
   return taskModel ?? paramModel ?? roleModel ?? configModel ?? sessionModel ?? agentModel;
 }
 
-export function getPiCommand(): string {
-  return process.platform === "win32" ? "pi.cmd" : "pi";
+interface PiHost {
+  platform: NodeJS.Platform;
+  execPath: string;
+  argv1: string | undefined;
+}
+
+// Windows cannot spawn pi.cmd without a shell (Node EINVAL since CVE-2024-27980), and a
+// shell would re-parse task text and make proc the cmd.exe wrapper instead of the worker.
+// So relaunch the host's own executable directly.
+export function getPiSpawnCommand(
+  args: string[],
+  host: PiHost = { platform: process.platform, execPath: process.execPath, argv1: process.argv[1] },
+): { command: string; args: string[] } {
+  if (host.platform !== "win32") return { command: "pi", args };
+  const isCompiledPi = (host.argv1 !== undefined && /^(?:\/\$bunfs\/|B:[\\/]~BUN[\\/])/.test(host.argv1))
+    || /^pi(?:\.exe)?$/i.test(path.win32.basename(host.execPath));
+  if (isCompiledPi) return { command: host.execPath, args };
+  if (host.argv1 && /\.(?:mjs|cjs|js)$/i.test(host.argv1)) {
+    return { command: host.execPath, args: [host.argv1, ...args] };
+  }
+  throw new Error(`Cannot spawn Pi on Windows: host entry ${host.argv1 ?? "(none)"} is not a Pi executable or JS script`);
 }
 
 export function pushModelArgs(args: string[], model: string): void {
@@ -261,7 +280,8 @@ async function runAgent(
       ? { ...process.env, ...envOverrides, ...workerFlag }
       : undefined;
 
-    const proc = spawn(getPiCommand(), args, {
+    const piCommand = getPiSpawnCommand(args);
+    const proc = spawn(piCommand.command, piCommand.args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       ...(env ? { env } : {}),
