@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveModel, pushModelArgs, spawnAgents } from "../../crew/agents.ts";
+import { resolveModel, pushModelArgs, spawnAgents, getPiSpawnCommand } from "../../crew/agents.ts";
 import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.ts";
 
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -154,9 +154,11 @@ describe("crew/model override", () => {
     expect(args[extensionIdx + 1]).toBe("custom-tool.js");
   });
 
-  it("uses pi.cmd for worker subprocesses on Windows", async () => {
+  it("relaunches the host Pi script without a shell for worker subprocesses on Windows", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    const originalArgv1 = process.argv[1];
     Object.defineProperty(process, "platform", { value: "win32" });
+    process.argv[1] = "C:\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js";
     try {
       writeWorkerAgent(dirs.cwd);
 
@@ -166,10 +168,32 @@ describe("crew/model override", () => {
         taskId: "task-1",
       }], dirs.cwd);
 
-      expect(spawnMock.mock.calls[0][0]).toBe("pi.cmd");
+      const [command, args, options] = spawnMock.mock.calls[0];
+      expect(command).toBe(process.execPath);
+      expect(args[0]).toBe("C:\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js");
+      expect(args.at(-1)).toBe("Implement task");
+      expect(options.shell).toBeUndefined();
     } finally {
       if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+      process.argv[1] = originalArgv1;
     }
+  });
+
+  describe("getPiSpawnCommand", () => {
+    it("spawns pi directly outside Windows", () => {
+      expect(getPiSpawnCommand(["-p", "x"], { platform: "darwin", execPath: "/usr/bin/node", argv1: "/opt/pi/cli.js" }))
+        .toEqual({ command: "pi", args: ["-p", "x"] });
+    });
+
+    it("relaunches a compiled Windows Pi executable directly", () => {
+      expect(getPiSpawnCommand(["-p", "x"], { platform: "win32", execPath: "C:\\Tools\\pi.exe", argv1: "B:\\~BUN\\root\\pi.exe" }))
+        .toEqual({ command: "C:\\Tools\\pi.exe", args: ["-p", "x"] });
+    });
+
+    it("fails on Windows when the host entry is not a Pi executable or script", () => {
+      expect(() => getPiSpawnCommand(["-p"], { platform: "win32", execPath: "C:\\node\\node.exe", argv1: undefined }))
+        .toThrow(/Cannot spawn Pi on Windows/);
+    });
   });
 
   describe("pushModelArgs", () => {
