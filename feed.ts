@@ -46,6 +46,107 @@ export interface FeedEvent {
   preview?: string;
 }
 
+/** Fields appended to the global persistent feed (feed-events.jsonl). */
+export interface PersistentFeedEvent {
+  ts: number;
+  name: string;
+  sessionId: string | null;
+  cwd: string;
+  type: FeedEventType;
+  target: string | null;
+  preview: string | null;
+}
+
+export interface FeedPersistenceContext {
+  /** Messenger base dir (same root as the registry); null disables persistence. */
+  baseDir: string | null;
+  /** Session UUID of this process, when known. */
+  sessionId: string | null;
+  /** Registered agent name of this process, when known. */
+  agentName: string | null;
+}
+
+export const DEFAULT_FEED_EVENTS_MAX_BYTES = 5 * 1024 * 1024;
+
+let persistenceContext: FeedPersistenceContext = { baseDir: null, sessionId: null, agentName: null };
+let feedEventsMaxBytes = DEFAULT_FEED_EVENTS_MAX_BYTES;
+
+/** Called by store.register() once the session's identity is known. */
+export function setFeedPersistenceContext(context: FeedPersistenceContext): void {
+  persistenceContext = context;
+}
+
+/** Test seam to shrink the size cap without writing megabytes. */
+export function setFeedEventsMaxBytes(maxBytes: number): void {
+  feedEventsMaxBytes = Math.max(1, Math.trunc(maxBytes));
+}
+
+function persistentFeedEventsPath(baseDir: string): string {
+  return path.join(baseDir, "feed-events.jsonl");
+}
+
+/**
+ * Resolve the sessionId an event belongs to: the current session for our own
+ * events, otherwise a best-effort lookup in the live registry.
+ */
+function resolveEventSessionId(agent: string): string | null {
+  if (persistenceContext.agentName && agent === persistenceContext.agentName) {
+    return persistenceContext.sessionId;
+  }
+  if (!persistenceContext.baseDir) return null;
+  try {
+    const regPath = path.join(persistenceContext.baseDir, "registry", `${agent}.json`);
+    const reg = JSON.parse(fs.readFileSync(regPath, "utf-8")) as { sessionId?: unknown };
+    if (typeof reg.sessionId === "string") return reg.sessionId;
+  } catch {
+    // Best effort
+  }
+  return null;
+}
+
+/** Keep only the newest half of the lines when the file exceeds the cap. */
+function capPersistentFeedEvents(p: string): void {
+  let size: number;
+  try {
+    size = fs.statSync(p).size;
+  } catch {
+    return;
+  }
+  if (size <= feedEventsMaxBytes) return;
+
+  try {
+    const lines = fs.readFileSync(p, "utf-8").split("\n").filter(l => l.length > 0);
+    const kept = lines.slice(Math.ceil(lines.length / 2));
+    fs.writeFileSync(p, kept.length > 0 ? kept.join("\n") + "\n" : "");
+  } catch {
+    // Best effort
+  }
+}
+
+function appendPersistentFeedEvent(cwd: string, event: FeedEvent): void {
+  const baseDir = persistenceContext.baseDir;
+  if (!baseDir) return;
+
+  const p = persistentFeedEventsPath(baseDir);
+  const feedDir = path.dirname(p);
+  if (!fs.existsSync(feedDir)) {
+    fs.mkdirSync(feedDir, { recursive: true });
+  }
+  capPersistentFeedEvents(p);
+
+  const tsMs = Date.parse(event.ts);
+  const record: PersistentFeedEvent = {
+    ts: Number.isFinite(tsMs) ? tsMs : Date.now(),
+    name: event.agent,
+    sessionId: resolveEventSessionId(event.agent),
+    cwd,
+    type: event.type,
+    target: event.target ?? null,
+    preview: event.preview ?? null,
+  };
+  fs.appendFileSync(p, JSON.stringify(record) + "\n");
+}
+
 function feedPath(cwd: string): string {
   return path.join(cwd, ".pi", "messenger", "feed.jsonl");
 }
@@ -84,6 +185,13 @@ export function appendFeedEvent(cwd: string, event: FeedEvent): void {
     }
     const sanitized = sanitizeFeedEvent(event);
     fs.appendFileSync(p, JSON.stringify(sanitized) + "\n");
+  } catch {
+    // Best effort
+  }
+  // Persistent cross-project feed is fire-and-forget: never let disk failure
+  // break the (existing) project-scoped feed behavior.
+  try {
+    appendPersistentFeedEvent(cwd, sanitizeFeedEvent(event));
   } catch {
     // Best effort
   }

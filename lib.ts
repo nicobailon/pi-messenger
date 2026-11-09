@@ -293,14 +293,34 @@ export interface NameThemeConfig {
 }
 
 // =============================================================================
+// Session-derived name hashing (FNV-1a, no new deps)
+// =============================================================================
+
+function fnv1a(str: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/** First 4 chars of lowercase base36 of the FNV-1a digest of the session id. */
+export function sessionNameSuffix(sessionId: string): string {
+  return fnv1a(sessionId).toString(36).padStart(4, "0").slice(0, 4);
+}
+
+// =============================================================================
 // Pure Utilities
 // =============================================================================
 
-export function generateMemorableName(themeConfig?: NameThemeConfig): string {
+export function generateMemorableName(themeConfig?: NameThemeConfig, sessionId?: string): string {
   const themeName = themeConfig?.theme ?? "default";
 
   if (themeName === "minimal") {
-    return MINIMAL_NAMES[Math.floor(Math.random() * MINIMAL_NAMES.length)];
+    const word = pickWord(MINIMAL_NAMES, sessionId, "word");
+    if (sessionId === undefined) return word;
+    return word + "-" + sessionNameSuffix(sessionId);
   }
 
   let adjectives: string[];
@@ -325,9 +345,20 @@ export function generateMemorableName(themeConfig?: NameThemeConfig): string {
       break;
   }
 
-  const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
-  const noun = nouns[Math.floor(Math.random() * nouns.length)];
-  return adj + noun;
+  const adj = pickWord(adjectives, sessionId, "adj");
+  const noun = pickWord(nouns, sessionId, "noun");
+  const base = adj + noun;
+  if (sessionId === undefined) return base;
+  return base + "-" + sessionNameSuffix(sessionId);
+}
+
+function pickWord(words: string[], sessionId: string | undefined, salt: string): string {
+  if (sessionId === undefined) {
+    return words[Math.floor(Math.random() * words.length)];
+  }
+  // Deterministic per session id so a given session always resolves to the same name.
+  const hash = fnv1a(`${sessionId}:${salt}`);
+  return words[hash % words.length];
 }
 
 export function isProcessAlive(pid: number): boolean {

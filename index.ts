@@ -397,7 +397,7 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "status" })                            → Get status
   pi_messenger({ action: "list" })                              → List agents with presence
   pi_messenger({ action: "feed", limit: 20 })                   → Activity feed
-  pi_messenger({ action: "whois", name: "AgentName" })          → Agent details
+  pi_messenger({ action: "whois", name: "AgentName" })          → Agent details (also accepts a session UUID, resolves ended agents)
   pi_messenger({ action: "set_status", message: "reviewing" })  → Set custom status
   pi_messenger({ action: "reserve", paths: ["src/"] })          → Reserve files
   pi_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message
@@ -477,7 +477,7 @@ Usage (action-based API - preferred):
       cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
       limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
-      name: Type.Optional(Type.String({ description: "Name for rename action or Team setup/profile/charter commands" })),
+      name: Type.Optional(Type.String({ description: "Agent name or session UUID (whois accepts either; ended sessions resolve from the archive), name for rename action or Team setup/profile/charter commands" })),
 
       // ═══════════════════════════════════════════════════════════════════════
       // MESSAGING & COORDINATION PARAMETERS

@@ -2,7 +2,7 @@
  * Pi Messenger - Tool and Command Handlers
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   type MessengerState,
@@ -19,6 +19,7 @@ import {
   computeStatus,
   STATUS_INDICATORS,
   formatDuration,
+  formatRelativeTime,
   buildSelfRegistration,
   agentHasTask,
 } from "./lib.ts";
@@ -928,6 +929,8 @@ export function executeFeed(
   return result(lines.join("\n"), { mode: "feed", events });
 }
 
+const SESSION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export function executeWhois(
   state: MessengerState,
   dirs: Dirs,
@@ -940,6 +943,10 @@ export function executeWhois(
   }
 
   const thresholdMs = (config?.stuckThreshold ?? 900) * 1000;
+
+  if (SESSION_UUID_RE.test(name)) {
+    return executeWhoisBySessionId(state, dirs, cwd, name, thresholdMs);
+  }
 
   const agents = store.getActiveAgents(state, dirs);
   const agent = agents.find(a => a.name === name);
@@ -954,6 +961,64 @@ export function executeWhois(
   }
 
   return formatWhoisOutput(agent, false, dirs, cwd, thresholdMs);
+}
+
+function executeWhoisBySessionId(
+  state: MessengerState,
+  dirs: Dirs,
+  cwd: string,
+  sessionId: string,
+  thresholdMs: number
+) {
+  // Live registry first (includes peers; getActiveAgents excludes self by name).
+  const agent = store.getActiveAgents(state, dirs).find(a => a.sessionId === sessionId);
+  if (agent) {
+    return formatWhoisOutput(agent, agent.name === state.agentName, dirs, cwd, thresholdMs);
+  }
+
+  // Self (own registration file is filtered out of getActiveAgents by name).
+  if (state.agentName) {
+    try {
+      const selfRegPath = store.getRegistrationPath(state, dirs);
+      const self = JSON.parse(readFileSync(selfRegPath, "utf-8")) as AgentRegistration;
+      if (self.sessionId === sessionId) {
+        return executeWhoisSelf(state, dirs, cwd, thresholdMs);
+      }
+    } catch {
+      // Not registered on disk or unreadable
+    }
+  }
+
+  // Then the archive of ended registrations.
+  const archived = store.findArchivedRegistrationBySessionId(dirs, sessionId);
+  if (archived) {
+    return formatEndedWhoisOutput(archived);
+  }
+
+  return result(
+    `Agent "${sessionId}" not found or not active.`,
+    { mode: "whois", error: "not_found", name: sessionId }
+  );
+}
+
+interface ArchivedWhoisRegistration extends AgentRegistration {
+  endedAt: number;
+  status: "ended";
+}
+
+function formatEndedWhoisOutput(agent: ArchivedWhoisRegistration) {
+  const endedIso = new Date(agent.endedAt).toISOString();
+  const lines: string[] = [];
+  lines.push(`# ${agent.name} (ended)`, "");
+  lines.push("⏹ Ended" + (Number.isFinite(agent.endedAt) ? ` ${formatRelativeTime(endedIso)}` : ""));
+  if (agent.cwd) lines.push(`CWD: ${agent.cwd}`);
+  lines.push(`Session ID: ${agent.sessionId}`);
+  if (agent.model) lines.push(`Model: ${agent.model}`);
+  if (agent.gitBranch) lines.push(`Branch: ${agent.gitBranch}`);
+  if (agent.startedAt) lines.push(`Started: ${agent.startedAt}`);
+  lines.push(`Ended: ${endedIso}`);
+
+  return result(lines.join("\n"), { mode: "whois", agent });
 }
 
 function executeWhoisSelf(
