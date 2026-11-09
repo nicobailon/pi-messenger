@@ -4,7 +4,7 @@
 
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -27,6 +27,7 @@ import {
   isValidAgentName,
   pathMatchesReservation,
 } from "./lib.ts";
+import { setFeedPersistenceContext } from "./feed.ts";
 
 // =============================================================================
 // Agents Cache (Fix 1: Reduce disk I/O)
@@ -158,6 +159,92 @@ async function withSwarmLock<T>(baseDir: string, fn: () => T): Promise<T> {
 }
 
 // =============================================================================
+// Registry Archive (ended registrations)
+// =============================================================================
+
+export const ARCHIVE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
+function registryArchiveDir(dirs: Dirs): string {
+  return join(dirs.base, "registry-archive");
+}
+
+interface ArchivedRegistration extends AgentRegistration {
+  endedAt: number;
+  status: "ended";
+}
+
+/**
+ * Move a live registration file into registry-archive, stamping it as ended.
+ * Best effort: on any failure the file is left as-is (previous unlink behavior
+ * only removed dead/stale registrations, so nothing active is ever lost).
+ */
+function archiveRegistrationFile(regPath: string, dirs: Dirs, endedAt: number = Date.now()): void {
+  try {
+    const name = basename(regPath, ".json");
+    const archiveDir = registryArchiveDir(dirs);
+    ensureDirSync(archiveDir);
+    const archived: ArchivedRegistration = {
+      ...(JSON.parse(fs.readFileSync(regPath, "utf-8")) as AgentRegistration),
+      endedAt,
+      status: "ended",
+    };
+    fs.writeFileSync(join(archiveDir, `${name}.json`), JSON.stringify(archived, null, 2));
+    fs.unlinkSync(regPath);
+  } catch {
+    // Best effort
+  }
+}
+
+/** Delete archived registrations older than the 14-day retention window. */
+export function sweepRegistryArchive(dirs: Dirs, nowMs: number = Date.now()): void {
+  const archiveDir = registryArchiveDir(dirs);
+  let files: string[];
+  try {
+    files = fs.readdirSync(archiveDir);
+  } catch {
+    return;
+  }
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    const filePath = join(archiveDir, file);
+    try {
+      const archived = JSON.parse(fs.readFileSync(filePath, "utf-8")) as Partial<ArchivedRegistration>;
+      const endedAt = typeof archived.endedAt === "number" ? archived.endedAt : NaN;
+      if (!Number.isFinite(endedAt) || nowMs - endedAt > ARCHIVE_RETENTION_MS) {
+        fs.unlinkSync(filePath);
+      }
+    } catch {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // Best effort
+      }
+    }
+  }
+}
+
+/** Find an archived registration by session UUID (live sessions are not archived). */
+export function findArchivedRegistrationBySessionId(dirs: Dirs, sessionId: string): ArchivedRegistration | null {
+  const archiveDir = registryArchiveDir(dirs);
+  let files: string[];
+  try {
+    files = fs.readdirSync(archiveDir);
+  } catch {
+    return null;
+  }
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const archived = JSON.parse(fs.readFileSync(join(archiveDir, file), "utf-8")) as ArchivedRegistration;
+      if (archived.sessionId === sessionId) return archived;
+    } catch {
+      // Ignore malformed archive entries
+    }
+  }
+  return null;
+}
+
+// =============================================================================
 // Registry Operations
 // =============================================================================
 
@@ -208,6 +295,8 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
     return allAgents;
   }
 
+  sweepRegistryArchive(dirs, now);
+
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
 
@@ -216,11 +305,7 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
       const reg: AgentRegistration = JSON.parse(content);
 
       if (!isProcessAlive(reg.pid)) {
-        try {
-          fs.unlinkSync(join(dirs.registry, file));
-        } catch {
-          // Ignore cleanup errors
-        }
+        archiveRegistrationFile(join(dirs.registry, file), dirs);
         continue;
       }
 
@@ -289,7 +374,8 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
   ensureDirSync(dirs.registry);
 
   if (!state.agentName) {
-    state.agentName = generateMemorableName(nameTheme);
+    const sessionId = ctx.sessionManager.getSessionId();
+    state.agentName = generateMemorableName(nameTheme, sessionId);
   }
 
   const isExplicitName = !!process.env.PI_AGENT_NAME;
@@ -382,6 +468,11 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
       state.cwd = cwd;
       state.gitBranch = gitBranch;
       state.activity.lastActivityAt = now;
+      setFeedPersistenceContext({
+        baseDir: dirs.base,
+        sessionId: ctx.sessionManager.getSessionId(),
+        agentName: state.agentName,
+      });
       invalidateAgentsCache();
       return true;
     }
@@ -470,7 +561,7 @@ export function unregister(state: MessengerState, dirs: Dirs): void {
 
   const regPath = getRegistrationPath(state, dirs);
   try {
-    fs.unlinkSync(regPath);
+    archiveRegistrationFile(regPath, dirs);
   } catch (error) {
     if (fs.existsSync(regPath)) {
       throw error;
