@@ -7,7 +7,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { MessengerState } from "../../lib.ts";
-import type { CrewParams, Task, TaskEvidence } from "../types.ts";
+import type { CrewParams, Plan, Task, TaskEvidence } from "../types.ts";
 import { result } from "../utils/result.ts";
 import { loadCrewConfig } from "../utils/config.ts";
 import * as store from "../store.ts";
@@ -371,12 +371,45 @@ function taskProgress(cwd: string, params: CrewParams, state: MessengerState) {
 // task.list
 // =============================================================================
 
+// Days after which a fully-completed wave is considered stale (no active work).
+const STALE_WAVE_DAYS = 14;
+const SPECS_REF_RE = /specs\/(\d{8}-\d{6})-([a-z0-9-]+)/;
+
+function isoDay(ts: string): string {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+function daysSince(ts: string): number {
+  return Math.floor((Date.now() - new Date(ts).getTime()) / 86_400_000);
+}
+
+// specs/ reference embedded in the plan's prd path or prompt, e.g. specs/20261013-124607-nessus-upload-into-execution/
+function planSpecRef(plan: Plan): string | null {
+  const match = SPECS_REF_RE.exec(`${plan.prd} ${plan.prompt ?? ""}`);
+  return match ? `${match[0]}/` : null;
+}
+
+function waveAgeLine(plan: Plan): string {
+  return `Wave: created ${isoDay(plan.created_at)}, updated ${isoDay(plan.updated_at)} (${daysSince(plan.updated_at)}d old)`;
+}
+
+function staleWaveLine(plan: Plan): string {
+  return `⚠ STALE WAVE — completed ${isoDay(plan.updated_at)} (${daysSince(plan.updated_at)}d ago). No active crew wave. Authority for current work: the spec's tasks.md (e.g. specs/<id>/<slug>/tasks.md) and GitLab issues — task.list does not track them.`;
+}
+
+function isStaleWave(plan: Plan): boolean {
+  return plan.task_count > 0
+    && plan.completed_count === plan.task_count
+    && daysSince(plan.updated_at) > STALE_WAVE_DAYS;
+}
+
 function taskList(cwd: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
-    return result("No plan found. Create one with: pi_messenger({ action: \"plan\" })", { 
-      mode: "task.list", tasks: [], hasPlan: false 
-    });
+    return result(
+      `No plan found. Create one with: pi_messenger({ action: "plan" })\nAuthority for current work: spec tasks.md / GitLab issues — no crew wave exists.`,
+      { mode: "task.list", tasks: [], hasPlan: false },
+    );
   }
 
   const tasks = store.getTasks(cwd);
@@ -388,7 +421,16 @@ function taskList(cwd: string) {
     });
   }
 
-  const lines: string[] = [`# Tasks for ${store.getPlanLabel(plan)}\n`];
+  const lines: string[] = [];
+  if (isStaleWave(plan)) {
+    lines.push(staleWaveLine(plan), "");
+  }
+
+  lines.push(`# Tasks for ${store.getPlanLabel(plan)}\n`);
+  lines.push(waveAgeLine(plan));
+  const specRef = planSpecRef(plan);
+  if (specRef) lines.push(`Spec: ${specRef}`);
+  lines.push("");
   
   for (const task of tasks) {
     const icon = { todo: "⬜", in_progress: "🔄", done: "✅", blocked: "🚫" }[task.status];
